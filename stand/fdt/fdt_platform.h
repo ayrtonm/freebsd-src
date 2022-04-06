@@ -36,6 +36,7 @@ struct fdt_mem_region {
 
 #define	TMP_MAX_ETH	8
 
+struct fdt_header *fdt_get(void);
 int fdt_copy(vm_offset_t);
 void fdt_fixup_cpubusfreqs(unsigned long, unsigned long);
 void fdt_fixup_ethernet(const char *, char *, int);
