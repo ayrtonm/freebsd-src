@@ -26,6 +26,7 @@ SRCS=	autoload.c \
 	conf.c \
 	copy.c \
 	decompress.c \
+	elffs.c \
 	efi_main.c \
 	framebuffer.c \
 	main.c \
@@ -87,6 +88,7 @@ CFLAGS+=	-DEFI
 .include	"${BOOTSRC}/fdt.mk"
 LIBEFI_FDT=	${BOOTOBJ}/efi/fdt/libefi_fdt.a
 HELP_FILES+=	${FDTSRC}/help.fdt
+SRCS+=		memdev.c
 .endif
 
 # Include bcache code.
