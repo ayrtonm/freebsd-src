@@ -253,6 +253,13 @@ cli["disable-device"] = function(...)
 	end
 end
 
+cli["bootm1"] = function()
+	loader.perform("set rootdev=disk0p3:")
+	loader.perform("set currdev=md0:")
+	loader.perform("load /boot/kernel/kernel")
+	loader.perform("boot")
+end
+
 -- Used for splitting cli varargs into cmd_name and the rest of argv
 function cli.arguments(...)
 	local argv = {...}

@@ -36,6 +36,11 @@ extern struct devsw vdisk_dev;
 extern struct devsw md_dev;
 #endif
 
+#ifdef LOADER_FDT_SUPPORT
+extern struct devsw memdisk_dev;
+#endif
+extern struct fs_ops elffs_fsops;
+
 struct devsw *devsw[] = {
 	&efipart_fddev,
 	&efipart_cddev,
@@ -50,6 +55,9 @@ struct devsw *devsw[] = {
 #endif
 #ifdef MD_IMAGE_SIZE
 	&md_dev,
+#endif
+#ifdef LOADER_FDT_SUPPORT
+	&memdisk_dev,
 #endif
 	NULL
 };
@@ -66,6 +74,7 @@ struct fs_ops *file_system[] = {
 	&nfs_fsops,
 	&gzipfs_fsops,
 	&bzipfs_fsops,
+	&elffs_fsops,
 	NULL
 };
 
