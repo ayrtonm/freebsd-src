@@ -109,6 +109,15 @@ static const struct cmdtab commands[] = {
 
 static char cwd[FDT_CWD_LEN] = "/";
 
+struct fdt_header *
+fdt_get(void)
+{
+
+	if (fdt_is_setup() == 0)
+		fdt_setup_fdtp();
+	return (fdtp);
+}
+
 static vm_offset_t
 fdt_find_static_dtb(void)
 {
