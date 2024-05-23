@@ -103,8 +103,19 @@
 #define	AIC_MAXCPUS		32
 #define	AIC_MAXDIES		4
 
+#define	AIC2_CONFIG		0x0014
+#define	AIC2_CONFIG_ENABLE		(1 << 0)
+#define AIC2_SW_SET(irq)	(0x6000 + (((irq) >> 5) * 4))
+#define AIC2_SW_CLEAR(irq)	(0x6200 + (((irq) >> 5) * 4))
+#define AIC2_MASK_SET(irq)	(0x6400 + (((irq) >> 5) * 4))
+#define AIC2_MASK_CLEAR(irq)	(0x6600 + (((irq) >> 5) * 4))
+
+#define AIC_IRQ_CR_EL1		s3_4_c15_c10_4
+#define AIC_IRQ_CR_EL1_DISABLE	(3 << 0)
+
 static struct ofw_compat_data compat_data[] = {
 	{ "apple,aic",				1 },
+	{ "apple,aic2",				2 },
 	{ NULL,					0 }
 };
 
@@ -138,7 +149,9 @@ struct apple_aic_irqsrc {
 struct apple_aic_softc {
 	device_t		 sc_dev;
 	struct resource		*sc_mem;
+	struct resource		*sc_event;
 	struct apple_aic_irqsrc	*sc_isrcs[AIC_MAXDIES];
+	u_int			sc_version;
 	u_int			sc_nirqs;
 	u_int			sc_ndie;
 #ifdef SMP
@@ -175,11 +188,18 @@ static int
 apple_aic_probe(device_t dev)
 {
 
+	u_int version;
+	struct apple_aic_softc *sc;
+
 	if (!ofw_bus_status_okay(dev))
 		return (ENXIO);
 
-	if (ofw_bus_search_compatible(dev, compat_data)->ocd_data == 0)
+	version = ofw_bus_search_compatible(dev, compat_data)->ocd_data;
+	if (version == 0)
 		return (ENXIO);
+
+	sc = device_get_softc(dev);
+	sc->sc_version = version;
 
 	device_set_desc(dev, "Apple Interrupt Controller");
 	return (BUS_PROBE_DEFAULT);
@@ -194,6 +214,7 @@ apple_aic_attach(device_t dev)
 	intptr_t xref;
 	int error, rid;
 	u_int i, cpu, j, info;
+	uint32_t config;
 
 	sc = device_get_softc(dev);
 	sc->sc_dev = dev;
@@ -204,6 +225,15 @@ apple_aic_attach(device_t dev)
 	if (sc->sc_mem == NULL) {
 		device_printf(dev, "Unable to allocate memory\n");
 		return (ENXIO);
+	}
+	rid = 1;
+	if (sc->sc_version == 2) {
+		sc->sc_event = bus_alloc_resource_any(dev, SYS_RES_MEMORY, &rid,
+			RF_ACTIVE);
+		if (sc->sc_event == NULL) {
+			device_printf(dev, "Unable to allocate second memory block\n");
+			return (ENXIO);
+		}
 	}
 
 	info = bus_read_4(sc->sc_mem, AIC_INFO);
@@ -224,11 +254,13 @@ apple_aic_attach(device_t dev)
 	sc->sc_cpuids = malloc(sizeof(*sc->sc_cpuids) * mp_maxid + 1,
 	    M_DEVBUF, M_WAITOK | M_ZERO);
 
-	cpu = PCPU_GET(cpuid);
-	sc->sc_cpuids[cpu] = bus_read_4(sc->sc_mem, AIC_WHOAMI);
-	if (bootverbose)
-		device_printf(dev, "BSP CPU %d: whoami %x\n", cpu,
-		    sc->sc_cpuids[cpu]);
+	if (sc->sc_version == 1) {
+		cpu = PCPU_GET(cpuid);
+		sc->sc_cpuids[cpu] = bus_read_4(sc->sc_mem, AIC_WHOAMI);
+		if (bootverbose)
+			device_printf(dev, "BSP CPU %d: whoami %x\n", cpu,
+			    sc->sc_cpuids[cpu]);
+	}
 #endif
 
 
@@ -252,6 +284,12 @@ apple_aic_attach(device_t dev)
 				return (error);
 			}
 		}
+	}
+
+	if (sc->sc_version == 2) {
+		config = bus_read_4(sc->sc_mem, AIC2_CONFIG);
+		config |= AIC2_CONFIG_ENABLE;
+		bus_write_4(sc->sc_mem, AIC2_CONFIG, config);
 	}
 
 	xref = OF_xref_from_node(ofw_bus_get_node(dev));
@@ -400,8 +438,10 @@ apple_aic_setup_intr(device_t dev, struct intr_irqsrc *isrc,
 	case AIC_TYPE_IRQ:
 		/* XXX die sensitive? */
 		aic_next_cpu = intr_irq_next_cpu(aic_next_cpu, &all_cpus);
-		bus_write_4(sc->sc_mem, AIC_TARGET_CPU(irq),
-		    1 << sc->sc_cpuids[aic_next_cpu]);
+		if (sc->sc_version == 1) {
+			bus_write_4(sc->sc_mem, AIC_TARGET_CPU(irq),
+			    1 << sc->sc_cpuids[aic_next_cpu]);
+		}
 		break;
 	case AIC_TYPE_FIQ:
 		isrc->isrc_flags |= INTR_ISRCF_PPI;
@@ -432,7 +472,11 @@ apple_aic_enable_intr(device_t dev, struct intr_irqsrc *isrc)
 	switch(ai->ai_type) {
 	case AIC_TYPE_IRQ:
 		sc = device_get_softc(dev);
-		bus_write_4(sc->sc_mem, AIC_MASK_CLEAR(irq), AIC_IRQ_MASK(irq));
+		if (sc->sc_version == 1) {
+			bus_write_4(sc->sc_mem, AIC_MASK_CLEAR(irq), AIC_IRQ_MASK(irq));
+		} else {
+			bus_write_4(sc->sc_mem, AIC2_MASK_CLEAR(irq), AIC_IRQ_MASK(irq));
+		}
 		break;
 	case AIC_TYPE_IPI:
 		/* Nothing needed here. */
@@ -457,7 +501,11 @@ apple_aic_disable_intr(device_t dev, struct intr_irqsrc *isrc)
 	switch(ai->ai_type) {
 	case AIC_TYPE_IRQ:
 		sc = device_get_softc(dev);
-		bus_write_4(sc->sc_mem, AIC_MASK_SET(irq), AIC_IRQ_MASK(irq));
+		if (sc->sc_version == 1) {
+			bus_write_4(sc->sc_mem, AIC_MASK_SET(irq), AIC_IRQ_MASK(irq));
+		} else {
+			bus_write_4(sc->sc_mem, AIC2_MASK_SET(irq), AIC_IRQ_MASK(irq));
+		}
 		break;
 	case AIC_TYPE_IPI:
 		/* Nothing needed here. */
@@ -483,8 +531,13 @@ apple_aic_post_filter(device_t dev, struct intr_irqsrc *isrc)
 	switch(ai->ai_type) {
 	case AIC_TYPE_IRQ:
 		sc = device_get_softc(dev);
-		bus_write_4(sc->sc_mem, AIC_SW_CLEAR(irq), AIC_IRQ_MASK(irq));
-		bus_write_4(sc->sc_mem, AIC_MASK_CLEAR(irq), AIC_IRQ_MASK(irq));
+		if (sc->sc_version == 1) {
+			bus_write_4(sc->sc_mem, AIC_SW_CLEAR(irq), AIC_IRQ_MASK(irq));
+			bus_write_4(sc->sc_mem, AIC_MASK_CLEAR(irq), AIC_IRQ_MASK(irq));
+		} else {
+			bus_write_4(sc->sc_mem, AIC2_SW_CLEAR(irq), AIC_IRQ_MASK(irq));
+			bus_write_4(sc->sc_mem, AIC2_MASK_CLEAR(irq), AIC_IRQ_MASK(irq));
+		}
 #if 0
 		panic("%s: %x\n", __func__, ai->ai_type);
 #endif
@@ -507,7 +560,11 @@ apple_aic_pre_ithread(device_t dev, struct intr_irqsrc *isrc)
 	ai = (struct apple_aic_irqsrc *)isrc;
 	sc = device_get_softc(dev);
 	irq = ai->ai_irq;
-	bus_write_4(sc->sc_mem, AIC_SW_CLEAR(irq), AIC_IRQ_MASK(irq));
+	if (sc->sc_version == 1) {
+		bus_write_4(sc->sc_mem, AIC_SW_CLEAR(irq), AIC_IRQ_MASK(irq));
+	} else {
+		bus_write_4(sc->sc_mem, AIC2_SW_CLEAR(irq), AIC_IRQ_MASK(irq));
+	}
 	//apple_aic_disable_intr(dev, isrc);
 	/* ACK IT */
 }
@@ -523,7 +580,11 @@ apple_aic_post_ithread(device_t dev, struct intr_irqsrc *isrc)
 	sc = device_get_softc(dev);
 	irq = ai->ai_irq;
 
-	bus_write_4(sc->sc_mem, AIC_MASK_CLEAR(irq), AIC_IRQ_MASK(irq));
+	if (sc->sc_version == 1) {
+		bus_write_4(sc->sc_mem, AIC_MASK_CLEAR(irq), AIC_IRQ_MASK(irq));
+	} else {
+		bus_write_4(sc->sc_mem, AIC2_MASK_CLEAR(irq), AIC_IRQ_MASK(irq));
+	}
 	//apple_aic_enable_intr(dev, isrc);
 }
 
@@ -563,7 +624,11 @@ apple_aic_irq(void *arg, uint32_t irqtype)
 	sc = arg;
 	tf = curthread->td_intr_frame;
 
-	event = bus_read_4(sc->sc_mem, AIC_EVENT);
+	if (sc->sc_version == 1) {
+		event = bus_read_4(sc->sc_mem, AIC_EVENT);
+	} else {
+		event = bus_read_4(sc->sc_event, 0);
+	}
 	type = AIC_EVENT_TYPE(event);
 
 	/* If we get an IPI here, we really goofed. */
@@ -653,13 +718,17 @@ apple_aic_bind_intr(device_t dev, struct intr_irqsrc *isrc)
 	if (CPU_EMPTY(&isrc->isrc_cpu)) {
 		aic_next_cpu = intr_irq_next_cpu(aic_next_cpu, &all_cpus);
 		CPU_SETOF(aic_next_cpu, &isrc->isrc_cpu);
-		bus_write_4(sc->sc_mem, AIC_TARGET_CPU(irq),
-		    sc->sc_cpuids[aic_next_cpu] << 1);
+		if (sc->sc_version == 1) {
+			bus_write_4(sc->sc_mem, AIC_TARGET_CPU(irq),
+			    sc->sc_cpuids[aic_next_cpu] << 1);
+		}
 	} else {
 		CPU_FOREACH_ISSET(cpu, &isrc->isrc_cpu) {
 			targets |= sc->sc_cpuids[cpu] << 1;
 		}
-		bus_write_4(sc->sc_mem, AIC_TARGET_CPU(irq), targets);
+		if (sc->sc_version == 1) {
+			bus_write_4(sc->sc_mem, AIC_TARGET_CPU(irq), targets);
+		}
 	}
 	return (0);
 }
@@ -718,6 +787,14 @@ static void
 apple_aic_init_secondary(device_t dev)
 {
 	struct apple_aic_softc *sc = device_get_softc(dev);
+	if (sc->sc_version == 2) {
+		/*
+		 * AIC2 doesn't provide a way to target external interrupt to a
+		 * particular core so disable IRQ delivery to secondary CPUs
+		 */
+		WRITE_SPECIALREG(AIC_IRQ_CR_EL1, AIC_IRQ_CR_EL1_DISABLE);
+		return;
+	}
 	u_int cpu = PCPU_GET(cpuid);
 
 	sc->sc_cpuids[cpu] = bus_read_4(sc->sc_mem, AIC_WHOAMI);
