@@ -516,7 +516,6 @@ apple_aic_disable_intr(device_t dev, struct intr_irqsrc *isrc)
 	default:
 		panic("%s: %x\n", __func__, ai->ai_type);
 	}
-	panic("%s\n", __func__);
 }
 
 static void
@@ -565,7 +564,7 @@ apple_aic_pre_ithread(device_t dev, struct intr_irqsrc *isrc)
 	} else {
 		bus_write_4(sc->sc_mem, AIC2_SW_CLEAR(irq), AIC_IRQ_MASK(irq));
 	}
-	//apple_aic_disable_intr(dev, isrc);
+	apple_aic_disable_intr(dev, isrc);
 	/* ACK IT */
 }
 
@@ -585,7 +584,7 @@ apple_aic_post_ithread(device_t dev, struct intr_irqsrc *isrc)
 	} else {
 		bus_write_4(sc->sc_mem, AIC2_MASK_CLEAR(irq), AIC_IRQ_MASK(irq));
 	}
-	//apple_aic_enable_intr(dev, isrc);
+	apple_aic_enable_intr(dev, isrc);
 }
 
 static void

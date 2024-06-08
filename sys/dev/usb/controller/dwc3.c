@@ -157,15 +157,12 @@ snps_dwc3_attach_xhci(device_t dev)
 			return (err);
 		}
 
-#if 0
-		/
 		err = bus_bind_intr(dev, sc->sc_irq_res, 0);
 		if (err != 0) {
 			device_printf(dev, "Failed to bind IRQ, %d\n", err);
 			sc->sc_intr_hdl = NULL;
 			return (err);
 		}
-#endif
 	}
 
 	err = xhci_init(sc, dev, IS_DMA_32B);
