@@ -254,6 +254,8 @@ static const struct cpu_parts cpu_parts_qcom[] = {
 static const struct cpu_parts cpu_parts_apple[] = {
 	{ CPU_PART_M1_ICESTORM, "M1 Icestorm" },
 	{ CPU_PART_M1_FIRESTORM, "M1 Firestorm" },
+	{ CPU_PART_M2_T8112_BLIZZARD, "M2 Blizzard" },
+	{ CPU_PART_M2_T8112_AVALANCHE, "M2 Avalanche" },
 	CPU_PART_NONE,
 };
 

@@ -135,6 +135,8 @@
 /* Apple Part Number */
 #define CPU_PART_M1_ICESTORM	0x022
 #define CPU_PART_M1_FIRESTORM	0x023
+#define CPU_PART_M2_T8112_BLIZZARD	0x032
+#define CPU_PART_M2_T8112_AVALANCHE	0x033
 
 #define	CPU_IMPL(midr)	(((midr) >> 24) & 0xff)
 #define	CPU_PART(midr)	(((midr) >> 4) & 0xfff)
