@@ -39,8 +39,8 @@
 #define	CNTHCTL_EVNTI_MASK	(0xf << 4) /* Bit to trigger event stream */
 #define	CNTHCTL_EVNTDIR		(1 << 3) /* Control transition trigger bit */
 #define	CNTHCTL_EVNTEN		(1 << 2) /* Enable event stream */
-#define	CNTHCTL_EL1PCEN		(1 << 1) /* Allow EL0/1 physical timer access */
-#define	CNTHCTL_EL1PCTEN	(1 << 0) /*Allow EL0/1 physical counter access*/
+#define	CNTHCTL_EL1PCEN		(1 << 11) /* Allow EL0/1 physical timer access */
+#define	CNTHCTL_EL1PCTEN	(1 << 10) /*Allow EL0/1 physical counter access*/
 
 /* CPTR_EL2 - Architecture feature trap register */
 /* Valid if HCR_EL2.E2H == 0 */
