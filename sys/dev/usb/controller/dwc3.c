@@ -530,6 +530,11 @@ snps_dwc3_common_attach(device_t dev, bool is_fdt)
 			}
 		}
 	}
+
+	if (ofw_bus_is_compatible(dev, "apple,dwc3") == 1) {
+		// XXX: set up a callback to reset the controller when we see a new connection
+	}
+
 	snps_dwc3_configure_phy(sc, node);
 skip_phys:
 #endif
