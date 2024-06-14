@@ -500,6 +500,7 @@ arm64/apple/apple_wdog.c			optional soc_apple_t8103 fdt
 arm64/apple/exynos_uart.c			optional soc_apple_t8103 fdt
 dev/nvme/nvme_ans.c				optional nvme_ans nvme fdt
 arm64/apple/rtkit.c				optional soc_apple_t8103 fdt
+arm64/apple/apple_dockchannel.c				optional soc_apple_t8103 fdt
 
 # Broadcom
 arm64/broadcom/brcmmdio/mdio_mux_iproc.c		optional soc_brcm_ns2 fdt
