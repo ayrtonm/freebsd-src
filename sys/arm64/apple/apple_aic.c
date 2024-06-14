@@ -184,6 +184,46 @@ static pic_ipi_setup_t apple_aic_ipi_setup;
 static int apple_aic_irq(void *, uint32_t type);
 static int apple_aic_fiq(void *);
 
+static void
+apple_aic_mask_set(struct apple_aic_softc *sc, int irq)
+{
+	if (sc->sc_version == 1) {
+		bus_write_4(sc->sc_mem, AIC_MASK_SET(irq), AIC_IRQ_MASK(irq));
+	} else {
+		bus_write_4(sc->sc_mem, AIC2_MASK_SET(irq), AIC_IRQ_MASK(irq));
+	}
+}
+
+static void
+apple_aic_mask_clr(struct apple_aic_softc *sc, int irq)
+{
+	if (sc->sc_version == 1) {
+		bus_write_4(sc->sc_mem, AIC_MASK_CLEAR(irq), AIC_IRQ_MASK(irq));
+	} else {
+		bus_write_4(sc->sc_mem, AIC2_MASK_CLEAR(irq), AIC_IRQ_MASK(irq));
+	}
+}
+
+static void
+apple_aic_sw_set(struct apple_aic_softc *sc, int irq)
+{
+	if (sc->sc_version == 1) {
+		bus_write_4(sc->sc_mem, AIC_SW_SET(irq), AIC_IRQ_MASK(irq));
+	} else {
+		bus_write_4(sc->sc_mem, AIC2_SW_SET(irq), AIC_IRQ_MASK(irq));
+	}
+}
+
+static void
+apple_aic_sw_clr(struct apple_aic_softc *sc, int irq)
+{
+	if (sc->sc_version == 1) {
+		bus_write_4(sc->sc_mem, AIC_SW_CLEAR(irq), AIC_IRQ_MASK(irq));
+	} else {
+		bus_write_4(sc->sc_mem, AIC2_SW_CLEAR(irq), AIC_IRQ_MASK(irq));
+	}
+}
+
 static int
 apple_aic_probe(device_t dev)
 {
@@ -437,11 +477,12 @@ apple_aic_setup_intr(device_t dev, struct intr_irqsrc *isrc,
 	switch (type) {
 	case AIC_TYPE_IRQ:
 		/* XXX die sensitive? */
-		aic_next_cpu = intr_irq_next_cpu(aic_next_cpu, &all_cpus);
 		if (sc->sc_version == 1) {
+			aic_next_cpu = intr_irq_next_cpu(aic_next_cpu, &all_cpus);
 			bus_write_4(sc->sc_mem, AIC_TARGET_CPU(irq),
 			    1 << sc->sc_cpuids[aic_next_cpu]);
 		}
+		//apple_aic_mask_clr(sc, irq);
 		break;
 	case AIC_TYPE_FIQ:
 		isrc->isrc_flags |= INTR_ISRCF_PPI;
@@ -472,11 +513,7 @@ apple_aic_enable_intr(device_t dev, struct intr_irqsrc *isrc)
 	switch(ai->ai_type) {
 	case AIC_TYPE_IRQ:
 		sc = device_get_softc(dev);
-		if (sc->sc_version == 1) {
-			bus_write_4(sc->sc_mem, AIC_MASK_CLEAR(irq), AIC_IRQ_MASK(irq));
-		} else {
-			bus_write_4(sc->sc_mem, AIC2_MASK_CLEAR(irq), AIC_IRQ_MASK(irq));
-		}
+		apple_aic_mask_clr(sc, irq);
 		break;
 	case AIC_TYPE_IPI:
 		/* Nothing needed here. */
@@ -501,11 +538,7 @@ apple_aic_disable_intr(device_t dev, struct intr_irqsrc *isrc)
 	switch(ai->ai_type) {
 	case AIC_TYPE_IRQ:
 		sc = device_get_softc(dev);
-		if (sc->sc_version == 1) {
-			bus_write_4(sc->sc_mem, AIC_MASK_SET(irq), AIC_IRQ_MASK(irq));
-		} else {
-			bus_write_4(sc->sc_mem, AIC2_MASK_SET(irq), AIC_IRQ_MASK(irq));
-		}
+		apple_aic_mask_set(sc, irq);
 		break;
 	case AIC_TYPE_IPI:
 		/* Nothing needed here. */
@@ -530,13 +563,8 @@ apple_aic_post_filter(device_t dev, struct intr_irqsrc *isrc)
 	switch(ai->ai_type) {
 	case AIC_TYPE_IRQ:
 		sc = device_get_softc(dev);
-		if (sc->sc_version == 1) {
-			bus_write_4(sc->sc_mem, AIC_SW_CLEAR(irq), AIC_IRQ_MASK(irq));
-			bus_write_4(sc->sc_mem, AIC_MASK_CLEAR(irq), AIC_IRQ_MASK(irq));
-		} else {
-			bus_write_4(sc->sc_mem, AIC2_SW_CLEAR(irq), AIC_IRQ_MASK(irq));
-			bus_write_4(sc->sc_mem, AIC2_MASK_CLEAR(irq), AIC_IRQ_MASK(irq));
-		}
+		apple_aic_sw_clr(sc, irq);
+		apple_aic_mask_clr(sc, irq);
 #if 0
 		panic("%s: %x\n", __func__, ai->ai_type);
 #endif
@@ -559,11 +587,7 @@ apple_aic_pre_ithread(device_t dev, struct intr_irqsrc *isrc)
 	ai = (struct apple_aic_irqsrc *)isrc;
 	sc = device_get_softc(dev);
 	irq = ai->ai_irq;
-	if (sc->sc_version == 1) {
-		bus_write_4(sc->sc_mem, AIC_SW_CLEAR(irq), AIC_IRQ_MASK(irq));
-	} else {
-		bus_write_4(sc->sc_mem, AIC2_SW_CLEAR(irq), AIC_IRQ_MASK(irq));
-	}
+	apple_aic_sw_clr(sc, irq);
 	apple_aic_disable_intr(dev, isrc);
 	/* ACK IT */
 }
@@ -579,11 +603,7 @@ apple_aic_post_ithread(device_t dev, struct intr_irqsrc *isrc)
 	sc = device_get_softc(dev);
 	irq = ai->ai_irq;
 
-	if (sc->sc_version == 1) {
-		bus_write_4(sc->sc_mem, AIC_MASK_CLEAR(irq), AIC_IRQ_MASK(irq));
-	} else {
-		bus_write_4(sc->sc_mem, AIC2_MASK_CLEAR(irq), AIC_IRQ_MASK(irq));
-	}
+	apple_aic_mask_clr(sc, irq);
 	apple_aic_enable_intr(dev, isrc);
 }
 
@@ -677,8 +697,9 @@ apple_aic_fiq(void *arg)
 #endif
 
 	isrcs = sc->sc_isrcs[0];
-	if ((READ_SPECIALREG(cntv_ctl_el0) & CNTV_CTL_BITS) ==
-	    (CNTV_CTL_ENABLE | CNTV_CTL_ISTATUS)) {
+	uint64_t reg = READ_SPECIALREG(cntv_ctl_el0);
+	if ((reg & CNTV_CTL_BITS) == (CNTV_CTL_ENABLE | CNTV_CTL_ISTATUS)) {
+		WRITE_SPECIALREG(cntv_ctl_el0, reg | CNTV_CTL_IMASK);
 		intr_isrc_dispatch(&isrcs[AIC_TMR_GUEST_VIRT].ai_isrc, tf);
 	}
 
