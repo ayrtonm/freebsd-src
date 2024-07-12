@@ -195,7 +195,7 @@ nvme_ans_attach(device_t dev)
 
 	/* need registers for NVME, SART */
 
-//printf("ANS attach\n"); DELAY(5000000);
+	device_printf(dev, "ANS attach\n"); DELAY(5000000);
 	/* Map NVME registers */
 	node = ofw_bus_get_node(dev);
 	if (ofw_bus_find_string_index(node, "reg-names", "nvme",
@@ -204,7 +204,7 @@ nvme_ans_attach(device_t dev)
 		ret = ENXIO;
 		goto bad;
 	}
-//printf("found nvme\n"); DELAY(2000000);
+	device_printf(dev, "found nvme\n"); DELAY(2000000);
 	ctrlr->resource = bus_alloc_resource_any(dev, SYS_RES_MEMORY,
 	    &ctrlr->resource_id, RF_ACTIVE);
 
@@ -217,7 +217,7 @@ nvme_ans_attach(device_t dev)
 	ctrlr->bus_handle = rman_get_bushandle(ctrlr->resource);
 	ctrlr->regs = (struct nvme_registers *)ctrlr->bus_handle;
 
-//printf("SART "); DELAY(2000000);
+	device_printf(dev, "SART "); DELAY(2000000);
 	/* Map SART registers */
 	if (ofw_bus_find_string_index(node, "reg-names", "ans",
 	    &sc->resource_id) != 0) {
@@ -238,7 +238,7 @@ nvme_ans_attach(device_t dev)
 
 	//power_domain_enable(faa->fa_node);
 
-//printf("IRQ "); DELAY(2000000);
+	device_printf(dev, "IRQ "); DELAY(2000000);
 	/* Allocate and setup IRQ */
 	ctrlr->rid = 0;
 	ctrlr->res = bus_alloc_resource_any(dev, SYS_RES_IRQ,
@@ -298,7 +298,7 @@ nvme_ans_attach(device_t dev)
 	}
 	/* XXX how do we set up mbox callback? */
 
-//printf("hit regs\n"); DELAY(2000000);
+	device_printf(dev, "hit regs\n"); DELAY(2000000);
 	ctrl = NVME_ANS_READ_4(sc, ANS_CPU_CTRL);
 	NVME_ANS_WRITE_4(sc, ANS_CPU_CTRL, ctrl | ANS_CPU_CTRL_RUN);
 
@@ -332,7 +332,7 @@ nvme_ans_attach(device_t dev)
 	//ctrlr->sc_ios = faa->fa_reg[0].size;	/* XXX */
 	//ctrlr->sc_openings = 1;
 
-//printf("nvme_attach\n"); DELAY(2000000);
+	device_printf(dev, "nvme_attach\n"); DELAY(2000000);
 	return (nvme_attach(dev));	/* Note: failure frees resources */
 bad:
 printf("bad:\n"); DELAY(5000000);
