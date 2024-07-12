@@ -35,6 +35,7 @@
 #define RTKIT_EP_DEBUG			3
 #define RTKIT_EP_IOREPORT		4
 #define RTKIT_EP_OSLOG		8
+#define RTKIT_EP_TRACEKIT	10
 
 #define RTKIT_MGMT_TYPE(x)		(((x) >> 52) & 0xff)
 #define RTKIT_MGMT_TYPE_SHIFT		52
@@ -97,16 +98,7 @@ struct rtkit_state {
 static int
 rtkit_recv(mbox_t mc, struct apple_mbox_msg *msg)
 {
-	int error, timo;
-
-	for (timo = 0; timo < 10000; timo++) {
-		error = mbox_read(mc, msg, sizeof(*msg));
-		if (error == 0)
-			break;
-		DELAY(10);
-	}
-
-	return error;
+	return mbox_read(mc, msg, sizeof(*msg));
 }
 
 static int
@@ -193,9 +185,11 @@ rtkit_handle_mgmt(struct rtkit_state *state, struct apple_mbox_msg *msg)
 		break;
 	case RTKIT_MGMT_IOP_PWR_STATE_ACK:
 		state->iop_pwrstate = RTKIT_MGMT_PWR_STATE(msg->data0);
+		wakeup(&state->iop_pwrstate);
 		break;
 	case RTKIT_MGMT_AP_PWR_STATE:
 		state->ap_pwrstate = RTKIT_MGMT_PWR_STATE(msg->data0);
+		wakeup(&state->ap_pwrstate);
 		break;
 	case RTKIT_MGMT_EPMAP:
 		base = RTKIT_MGMT_EPMAP_BASE(msg->data0);
@@ -224,6 +218,7 @@ rtkit_handle_mgmt(struct rtkit_state *state, struct apple_mbox_msg *msg)
 				case RTKIT_EP_DEBUG:
 				case RTKIT_EP_IOREPORT:
 				case RTKIT_EP_OSLOG:
+				case RTKIT_EP_TRACEKIT:
 					printf("%s: starting rtkit endpoint %d\n", __func__, endpoint);
 					error = rtkit_start(state, endpoint);
 					if (error)
@@ -468,6 +463,8 @@ printf("error %d\n", error);
 		if (error)
 			return error;
 		break;
+	//case RTKIT_EP_TRACEKIT:
+	//	break;
 	default:
 		if (endpoint >= 32 && endpoint < 64 && 
 		    state->callback[endpoint - 32]) {
@@ -518,10 +515,9 @@ rtkit_init(int node, const char *name, struct rtkit *rk, mbox_t mc)
 int
 rtkit_boot(struct rtkit_state *state)
 {
-	mbox_t mc = state->mc;
-	int error;
-
 	/* Wake up! */
+	return rtkit_set_iop_pwrstate(state, RTKIT_MGMT_PWR_STATE_ON);
+#if 0
 	printf("%s: send wakeup\n", __func__);
 	error = rtkit_send(mc, RTKIT_EP_MGMT, RTKIT_MGMT_IOP_PWR_STATE,
 	    RTKIT_MGMT_PWR_STATE_ON);
@@ -534,13 +530,14 @@ rtkit_boot(struct rtkit_state *state)
 		rtkit_poll(state);
 
 	return 0;
+#endif
 }
 
 int
 rtkit_set_ap_pwrstate(struct rtkit_state *state, uint16_t pwrstate)
 {
 	mbox_t mc = state->mc;
-	int error;
+	int error, timo;
 
 	if (state->ap_pwrstate == pwrstate)
 		return 0;
@@ -550,9 +547,66 @@ rtkit_set_ap_pwrstate(struct rtkit_state *state, uint16_t pwrstate)
 	if (error)
 		return error;
 
-	while (state->ap_pwrstate != pwrstate)
-		rtkit_poll(state);
+	if (cold) {
+		for (timo = 0; timo < 100000; timo++) {
+			error = rtkit_poll(state);
+			if (error == EWOULDBLOCK) {
+				DELAY(10);
+				continue;
+			}
+			if (error)
+				return error;
 
+			if (state->ap_pwrstate == pwrstate)
+				return 0;
+		}
+	}
+
+	while (state->ap_pwrstate != pwrstate) {
+		error = tsleep_sbt(&state->ap_pwrstate, PWAIT, "appwr",
+			nstosbt(1));
+		if (error)
+			return error;
+	}
+	return 0;
+}
+
+static int
+rtkit_set_iop_pwrstate(struct rtkit_state *state, uint16_t pwrstate)
+{
+	mbox_t mc = state->mc;
+	int error, timo;
+
+	/* nothing to do in this case */
+	if (state->iop_pwrstate == (pwrstate & 0xff))
+		return 0;
+
+	error = rtkit_send(mc, RTKIT_EP_MGMT, RTKIT_MGMT_IOP_PWR_STATE,
+		pwrstate);
+	if (error)
+		return error;
+
+	if (cold) {
+		for (timo = 0; timo < 100000; timo++) {
+			error = rtkit_poll(state);
+			if (error == EWOULDBLOCK) {
+				DELAY(10);
+				continue;
+			}
+			if (error)
+				return error;
+
+			if (state->iop_pwrstate == (pwrstate & 0xff))
+				return 0;
+		}
+	}
+
+	while (state->iop_pwrstate != (pwrstate & 0xff)) {
+		error = tsleep_sbt(&state->iop_pwrstate, PWAIT, "ioppwr",
+			nstosbt(1));
+		if (error)
+			return error;
+	}
 	return 0;
 }
 
