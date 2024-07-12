@@ -34,6 +34,7 @@
 #define RTKIT_EP_SYSLOG			2
 #define RTKIT_EP_DEBUG			3
 #define RTKIT_EP_IOREPORT		4
+#define RTKIT_EP_OSLOG		8
 
 #define RTKIT_MGMT_TYPE(x)		(((x) >> 52) & 0xff)
 #define RTKIT_MGMT_TYPE_SHIFT		52
@@ -72,6 +73,12 @@
 
 #define RTKIT_IOREPORT_UNKNOWN1		8
 #define RTKIT_IOREPORT_UNKNOWN2		12
+
+#define RTKIT_OSLOG_TYPE(x)		(((x) >> 56) & 0xff)
+#define RTKIT_OSLOG_TYPE_SHIFT		(56 - RTKIT_MGMT_TYPE_SHIFT)
+#define RTKIT_OSLOG_BUFFER_REQUEST	1
+#define RTKIT_OSLOG_BUFFER_ADDR(x)	(((x) >> 0) & 0xfffffffff)
+#define RTKIT_OSLOG_BUFFER_SIZE(x)	(((x) >> 36) & 0xfffff)
 
 /* Versions we support. */
 #define RTKIT_MINVER			11
@@ -209,10 +216,15 @@ rtkit_handle_mgmt(struct rtkit_state *state, struct apple_mbox_msg *msg)
 					continue;
 
 				switch (endpoint) {
+				case RTKIT_EP_MGMT:
+					/* nothing to do here */
+					break;
 				case RTKIT_EP_CRASHLOG:
 				case RTKIT_EP_SYSLOG:
 				case RTKIT_EP_DEBUG:
 				case RTKIT_EP_IOREPORT:
+				case RTKIT_EP_OSLOG:
+					printf("%s: starting rtkit endpoint %d\n", __func__, endpoint);
 					error = rtkit_start(state, endpoint);
 					if (error)
 						return error;
@@ -271,7 +283,7 @@ rtkit_handle_crashlog(struct rtkit_state *state, struct apple_mbox_msg *msg)
 			return error;
 		break;
 	default:
-		printf("%s: unhandled crashlog event 0x%016llx\n",
+		printf("%s: unhandled crashlog event 0x%016lx\n",
 		    __func__, msg->data0);
 		return EIO;
 	}
@@ -388,6 +400,26 @@ printf("rtkit_handle_crashlog\n");
 }
 
 static int
+rtkit_handle_oslog(struct rtkit_state *state, struct apple_mbox_msg *msg)
+{
+	bus_addr_t addr;
+	bus_size_t size;
+
+	switch (RTKIT_OSLOG_TYPE(msg->data0)) {
+	case RTKIT_OSLOG_BUFFER_REQUEST:
+		addr = RTKIT_OSLOG_BUFFER_ADDR(msg->data0) << PAGE_SHIFT;
+		size = RTKIT_OSLOG_BUFFER_SIZE(msg->data0);
+		if (addr)
+			break;
+
+		state->oslog_addr = addr;
+		state->oslog_size = size;
+	}
+
+	return 0;
+}
+
+static int
 rtkit_poll(struct rtkit_state *state)
 {
 	mbox_t mc = state->mc;
@@ -397,13 +429,13 @@ rtkit_poll(struct rtkit_state *state)
 	uint32_t endpoint;
 	int error;
 
-#if 0
+#if 1
 printf("rtkit_poll: ");
 #endif
 	error = rtkit_recv(mc, &msg);
 	if (error)
 {
-#if 0
+#if 1
 printf("error %d\n", error);
 #endif
 		return error;
@@ -428,6 +460,11 @@ printf("error %d\n", error);
 		break;
 	case RTKIT_EP_IOREPORT:
 		error = rtkit_handle_ioreport(state, &msg);
+		if (error)
+			return error;
+		break;
+	case RTKIT_EP_OSLOG:
+		error = rtkit_handle_oslog(state, &msg);
 		if (error)
 			return error;
 		break;
