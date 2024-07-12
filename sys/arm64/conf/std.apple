@@ -13,5 +13,5 @@ device	vt_simplefb
 device	bge
 device	mbox
 device	nvme
-#device	nvme_ans
+device	nvme_ans
 device	powerdom
