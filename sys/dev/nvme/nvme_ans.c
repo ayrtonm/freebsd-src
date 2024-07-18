@@ -84,6 +84,9 @@ __FBSDID("$FreeBSD$");
 #define ANS_NVMMU_TCB_SIZE	0x4000
 #define ANS_NVMMU_TCB_PITCH	0x80
 
+#define LOCAL_TRACE 1
+#include <sys/ltrace.h>
+
 struct ans_nvmmu_tcb {
 	uint8_t		tcb_opcode;
 	uint8_t		tcb_flags;
@@ -195,7 +198,7 @@ nvme_ans_attach(device_t dev)
 
 	/* need registers for NVME, SART */
 
-	device_printf(dev, "ANS attach\n"); DELAY(5000000);
+	ltracef("ANS attach");
 	/* Map NVME registers */
 	node = ofw_bus_get_node(dev);
 	if (ofw_bus_find_string_index(node, "reg-names", "nvme",
@@ -204,7 +207,7 @@ nvme_ans_attach(device_t dev)
 		ret = ENXIO;
 		goto bad;
 	}
-	device_printf(dev, "found nvme\n"); DELAY(2000000);
+	ltracef("found nvme");
 	ctrlr->resource = bus_alloc_resource_any(dev, SYS_RES_MEMORY,
 	    &ctrlr->resource_id, RF_ACTIVE);
 
@@ -217,7 +220,7 @@ nvme_ans_attach(device_t dev)
 	ctrlr->bus_handle = rman_get_bushandle(ctrlr->resource);
 	ctrlr->regs = (struct nvme_registers *)ctrlr->bus_handle;
 
-	device_printf(dev, "SART "); DELAY(2000000);
+	ltracef("SART");
 	/* Map SART registers */
 	if (ofw_bus_find_string_index(node, "reg-names", "ans",
 	    &sc->resource_id) != 0) {
@@ -238,7 +241,7 @@ nvme_ans_attach(device_t dev)
 
 	//power_domain_enable(faa->fa_node);
 
-	device_printf(dev, "IRQ "); DELAY(2000000);
+	ltracef("IRQ");
 	/* Allocate and setup IRQ */
 	ctrlr->rid = 0;
 	ctrlr->res = bus_alloc_resource_any(dev, SYS_RES_IRQ,
@@ -265,13 +268,15 @@ nvme_ans_attach(device_t dev)
 		device_printf(dev, "OF_getprop apple,sart %jd\n",
 		    (intmax_t) sret);
 	sc->rtkit.rk_cookie = sc;
-	//sc->rtkit.rk_dmat = ; bus_dma_tag_create(...)	/* XXX ??? */
+	// TODO: figure out a reasonable way to set a maximum. this is the value returned on my m2 macbook air
+	sc->rtkit.rk_dma_maxsize = 32 * 1024;
+	ltracef("cretaing dma tag with alignment/PAGE_SIZE: %x", PAGE_SIZE);
 	ret = bus_dma_tag_create(bus_get_dma_tag(dev),	/* parent? */
 		       PAGE_SIZE, 0,		/* alignment, bounds */
-		       BUS_SPACE_MAXADDR_32BIT,	/* lowaddr */
+		       BUS_SPACE_MAXADDR,	/* lowaddr */
 		       BUS_SPACE_MAXADDR,	/* highaddr */
-		       NULL, NULL,		/* filter, filterarg */
-		       64 * 1024,		/* maxsize ??? */
+		       NULL, NULL,		/* filter, filterarg not supported by arm64 dma bounce anyway */
+		       sc->rtkit.rk_dma_maxsize,		/* maxsize */
 		       1,			/* nsegments */
 		       64 * 1024,		/* maxsegsize ??? */
 		       0 /*BUS_DMA_ALLOCNOW*/,	/* flags */
@@ -298,7 +303,7 @@ nvme_ans_attach(device_t dev)
 	}
 	/* XXX how do we set up mbox callback? */
 
-	device_printf(dev, "hit regs\n"); DELAY(2000000);
+	ltracef("hit regs");
 	ctrl = NVME_ANS_READ_4(sc, ANS_CPU_CTRL);
 	NVME_ANS_WRITE_4(sc, ANS_CPU_CTRL, ctrl | ANS_CPU_CTRL_RUN);
 
@@ -332,10 +337,10 @@ nvme_ans_attach(device_t dev)
 	//ctrlr->sc_ios = faa->fa_reg[0].size;	/* XXX */
 	//ctrlr->sc_openings = 1;
 
-	device_printf(dev, "nvme_attach\n"); DELAY(2000000);
+	ltracef("nvme_attach");
 	return (nvme_attach(dev));	/* Note: failure frees resources */
 bad:
-printf("bad:\n"); DELAY(5000000);
+	ltracef("bad:");
 	if (ctrlr->resource != NULL) {
 		bus_release_resource(dev, SYS_RES_MEMORY,
 		    ctrlr->resource_id, ctrlr->resource);
