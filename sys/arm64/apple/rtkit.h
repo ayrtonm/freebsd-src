@@ -11,11 +11,13 @@ struct rtkit_state;
 struct rtkit {
 	void *rk_cookie;
 	bus_dma_tag_t rk_dmat;
+	bus_size_t rk_dma_maxsize;
 	int (*rk_map)(void *, bus_addr_t, bus_size_t);
 };
 
 struct rtkit_state *rtkit_init(int, const char *, struct rtkit *, mbox_t);
 int	rtkit_boot(struct rtkit_state *);
+int	rtkit_set_iop_pwrstate(struct rtkit_state *, uint16_t);
 int	rtkit_set_ap_pwrstate(struct rtkit_state *, uint16_t);
 //int	rtkit_poll(struct rtkit_state *);
 int	rtkit_start_endpoint(struct rtkit_state *, uint32_t,
