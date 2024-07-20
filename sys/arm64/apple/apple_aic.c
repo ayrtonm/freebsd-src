@@ -103,12 +103,15 @@
 #define	AIC_MAXCPUS		32
 #define	AIC_MAXDIES		4
 
+#define AIC2_INFO2		0x0008
+#define AIC2_INFO3		0x000c
 #define	AIC2_CONFIG		0x0014
 #define	AIC2_CONFIG_ENABLE		(1 << 0)
-#define AIC2_SW_SET(irq)	(0x6000 + (((irq) >> 5) * 4))
-#define AIC2_SW_CLEAR(irq)	(0x6200 + (((irq) >> 5) * 4))
-#define AIC2_MASK_SET(irq)	(0x6400 + (((irq) >> 5) * 4))
-#define AIC2_MASK_CLEAR(irq)	(0x6600 + (((irq) >> 5) * 4))
+#define AIC2_IRQ_CFG	0x2000
+//#define AIC2_SW_SET(irq)	(0x2000 + (((irq) >> 5) * 4))
+//#define AIC2_SW_CLEAR(irq)	(0x2200 + (((irq) >> 5) * 4))
+//#define AIC2_MASK_SET(irq)	(0x2400 + (((irq) >> 5) * 4))
+//#define AIC2_MASK_CLEAR(irq)	(0x2600 + (((irq) >> 5) * 4))
 
 #define AIC_IRQ_CR_EL1		s3_4_c15_c10_4
 #define AIC_IRQ_CR_EL1_DISABLE	(3 << 0)
@@ -154,11 +157,18 @@ struct apple_aic_softc {
 	u_int			sc_version;
 	u_int			sc_nirqs;
 	u_int			sc_ndie;
+	u_int			sc_maxirqs;
+	u_int			sc_maxdie;
 #ifdef SMP
 	struct apple_aic_irqsrc	sc_ipi_srcs[AIC_NIPIS];
 	u_int			*sc_cpuids;	/* cpu index to AIC CPU ID */
 	uint32_t		*sc_ipimasks;
 #endif
+	uint32_t		sc_irq_cfg;
+	uint32_t		sc_sw_set;
+	uint32_t		sc_sw_clr;
+	uint32_t		sc_mask_set;
+	uint32_t		sc_mask_clr;
 };
 
 static u_int aic_next_cpu;
@@ -190,7 +200,8 @@ apple_aic_mask_set(struct apple_aic_softc *sc, int irq)
 	if (sc->sc_version == 1) {
 		bus_write_4(sc->sc_mem, AIC_MASK_SET(irq), AIC_IRQ_MASK(irq));
 	} else {
-		bus_write_4(sc->sc_mem, AIC2_MASK_SET(irq), AIC_IRQ_MASK(irq));
+		uint32_t off = (irq >> 5) * 4;
+		bus_write_4(sc->sc_mem, sc->sc_mask_set + off, AIC_IRQ_MASK(irq));
 	}
 }
 
@@ -200,7 +211,8 @@ apple_aic_mask_clr(struct apple_aic_softc *sc, int irq)
 	if (sc->sc_version == 1) {
 		bus_write_4(sc->sc_mem, AIC_MASK_CLEAR(irq), AIC_IRQ_MASK(irq));
 	} else {
-		bus_write_4(sc->sc_mem, AIC2_MASK_CLEAR(irq), AIC_IRQ_MASK(irq));
+		uint32_t off = (irq >> 5) * 4;
+		bus_write_4(sc->sc_mem, sc->sc_mask_clr + off, AIC_IRQ_MASK(irq));
 	}
 }
 
@@ -210,7 +222,8 @@ apple_aic_sw_set(struct apple_aic_softc *sc, int irq)
 	if (sc->sc_version == 1) {
 		bus_write_4(sc->sc_mem, AIC_SW_SET(irq), AIC_IRQ_MASK(irq));
 	} else {
-		bus_write_4(sc->sc_mem, AIC2_SW_SET(irq), AIC_IRQ_MASK(irq));
+		uint32_t off = (irq >> 5) * 4;
+		bus_write_4(sc->sc_mem, sc->sc_sw_set + off, AIC_IRQ_MASK(irq));
 	}
 }
 
@@ -220,7 +233,8 @@ apple_aic_sw_clr(struct apple_aic_softc *sc, int irq)
 	if (sc->sc_version == 1) {
 		bus_write_4(sc->sc_mem, AIC_SW_CLEAR(irq), AIC_IRQ_MASK(irq));
 	} else {
-		bus_write_4(sc->sc_mem, AIC2_SW_CLEAR(irq), AIC_IRQ_MASK(irq));
+		uint32_t off = (irq >> 5) * 4;
+		bus_write_4(sc->sc_mem, sc->sc_sw_clr + off, AIC_IRQ_MASK(irq));
 	}
 }
 
@@ -253,7 +267,7 @@ apple_aic_attach(device_t dev)
 	const char *name;
 	intptr_t xref;
 	int error, rid;
-	u_int i, cpu, j, info;
+	u_int i, cpu, j, info, info3;
 	uint32_t config;
 
 	sc = device_get_softc(dev);
@@ -279,9 +293,31 @@ apple_aic_attach(device_t dev)
 	info = bus_read_4(sc->sc_mem, AIC_INFO);
 	sc->sc_nirqs = AIC_INFO_NIRQS(info);
 	sc->sc_ndie = AIC_INFO_NDIE(info) + 1;
+
+	info3 = bus_read_4(sc->sc_mem, AIC2_INFO3);
+	sc->sc_maxirqs = AIC_INFO_NIRQS(info3);
+	sc->sc_maxdie = AIC_INFO_NDIE(info3);
+
+	if (sc->sc_version == 2) {
+		uint32_t off = AIC2_IRQ_CFG;
+		off += sc->sc_maxirqs * 4;
+
+		sc->sc_sw_set = off;
+		off += (sc->sc_maxirqs >> 5) * 4;
+
+		sc->sc_sw_clr = off;
+		off += (sc->sc_maxirqs >> 5) * 4;
+
+		sc->sc_mask_set = off;
+		off += (sc->sc_maxirqs >> 5) * 4;
+
+		sc->sc_mask_clr = off;
+		off += (sc->sc_maxirqs >> 5) * 4;
+	}
+
 	if (bootverbose)
-		device_printf(dev, "Found %d interrupts, %d die\n",
-		    sc->sc_nirqs, sc->sc_ndie);
+		device_printf(dev, "Found %d/%d interrupts, %d/%d die\n",
+		    sc->sc_nirqs, sc->sc_maxirqs, sc->sc_ndie, sc->sc_maxdie);
 
 	for (i = 0; i < sc->sc_ndie; i++) {
 		sc->sc_isrcs[i] = mallocarray(sc->sc_nirqs,
@@ -325,6 +361,13 @@ apple_aic_attach(device_t dev)
 			}
 		}
 	}
+	//for (i = 0; i < sc->sc_ndie; i++) {
+		// TODO: round top bound up
+		for (j = 0; j < (sc->sc_nirqs >> 5); j++) {
+			bus_write_4(sc->sc_mem, sc->sc_mask_set + j * 4, 0xFFFFFFFF);
+			bus_write_4(sc->sc_mem, sc->sc_sw_clr + j * 4, 0xFFFFFFFF);
+		}
+	//}
 
 	if (sc->sc_version == 2) {
 		config = bus_read_4(sc->sc_mem, AIC2_CONFIG);
