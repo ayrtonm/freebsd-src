@@ -166,7 +166,7 @@ rtkit_alloc(struct rtkit_state *state, bus_size_t size, caddr_t *kvap)
 	// loads less memory than allocated since it uses the DMA request size
 	rc = bus_dmamap_load(rk->rk_dmat, map, vaddr, size, rtkit_dma_cb, NULL /* cb arg */, 0);
 	ltracef("bus_dmamap_load returned %d (should be 0 or %d)", rc, EINPROGRESS);
-	if ((rc != 0) || (rc != EINPROGRESS)) {
+	if ((rc != 0) && (rc != EINPROGRESS)) {
 		ltracef("dmamap_load failed %d", rc);
 		goto err_map_load;
 	}
@@ -692,8 +692,8 @@ rtkit_set_iop_pwrstate(struct rtkit_state *state, uint16_t pwrstate)
 
 	while (state->iop_pwrstate != (pwrstate & 0xff)) {
 		ltracef("got here");
-		//error = tsleep_sbt(&state->iop_pwrstate, PWAIT, "ioppwr",
-		//	nstosbt(1));
+		// TODO: can't sleep here
+		error = tsleep(&state->iop_pwrstate, PWAIT, "ioppwr", 1);
 		if (error)
 			return error;
 	}
