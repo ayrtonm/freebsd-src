@@ -268,8 +268,8 @@ nvme_ans_attach(device_t dev)
 		device_printf(dev, "OF_getprop apple,sart %jd\n",
 		    (intmax_t) sret);
 	sc->rtkit.rk_cookie = sc;
-	// TODO: figure out a reasonable way to set a maximum. this is the value returned on my m2 macbook air
-	sc->rtkit.rk_dma_maxsize = 32 * 1024;
+	// TODO: figure out a reasonable way to set a maximum. this is the value returned on my m2 macbook air with 16K pages enabled
+	sc->rtkit.rk_dma_maxsize = 0x20000;
 	ltracef("cretaing dma tag with alignment/PAGE_SIZE: %x", PAGE_SIZE);
 	ret = bus_dma_tag_create(bus_get_dma_tag(dev),	/* parent? */
 		       PAGE_SIZE, 0,		/* alignment, bounds */
@@ -278,7 +278,7 @@ nvme_ans_attach(device_t dev)
 		       NULL, NULL,		/* filter, filterarg not supported by arm64 dma bounce anyway */
 		       sc->rtkit.rk_dma_maxsize,		/* maxsize */
 		       1,			/* nsegments */
-		       64 * 1024,		/* maxsegsize ??? */
+		       256 * 1024,		/* maxsegsize ??? */
 		       0 /*BUS_DMA_ALLOCNOW*/,	/* flags */
 		       NULL,			/* lockfunc */
 		       NULL,			/* lockarg */
