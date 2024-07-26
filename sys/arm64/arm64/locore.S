@@ -343,6 +343,15 @@ LENTRY(enter_kernel_el)
 	isb
 	mrs	x4, hcr_el2
 
+	/* if we couldn't clear HCR_EL2.E2H then set HCR_EL2.TGE and stay in EL2 */
+	tbz x4, #HCR_E2H_SHIFT, 3f
+	orr x4, x4, #HCR_TGE
+	msr hcr_el2, x4
+	mov x2, #(PSR_DAIF | PSR_M_EL2h)
+	msr spsr_el2, x2
+	b 2f
+3:
+
 	/* Load the Virtualization Process ID Register */
 	mrs	x2, midr_el1
 	msr	vpidr_el2, x2
@@ -355,25 +364,16 @@ LENTRY(enter_kernel_el)
 	ldr	x2, =INIT_SCTLR_EL1
 	msr	sctlr_el1, x2
 
-	/*
-	 * On some hardware, e.g., Apple M1, we can't clear E2H, so make sure we
-	 * don't trap to EL2 for SIMD register usage to have at least a
-	 * minimally usable system.
-	 */
-	tst	x4, #HCR_E2H
-	mov	x3, #CPTR_RES1	/* HCR_E2H == 0 */
-	mov	x5, #CPTR_FPEN	/* HCR_E2H == 1 */
-	csel	x2, x3, x5, eq
+	/* Don't trap to EL2 for exceptions */
+	mov	x2, #CPTR_RES1
 	msr	cptr_el2, x2
 
 	/* Don't trap to EL2 for CP15 traps */
 	msr	hstr_el2, xzr
 
 	/* Enable access to the physical timers at EL1 */
-	tst	x4, #HCR_E2H
-	ldr	x3, =(CNTHCTL_EL1PCTEN | CNTHCTL_EL1PCEN)
-	ldr	x5, =(CNTHCTL_E2H_EL1PCTEN | CNTHCTL_E2H_EL1PTEN)
-	csel	x2, x3, x5, eq
+	mrs	x2, cnthctl_el2
+	orr	x2, x2, #(CNTHCTL_EL1PCTEN | CNTHCTL_EL1PCEN)
 	msr	cnthctl_el2, x2
 
 	/* Set the counter offset to a known value */

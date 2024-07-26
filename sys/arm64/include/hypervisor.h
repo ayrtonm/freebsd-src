@@ -95,7 +95,8 @@
 #define	HCR_RW				(UL(0x1) << 31)
 #define	HCR_CD				(UL(0x1) << 32)
 #define	HCR_ID				(UL(0x1) << 33)
-#define	HCR_E2H				(UL(0x1) << 34)
+#define HCR_E2H_SHIFT			34
+#define	HCR_E2H				(UL(0x1) << HCR_E2H_SHIFT)
 #define	HCR_TLOR			(UL(0x1) << 35)
 #define	HCR_TERR			(UL(0x1) << 36)
 #define	HCR_TEA				(UL(0x1) << 37)
