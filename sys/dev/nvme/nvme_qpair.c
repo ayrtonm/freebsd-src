@@ -412,6 +412,11 @@ nvme_completion_is_retry(const struct nvme_completion *cpl)
 	}
 }
 
+void
+nvme_qpair_cq_done(struct nvme_qpair *qpair, struct nvme_tracker *tr)
+{
+}
+
 static void
 nvme_qpair_complete_tracker(struct nvme_tracker *tr,
     struct nvme_completion *cpl, error_print_t print_on_error)
@@ -447,6 +452,7 @@ nvme_qpair_complete_tracker(struct nvme_tracker *tr,
 			    tr->payload_dma_map,
 			    BUS_DMASYNC_POSTREAD | BUS_DMASYNC_POSTWRITE);
 		}
+		NVME_CQ_DONE(qpair->ctrlr->dev, qpair, tr);
 		if (req->cb_fn)
 			req->cb_fn(req->cb_arg, cpl);
 	}
@@ -721,7 +727,7 @@ nvme_qpair_msi_handler(void *arg)
 }
 
 int
-nvme_qpair_construct(struct nvme_qpair *qpair,
+nvme_qpair_construct(device_t dev, struct nvme_qpair *qpair,
     uint32_t num_entries, uint32_t num_trackers,
     struct nvme_controller *ctrlr)
 {
@@ -1232,13 +1238,13 @@ do_reset:
 }
 
 uint32_t
-nvme_qpair_sq_enter(struct nvme_controller *ctrlr, struct nvme_qpair *qpair)
+nvme_qpair_sq_enter(struct nvme_qpair *qpair, struct nvme_tracker *tr)
 {
 	return (qpair->sq_tail);
 }
 
 void
-nvme_qpair_sq_leave(struct nvme_controller *ctrlr, struct nvme_qpair *qpair)
+nvme_qpair_sq_leave(struct nvme_qpair *qpair, struct nvme_tracker *tr)
 {
 	if (++qpair->sq_tail == qpair->num_entries)
 		qpair->sq_tail = 0;
@@ -1285,9 +1291,9 @@ nvme_qpair_submit_tracker(struct nvme_qpair *qpair, struct nvme_tracker *tr)
 		tr->deadline = SBT_MAX;
 
 	/* Copy the command from the tracker to the submission queue. */
-	indx = NVME_SQ_ENTER(ctrlr->dev, ctrlr, qpair);
+	indx = NVME_SQ_ENTER(ctrlr->dev, qpair, tr);
 	memcpy(&qpair->cmd[/*qpair->sq_tail*/indx], &req->cmd, sizeof(req->cmd));
-	NVME_SQ_LEAVE(ctrlr->dev, ctrlr, qpair);
+	NVME_SQ_LEAVE(ctrlr->dev, qpair, tr);
 
 	qpair->num_cmds++;
 }

@@ -208,10 +208,9 @@ struct nvme_namespace {
 	struct mtx			lock;
 };
 
-uint32_t	nvme_qpair_sq_enter(struct nvme_controller *ctrlr,
-					struct nvme_qpair *qpair);
-void		nvme_qpair_sq_leave(struct nvme_controller *ctrlr,
-					struct nvme_qpair *qpair);
+uint32_t	nvme_qpair_sq_enter(struct nvme_qpair *qpair, struct nvme_tracker *tr);
+void		nvme_qpair_sq_leave(struct nvme_qpair *qpair, struct nvme_tracker *tr);
+void		nvme_qpair_cq_done(struct nvme_qpair *qpair, struct nvme_tracker *tr);
 
 /*
  * One of these per allocated PCI device.
@@ -414,7 +413,7 @@ void	nvme_ctrlr_submit_admin_request(struct nvme_controller *ctrlr,
 void	nvme_ctrlr_submit_io_request(struct nvme_controller *ctrlr,
 				     struct nvme_request *req);
 
-int	nvme_qpair_construct(struct nvme_qpair *qpair,
+int	nvme_qpair_construct(device_t dev, struct nvme_qpair *qpair,
 			     uint32_t num_entries, uint32_t num_trackers,
 			     struct nvme_controller *ctrlr);
 void	nvme_qpair_submit_tracker(struct nvme_qpair *qpair,

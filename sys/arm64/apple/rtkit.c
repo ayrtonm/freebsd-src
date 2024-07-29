@@ -17,19 +17,17 @@
 
 #include <sys/param.h>
 #include <sys/systm.h>
-//#include <sys/device.h>
+#include <sys/bus.h>
+#include <sys/kernel.h>
 #include <sys/malloc.h>
 #include <sys/taskqueue.h>
 
 #include <machine/_inttypes.h>
 #include <machine/bus.h>
-//#include <machine/fdt.h>
 
-//#include <dev/ofw/openfirm.h>
-//#include <dev/ofw/fdt.h>
-
-#include <arm64/apple/apple_mboxvar.h>
+#include <arm64/apple/apple_mbox.h>
 #include <arm64/apple/rtkit.h>
+
 
 #define RTKIT_EP_MGMT			0
 #define RTKIT_EP_CRASHLOG		1
@@ -67,7 +65,7 @@
 #define RTKIT_MGMT_EPMAP_MORE		(1ULL << 0)
 
 #define RTKIT_BUFFER_REQUEST		1
-#define RTKIT_BUFFER_ADDR(x)		(((x) >> 0) & 0xfffffffffff)
+#define RTKIT_BUFFER_ADDR(x)		((x) & ((1ULL << 44) - 1))
 #define RTKIT_BUFFER_SIZE(x)		(((x) >> 44) & 0xff)
 #define RTKIT_BUFFER_SIZE_SHIFT		44
 
@@ -78,133 +76,252 @@
 #define RTKIT_IOREPORT_UNKNOWN2		12
 
 #define RTKIT_OSLOG_TYPE(x)		(((x) >> 56) & 0xff)
-#define RTKIT_OSLOG_TYPE_SHIFT		(56 - RTKIT_MGMT_TYPE_SHIFT)
+#define RTKIT_OSLOG_TYPE_SHIFT		56
+
 #define RTKIT_OSLOG_BUFFER_REQUEST	1
-#define RTKIT_OSLOG_BUFFER_ADDR(x)	(((x) >> 0) & 0xfffffffff)
+#define RTKIT_OSLOG_BUFFER_ADDR(x)	((x) & ((1ULL << 36) - 1))
 #define RTKIT_OSLOG_BUFFER_SIZE(x)	(((x) >> 36) & 0xfffff)
+#define RTKIT_OSLOG_BUFFER_SIZE_SHIFT	36
 
 /* Versions we support. */
 #define RTKIT_MINVER			11
 #define RTKIT_MAXVER			12
 
-#define debugf(fmt, ...) do { printf("%s: " fmt "\n", __func__, ##__VA_ARGS__); } while (0)
+struct rtkit_buffer {
+	bus_addr_t			addr;
+	bus_size_t			size;
+	void				*kva;
 
-struct rtkit_state {
-	mbox_t			mc;
-	struct rtkit	*rk;
-	char			*crashlog;
-	bus_addr_t		crashlog_addr;
-	bus_size_t		crashlog_size;
-	struct task		crashlog_task;
+	bus_dma_tag_t		tag;
+	bus_dmamap_t		map;
 
-	struct task ioreport_task;
-	struct task oslog_task;
-	struct task syslog_task;
-
-	uint16_t		iop_pwrstate;
-	uint16_t		ap_pwrstate;
-	uint64_t		epmap;
-	void			(*callback[32])(void *, uint64_t);
-	void			*arg[32];
-
-	//bus_dma_tag_t	dmat;
+	// TODO: this is a pretty ugly workaround for making handle_buffer_req
+	// endpoint oblivious. I should probably find a better way to dedup code
+	struct rtkit_state	*state;
 };
 
-static int
-rtkit_recv(mbox_t mc, struct apple_mbox_msg *msg)
+struct rtkit_task {
+	struct task				task;
+	struct apple_mbox_msg	msg;
+	struct rtkit_state		*state;
+};
+
+struct rtkit_state {
+	device_t			dev;
+	struct apple_mbox	mbox;
+
+	uint16_t			iop_pwrstate;
+	uint16_t			ap_pwrstate;
+
+	uint64_t			epmap;
+	apple_mbox_rx		callbacks[32];
+	void				*arg[32];
+
+	struct rtkit_buffer crashlog_buffer;
+	struct rtkit_buffer syslog_buffer;
+	struct rtkit_buffer ioreport_buffer;
+	struct rtkit_buffer oslog_buffer;
+
+	rtkit_map			map_fn;
+	void				*map_arg;
+};
+
+static bool
+rtkit_endpoint_is_valid(uint32_t endpoint)
 {
-	return mbox_read(mc, msg, sizeof(*msg));
+	switch (endpoint) {
+	case RTKIT_EP_MGMT:
+	case RTKIT_EP_CRASHLOG:
+	case RTKIT_EP_SYSLOG:
+	case RTKIT_EP_DEBUG:
+	case RTKIT_EP_IOREPORT:
+	case RTKIT_EP_OSLOG:
+	case RTKIT_EP_TRACEKIT:
+		return true;
+	}
+	return (endpoint >= 32) && (endpoint < 64);
 }
 
 static int
-rtkit_send(mbox_t mc, uint32_t endpoint,
-    uint64_t type, uint64_t data)
+rtkit_send(struct apple_mbox *mbox, uint32_t endpoint, uint8_t type,
+	uint64_t data)
 {
 	struct apple_mbox_msg msg;
-	int rc;
 
-	debugf("sending msg of type %" PRIx64 " to endpoint %" PRIx32, type, endpoint);
-	msg.data0 = (type << RTKIT_MGMT_TYPE_SHIFT) | data;
+	MPASS(rtkit_endpoint_is_valid(endpoint));
+
+	u_int shift = RTKIT_MGMT_TYPE_SHIFT;
+	if (endpoint == RTKIT_EP_OSLOG) {
+		shift = RTKIT_OSLOG_TYPE_SHIFT;
+	}
+	// Make sure message data does not overlap with message type
+	//MPASS((data >> shift) == 0);
+
+	msg.data0 = ((uint64_t)type) << shift;
+	msg.data0 |= data;
 	msg.data1 = endpoint;
-	rc = mbox_write(mc, &msg, sizeof(msg));
 
-	if (rc)
-		debugf("mbox_write failed (%d)", rc);
+	return apple_mbox_write(mbox, &msg);
+}
 
-	return rc;
+static int
+rtkit_set_ap_pwrstate(struct rtkit_state *state, uint16_t pwrstate)
+{
+	int error;
+	device_t dev = state->dev;
+	struct apple_mbox *mbox = &state->mbox;
+
+	MPASS(!cold);
+
+	if (state->ap_pwrstate == (pwrstate & 0xff)) {
+		device_printf(dev, "RTKit AP already in requested power state %d\n",
+			pwrstate);
+		return 0;
+	}
+
+	error = rtkit_send(mbox, RTKIT_EP_MGMT, RTKIT_MGMT_AP_PWR_STATE,
+		pwrstate);
+
+	if (error) {
+		device_printf(dev,
+			"error (%d) sending AP_PWR_STATE message to MGMT endpoint\n",
+			error);
+		return error;
+	}
+
+	if (state->ap_pwrstate != (pwrstate & 0xff)) {
+		error = tsleep(&state->ap_pwrstate, PWAIT, "appwr", hz);
+		if (error != 0) {
+			device_printf(dev,
+				"timed out (%d) waiting for AP power state change\n", error);
+		}
+	}
+	return error;
+}
+
+static int
+rtkit_set_iop_pwrstate(struct rtkit_state *state, uint16_t pwrstate)
+{
+	int error;
+	device_t dev = state->dev;
+	struct apple_mbox *mbox = &state->mbox;
+
+	MPASS(!cold);
+
+	if (state->iop_pwrstate == (pwrstate & 0xff)) {
+		device_printf(dev, "RTKit IOP already in requested power state %d\n",
+			pwrstate);
+		return 0;
+	}
+
+	error = rtkit_send(mbox, RTKIT_EP_MGMT, RTKIT_MGMT_IOP_PWR_STATE,
+		pwrstate);
+
+	if (error) {
+		device_printf(dev,
+			"error (%d) sending IOP_PWR_STATE message to MGMT endpoint\n",
+			error);
+		return error;
+	}
+
+	if (state->iop_pwrstate != (pwrstate & 0xff)) {
+		error = tsleep(&state->iop_pwrstate, PWAIT, "ioppwr", hz);
+		if (error != 0) {
+			device_printf(dev,
+				"timed out (%d) waiting for IOP power state change\n", error);
+		}
+	}
+	return error;
 }
 
 static void
-rtkit_dma_cb(void *arg, bus_dma_segment_t *segs, int nseg, int error)
+rtkit_dmamap_cb(void *arg, bus_dma_segment_t *segs, int nsegs, int error)
 {
-	debugf("DMA callback found error %d", error);
-	return;
-}
-
-static bus_addr_t
-rtkit_alloc(struct rtkit_state *state, bus_size_t size, caddr_t *kvap)
-{
-	struct rtkit *rk = state->rk;
-	bus_dmamap_t map;
-	void *vaddr;
+	struct rtkit_buffer *buffer = arg;
+	struct rtkit_state *state = buffer->state;
+	device_t dev = state->dev;
 	int rc;
 
-	debugf("requesting DMA buffer size: %" PRIx64 ", tag max size: %" PRIx64, size, rk->rk_dma_maxsize);
+	device_printf(dev, "dma map callback reported %d segments\n", nsegs);
+	MPASS(error == 0);
+	MPASS(nsegs == 1);
 
-	// I probably should just create the dma tag here tbh
-	if (size > rk->rk_dma_maxsize)
-		panic("unable to allocate enough memory for DMA\n");
+	buffer->addr = segs->ds_addr;
+	buffer->size = segs->ds_len;
 
-	// may allocate more memory than requested since it uses the DMA tag maxsize
-	rc = bus_dmamem_alloc(rk->rk_dmat, &vaddr, BUS_DMA_WAITOK | BUS_DMA_ZERO, &map);
-	if (rc) {
-		debugf("dmamem_alloc failed %d", rc);
-		goto err_mem_alloc;
-	}
-
-	// loads less memory than allocated since it uses the DMA request size
-	rc = bus_dmamap_load(rk->rk_dmat, map, vaddr, size, rtkit_dma_cb, NULL /* cb arg */, 0);
-	debugf("bus_dmamap_load returned %d (should be 0 or %d)", rc, EINPROGRESS);
-	if ((rc != 0) && (rc != EINPROGRESS)) {
-		debugf("dmamap_load failed %d", rc);
-		goto err_map_load;
-	}
-
-	if (rk->rk_map) {
-		rc = rk->rk_map(rk->rk_cookie, (bus_addr_t)vaddr, size);
-		if (rc) {
-			debugf("rkit_alloc callback failed %d", rc);
-			goto err_client_map;
+	if (state->map_fn) {
+		// might need to sleep to ensure callback in previous function was
+		// called. For now just assert it to avoid using buffer->addr
+		// uninitialized
+		MPASS(buffer->addr != 0);
+		rc = state->map_fn(state->map_arg, buffer->addr, buffer->size);
+		if (rc != 0) {
+			device_printf(dev, "dma map callback failed %d\n", rc);
 		}
 	}
+}
 
-	return (bus_addr_t)vaddr;
+static int
+rtkit_alloc(struct rtkit_state *state, bus_size_t req_size,
+	struct rtkit_buffer *buffer)
+{
+	device_t dev = state->dev;
+	int rc;
 
-err_client_map:
-	// necessary in error path?
-	//bus_dmamap_sync(rk->rk_dmat, map, BUS_DMASYNC_POSTREAD | BUS_DMASYNC_POSTWRITE);
-	bus_dmamap_unload(rk->rk_dmat, map);
-err_map_load:
-	bus_dmamem_free(rk->rk_dmat, vaddr, map);
-err_mem_alloc:
-	return (bus_addr_t)-1;
+	rc = bus_dma_tag_create(bus_get_dma_tag(dev),
+		PAGE_SIZE, /* 16K alignment */
+		0, /* bounds */
+		BUS_SPACE_MAXADDR, BUS_SPACE_MAXADDR, /* low/high addr */
+		NULL, NULL, /* filter depreacated and not supported anyway */ 
+		req_size, /* maxsize */
+		1, /* nsegments */
+		req_size, /* maxsegsize */
+		BUS_DMA_COHERENT,
+		NULL, NULL, /* lockfunc */
+		&buffer->tag);
+	if (rc != 0) {
+		device_printf(dev, "bus_dma_tag_create failed %d\n", rc);
+		return rc;
+	}
+
+	rc = bus_dmamem_alloc(buffer->tag, &buffer->kva,
+		BUS_DMA_WAITOK | BUS_DMA_ZERO, &buffer->map);
+	if (rc != 0) {
+		device_printf(dev, "bus_dmamem_alloc failed %d\n", rc);
+		return rc;
+	}
+
+	// these should be initialized by the callback in the next function
+	buffer->size = req_size;
+	buffer->addr = 0;
+	buffer->state = state;
+
+	rc = bus_dmamap_load(buffer->tag, buffer->map, buffer->kva, req_size,
+		rtkit_dmamap_cb, buffer, 0);
+	if ((rc != 0) && (rc != EINPROGRESS)) {
+		device_printf(dev, "bus_dmamap_load failed %d\n", rc);
+		return rc;
+	}
+
+	return 0;
 }
 
 static int
 rtkit_start(struct rtkit_state *state, uint32_t endpoint)
 {
-	mbox_t mc = state->mc;
+	struct apple_mbox *mbox = &state->mbox;
 	uint64_t reply;
 
 	reply = ((uint64_t)endpoint << RTKIT_MGMT_STARTEP_EP_SHIFT);
 	reply |= RTKIT_MGMT_STARTEP_START;
-	return rtkit_send(mc, RTKIT_EP_MGMT, RTKIT_MGMT_STARTEP, reply);
+	return rtkit_send(mbox, RTKIT_EP_MGMT, RTKIT_MGMT_STARTEP, reply);
 }
 
 static int
 rtkit_handle_mgmt(struct rtkit_state *state, struct apple_mbox_msg *msg)
 {
-	mbox_t mc = state->mc;
+	device_t dev = state->dev;
+	struct apple_mbox *mbox = &state->mbox;
 	uint64_t minver, maxver, ver;
 	uint64_t base, bitmap, reply;
 	uint32_t endpoint;
@@ -215,17 +332,19 @@ rtkit_handle_mgmt(struct rtkit_state *state, struct apple_mbox_msg *msg)
 		minver = RTKIT_MGMT_HELLO_MINVER(msg->data0);
 		maxver = RTKIT_MGMT_HELLO_MAXVER(msg->data0);
 		if (minver > RTKIT_MAXVER) {
-			printf("%s: unsupported minimum firmware version %lu\n",
-			    __func__, minver);
+			device_printf(dev,
+				"%s: unsupported minimum firmware version %lu\n", __func__,
+				minver);
 			return EINVAL;
 		}
 		if (maxver < RTKIT_MINVER) {
-			printf("%s: unsupported maximum firmware version %lu\n",
-			    __func__, maxver);
+			device_printf(dev,
+				"%s: unsupported maximum firmware version %lu\n", __func__,
+				maxver);
 			return EINVAL;
 		}
 		ver = min(RTKIT_MAXVER, maxver);
-		error = rtkit_send(mc, RTKIT_EP_MGMT, RTKIT_MGMT_HELLO_ACK,
+		error = rtkit_send(mbox, RTKIT_EP_MGMT, RTKIT_MGMT_HELLO_ACK,
 		    (ver << RTKIT_MGMT_HELLO_MINVER_SHIFT) |
 		    (ver << RTKIT_MGMT_HELLO_MAXVER_SHIFT));
 		if (error)
@@ -248,7 +367,7 @@ rtkit_handle_mgmt(struct rtkit_state *state, struct apple_mbox_msg *msg)
 			reply |= RTKIT_MGMT_EPMAP_LAST;
 		else
 			reply |= RTKIT_MGMT_EPMAP_MORE;
-		error = rtkit_send(state->mc, RTKIT_EP_MGMT,
+		error = rtkit_send(mbox, RTKIT_EP_MGMT,
 		    RTKIT_MGMT_EPMAP, reply);
 		if (error)
 			return error;
@@ -267,13 +386,13 @@ rtkit_handle_mgmt(struct rtkit_state *state, struct apple_mbox_msg *msg)
 				case RTKIT_EP_IOREPORT:
 				case RTKIT_EP_OSLOG:
 				case RTKIT_EP_TRACEKIT:
-					printf("%s: starting rtkit endpoint %d\n", __func__, endpoint);
+					device_printf(dev, "starting rtkit endpoint %d\n", endpoint);
 					error = rtkit_start(state, endpoint);
 					if (error)
 						return error;
 					break;
 				default:
-					printf("%s: skipping endpoint %d\n",
+					device_printf(dev, "%s: skipping endpoint %d\n",
 					    __func__, endpoint);
 					break;
 				}
@@ -289,434 +408,279 @@ rtkit_handle_mgmt(struct rtkit_state *state, struct apple_mbox_msg *msg)
 	return 0;
 }
 
-static void
-rtkit_handle_crashlog_buffer(void *context, int pending)
+static int
+rtkit_handle_buffer_req(struct rtkit_state *state, uint32_t endpoint,
+	struct apple_mbox_msg *msg, struct rtkit_buffer *buffer)
 {
-	struct rtkit_state *state = context;
-	struct rtkit *rk = state->rk;
-	bus_addr_t addr = state->crashlog_addr;
-	bus_size_t size = state->crashlog_size;
+	int error;
+	device_t dev = state->dev;
+	struct apple_mbox *mbox = &state->mbox;
+	//bus_addr_t addr = RTKIT_BUFFER_ADDR(msg->data0);
+	bus_size_t size = RTKIT_BUFFER_SIZE(msg->data0);
 
-#if 0
-	if (addr) {
-		paddr_t pa = addr;
-		vaddr_t va;
+	device_printf(dev, "RTKit endpoint %d requested %ld byte buffer\n",
+		endpoint, size << PAGE_SHIFT_4K);
 
-		// nvme ans doesn't use rk_logmap only pci/drm/apldcp.c does
-		if (rk && rk->rk_logmap) {
-		}
-		state->crashlog = km_alloc(size * PAGE_SIZE, &kv_any, &kp_none, &kd_waitok);
-		va = (vaddr_t)state->crashlog;
-	}
-#endif
-
-	if (rk) {
-		addr = rtkit_alloc(state, size << PAGE_SHIFT,
-			&state->crashlog);
-		if (addr == (bus_addr_t)-1)
-			return;
+	error = rtkit_alloc(state, size << PAGE_SHIFT_4K, buffer);
+	if (error != 0) {
+		return error;
 	}
 
-	rtkit_send(state->mc, RTKIT_EP_CRASHLOG, RTKIT_BUFFER_REQUEST,
-		(size << RTKIT_BUFFER_SIZE_SHIFT) | addr);
+	uint64_t data = size << RTKIT_BUFFER_SIZE_SHIFT;
+	data |= RTKIT_BUFFER_ADDR(buffer->addr);
+	return rtkit_send(mbox, endpoint, RTKIT_BUFFER_REQUEST, data);
 }
 
 static int
 rtkit_handle_crashlog(struct rtkit_state *state, struct apple_mbox_msg *msg)
 {
-	//mbox_t mc = state->mc;
-	//struct rtkit *rk = state->rk;
-	bus_addr_t addr;
-	bus_size_t size;
-	//int error;
-
-	switch (RTKIT_MGMT_TYPE(msg->data0)) {
-	case RTKIT_BUFFER_REQUEST:
-		addr = RTKIT_BUFFER_ADDR(msg->data0);
-		size = RTKIT_BUFFER_SIZE(msg->data0);
-
-		if (state->crashlog) {
-			char *buf;
-			debugf("RTKIT crashed");
-
-			buf = malloc(size * PAGE_SIZE, M_TEMP, M_NOWAIT);
-			if (buf) {
-				memcpy(buf, state->crashlog, size * PAGE_SIZE);
-				//rtkit_crashlog_dump(buf, size * PAGE_SIZE);
-			}
-			break;
-		}
-
-		state->crashlog_addr = addr;
-		state->crashlog_size = size;
-		if (cold)
-			rtkit_handle_crashlog_buffer(state, 0);
-		else
-			taskqueue_enqueue(taskqueue_thread, &state->crashlog_task);
-		break;
-	default:
-		printf("unhandled crashlog event 0x%016lx", msg->data0);
-		//return EIO;
-		break;
+	int rc;
+	device_t dev = state->dev;
+	uint8_t type = RTKIT_MGMT_TYPE(msg->data0);
+	if (type != RTKIT_BUFFER_REQUEST) {
+		device_printf(dev,
+			"unexpected RTKit msg of type %d from crashlog endpoint", type);
+		return EINVAL;
 	}
 
-	return 0;
+	if (state->crashlog_buffer.addr) {
+		panic("RTKIT crashed");
+	}
+
+	rc = rtkit_handle_buffer_req(state, RTKIT_EP_CRASHLOG, msg,
+		&state->crashlog_buffer);
+
+	return rc;
 }
 
 static int
 rtkit_handle_syslog(struct rtkit_state *state, struct apple_mbox_msg *msg)
 {
-#if 1
-printf("rtkit_handle_crashlog\n");
-#else
-	mbox_t mc = state->mc;
-	struct rtkit *rk = state->rk;
-	bus_addr_t addr;
-	bus_size_t size;
-	int error;
-
-	switch (RTKIT_MGMT_TYPE(msg->data0)) {
+	int rc;
+	uint8_t type = RTKIT_MGMT_TYPE(msg->data0);
+	switch (type) {
 	case RTKIT_BUFFER_REQUEST:
-		addr = RTKIT_BUFFER_ADDR(msg->data0);
-		size = RTKIT_BUFFER_SIZE(msg->data0);
-		if (addr)
-			break;
-
-		if (rk) {
-			addr = rtkit_alloc(rk, size << PAGE_SHIFT);
-			if (addr == (bus_addr_t)-1)
-				return ENOMEM;
-			if (rk->rk_map) {
-				error = rk->rk_map(rk->rk_cookie, addr,
-				    size << PAGE_SHIFT);
-				if (error)
-					return error;
-			}
-		}
-
-		error = rtkit_send(mc, RTKIT_EP_SYSLOG, RTKIT_BUFFER_REQUEST,
-		    (size << RTKIT_BUFFER_SIZE_SHIFT) | addr);
-		if (error)
-			return error;
-		break;
-	case RTKIT_SYSLOG_INIT:
+		rc = rtkit_handle_buffer_req(state, RTKIT_EP_SYSLOG, msg,
+			&state->syslog_buffer);
 		break;
 	case RTKIT_SYSLOG_LOG:
-		error = rtkit_send(mc, RTKIT_EP_SYSLOG,
-		    RTKIT_MGMT_TYPE(msg->data0), msg->data0);
-		if (error)
-			return error;
+		panic("unhandled syslog message %d", type);
+		break;
+	case RTKIT_SYSLOG_INIT:
+		panic("unhandled syslog message %d", type);
 		break;
 	default:
-		printf("%s: unhandled syslog event 0x%016llx\n",
-		    __func__, msg->data0);
-		return EIO;
+		panic("unknown syslog message of type %d", type);
+		break;
 	}
-#endif
 
-	return 0;
+	return rc;
 }
 
 static int
 rtkit_handle_ioreport(struct rtkit_state *state, struct apple_mbox_msg *msg)
 {
-#if 1
-printf("rtkit_handle_crashlog\n");
-#else
-	mbox_t mc = state->mc;
-	struct rtkit *rk = state->rk;
-	bus_addr_t addr;
-	bus_size_t size;
-	int error;
-
-	switch (RTKIT_MGMT_TYPE(msg->data0)) {
+	int rc;
+	device_t dev = state->dev;
+	struct apple_mbox *mbox = &state->mbox;
+	uint8_t type = RTKIT_MGMT_TYPE(msg->data0);
+	switch (type) {
 	case RTKIT_BUFFER_REQUEST:
-		addr = RTKIT_BUFFER_ADDR(msg->data0);
-		size = RTKIT_BUFFER_SIZE(msg->data0);
-		if (addr)
-			break;
-
-		if (rk) {
-			addr = rtkit_alloc(rk, size << PAGE_SHIFT);
-			if (addr == (bus_addr_t)-1)
-				return ENOMEM;
-			if (rk->rk_map) {
-				error = rk->rk_map(rk->rk_cookie, addr,
-				    size << PAGE_SHIFT);
-				if (error)
-					return error;
-			}
-		}
-
-		error = rtkit_send(mc, RTKIT_EP_IOREPORT, RTKIT_BUFFER_REQUEST,
-		    (size << RTKIT_BUFFER_SIZE_SHIFT) | addr);
-		if (error)
-			return error;
+		rc = rtkit_handle_buffer_req(state, RTKIT_EP_IOREPORT, msg,
+			&state->ioreport_buffer);
 		break;
 	case RTKIT_IOREPORT_UNKNOWN1:
+		/* fallthrough */
 	case RTKIT_IOREPORT_UNKNOWN2:
-		/* These unknown events have to be acked to make progress. */
-		error = rtkit_send(mc, RTKIT_EP_IOREPORT,
-		    RTKIT_MGMT_TYPE(msg->data0), msg->data0);
-		if (error)
-			return error;
+		/* must acknowledge these unknown ioreport messages to avoid a hang */
+		rc = rtkit_send(mbox, RTKIT_EP_IOREPORT, 0, msg->data0);
+		if (bootverbose) {
+			device_printf(dev,
+				"Ack'ed unknown message of type %d from RTKit ioreport endpoint\n",
+				type);
+		}
 		break;
 	default:
-		printf("%s: unhandled ioreport event 0x%016llx\n",
-		    __func__, msg->data0);
-		return EIO;
+		panic("unknown ioreport message of type %d", type);
+		break;
 	}
-#endif
-
-	return 0;
+	return rc;
 }
 
 static int
 rtkit_handle_oslog(struct rtkit_state *state, struct apple_mbox_msg *msg)
 {
-printf("rtkit_handle_oslog\n");
-#if 0
-	bus_addr_t addr;
+	int rc;
+	uint8_t type = RTKIT_OSLOG_TYPE(msg->data0);
+	device_t dev = state->dev;
+	struct apple_mbox *mbox = &state->mbox;
+	//bus_addr_t addr;
 	bus_size_t size;
 
-	switch (RTKIT_OSLOG_TYPE(msg->data0)) {
+	switch (type) {
 	case RTKIT_OSLOG_BUFFER_REQUEST:
-		addr = RTKIT_OSLOG_BUFFER_ADDR(msg->data0) << PAGE_SHIFT;
+		//addr = RTKIT_OSLOG_BUFFER_ADDR(msg->data0) << PAGE_SHIFT_4K;
 		size = RTKIT_OSLOG_BUFFER_SIZE(msg->data0);
-		if (addr)
-			break;
 
-		state->oslog_addr = addr;
-		state->oslog_size = size;
-		if (cold)
-			rtkit_handle_oslog_buffer(state);
-		else
-			task_add(systq, &state->oslog_task);
-		break;
-	case RTKIT_OSLOG_UNKNOWN1:
-	case RTKIT_OSLOG_UNKNOWN2:
-	case RTKIT_OSLOG_UNKNOWN3:
+		device_printf(dev, "RTKit oslog endpoint requested %ld byte buffer\n",
+			size);
+
+		rc = rtkit_alloc(state, size, &state->oslog_buffer);
+
+		if (rc == 0) {
+			uint64_t data = size << RTKIT_OSLOG_BUFFER_SIZE_SHIFT;
+			data |= RTKIT_OSLOG_BUFFER_ADDR(state->oslog_buffer.addr >> PAGE_SHIFT_4K);
+			rc = rtkit_send(mbox, RTKIT_EP_OSLOG, RTKIT_OSLOG_BUFFER_REQUEST, data);
+		}
 		break;
 	default:
-		printf("%s: unhandled oslog event 0x%lx\n", __func__, msg->data0);
+		panic("unknown oslog message of type %d", type);
 		break;
 	}
-
-#endif	
-	return 0;
+	return rc;
 }
 
-static int
-rtkit_poll(struct rtkit_state *state)
+// called in kthread
+static void
+rtkit_rx_task(void *context, int pending)
 {
-	mbox_t mc = state->mc;
-	struct apple_mbox_msg msg;
-	void (*callback)(void *, uint64_t);
+	struct rtkit_task *task = (struct rtkit_task *)context;
+	struct rtkit_state *state = task->state;
+	struct apple_mbox_msg *msg = &task->msg;
+	uint32_t endpoint = msg->data1;
+	apple_mbox_rx callback;
 	void *arg;
-	uint32_t endpoint;
-	int error;
-
-	error = rtkit_recv(mc, &msg);
-	if (error) {
-		// this is noisy
-		//debugf("rtkit_recv failed (%d)", error);
-		return error;
-	}
-
-	endpoint = msg.data1;
-	debugf("read message from endpoint %" PRIx32, endpoint);
+	bool valid_endpoint;
+	int error = 0;
 
 	switch (endpoint) {
 	case RTKIT_EP_MGMT:
-		error = rtkit_handle_mgmt(state, &msg);
-		if (error)
-			return error;
+		error = rtkit_handle_mgmt(state, msg);
 		break;
 	case RTKIT_EP_CRASHLOG:
-		error = rtkit_handle_crashlog(state, &msg);
-		if (error)
-			return error;
+		error = rtkit_handle_crashlog(state, msg);
 		break;
 	case RTKIT_EP_SYSLOG:
-		error = rtkit_handle_syslog(state, &msg);
-		if (error)
-			return error;
+		error = rtkit_handle_syslog(state, msg);
 		break;
 	case RTKIT_EP_IOREPORT:
-		error = rtkit_handle_ioreport(state, &msg);
-		if (error)
-			return error;
+		error = rtkit_handle_ioreport(state, msg);
 		break;
 	case RTKIT_EP_OSLOG:
-		error = rtkit_handle_oslog(state, &msg);
-		if (error)
-			return error;
+		error = rtkit_handle_oslog(state, msg);
 		break;
-	//case RTKIT_EP_TRACEKIT:
-	//	break;
+	case RTKIT_EP_TRACEKIT:
+		panic("rtkit_handle_tracekit unimplemented\n");
 	default:
-		if (endpoint >= 32 && endpoint < 64 && 
-		    state->callback[endpoint - 32]) {
-			callback = state->callback[endpoint - 32];
-			arg = state->arg[endpoint - 32];
-			callback(arg, msg.data0);
+ 		valid_endpoint = rtkit_endpoint_is_valid(endpoint);
+		if (!valid_endpoint) {
+			error = EIO;
 			break;
 		}
-
-		printf("%s: unhandled endpoint %d\n", __func__, msg.data1);
-		return EIO;
+		if (state->callbacks[endpoint - 32]) {
+			callback = state->callbacks[endpoint - 32];
+			arg = state->arg[endpoint - 32];
+			error = callback(arg, *msg);
+		}
 	}
+
+	if (error != 0) {
+		device_printf(state->dev,
+			"Error (%d) while handling RTKit message from endpoint %d\n",
+			error, endpoint);
+	}
+
+	free(task, M_DEVBUF);
+}
+
+// called in ithread can't sleep here
+static int
+rtkit_rx_callback(void *cookie, struct apple_mbox_msg msg)
+{
+	struct rtkit_state *state = (struct rtkit_state *)cookie;
+
+	struct rtkit_task *task = malloc(sizeof(*task), M_DEVBUF,
+		M_NOWAIT | M_USE_RESERVE);
+
+	if (task == NULL)
+		return ENOMEM;
+
+	task->msg = msg;
+	task->state = state;
+
+	TASK_INIT(&task->task, 0, rtkit_rx_task, task);
+	taskqueue_enqueue(taskqueue_thread, &task->task);
 
 	return 0;
 }
 
-static void
-rtkit_rx_callback(void *cookie, int channel)
+int
+rtkit_init(device_t dev, struct rtkit_state **statep)
 {
-	debugf("rtkit callback invoked");
-	rtkit_poll(cookie /*, channel is hardcoded to -1 in apple_mbox.c */);
-}
-
-struct rtkit_state *
-rtkit_init(int node, const char *name, struct rtkit *rk, mbox_t mc)
-{
+	int error;
 	struct rtkit_state *state;
-	//struct mbox_client client;
-	int ret;
+
+	if (statep == NULL) {
+		return EINVAL;
+	}
 
 	state = malloc(sizeof(*state), M_DEVBUF, M_WAITOK | M_ZERO);
-	//client.mc_rx_callback = rtkit_rx_callback;
-	//client.mc_rx_arg = state;
-	state->mc = mc;
-	state->rk = rk;
-	/* XXX setup_channel; what should third parameter be? */
-	if ((ret = mbox_setup_channel(mc, &rtkit_rx_callback, state)) != 0) {
-		printf("mbox_setuep_channel ret %d\n", ret);
-		free(state, M_DEVBUF);
-		return NULL;
+	if (state == NULL) {
+		return ENOMEM;
 	}
+
+	error = apple_mbox_get(dev, &state->mbox.dev);
+	if (error != 0) {
+		free(state, M_DEVBUF);
+		return error;
+	}
+
+	state->dev = dev;
+	apple_mbox_set_rx(&state->mbox, rtkit_rx_callback, state);
 
 	state->iop_pwrstate = RTKIT_MGMT_PWR_STATE_SLEEP;
 	state->ap_pwrstate = RTKIT_MGMT_PWR_STATE_QUIESCED;
 
-	TASK_INIT(&state->crashlog_task, 0, rtkit_handle_crashlog_buffer, state);
-	//TASK_INIT(&state->syslog_task, 0, rtkit_handle_syslog_buffer, state);
-	//TASK_INIT(&state->ioreport_task, 0, rtkit_handle_ioreport_buffer, state);
-	//TASK_INIT(&state->oslog_task, 0, rtkit_handle_oslog_buffer, state);
+	*statep = state;
 
-	return state;
+	return 0;
 }
 
 int
 rtkit_boot(struct rtkit_state *state)
 {
 	/* Wake up! */
-	debugf("setting IOP power state ON");
+	device_t dev = state->dev;
+	device_printf(dev, "setting RTKit IOP power state ON\n");
 	return rtkit_set_iop_pwrstate(state, RTKIT_MGMT_PWR_STATE_ON);
 }
 
-int
-rtkit_set_ap_pwrstate(struct rtkit_state *state, uint16_t pwrstate)
+void
+rtkit_set_map_callback(struct rtkit_state *state, rtkit_map map_fn, void *cookie)
 {
-	mbox_t mc = state->mc;
-	int error, timo;
-
-	if (state->ap_pwrstate == pwrstate)
-		return 0;
-
-	error = rtkit_send(mc, RTKIT_EP_MGMT, RTKIT_MGMT_AP_PWR_STATE,
-	    pwrstate);
-	if (error)
-		return error;
-
-	if (cold) {
-		for (timo = 0; timo < 100000; timo++) {
-			error = rtkit_poll(state);
-			if (error == EWOULDBLOCK) {
-				DELAY(10);
-				continue;
-			}
-			if (error)
-				return error;
-
-			if (state->ap_pwrstate == pwrstate)
-				return 0;
-		}
-	}
-
-	while (state->ap_pwrstate != pwrstate) {
-		//error = tsleep_sbt(&state->ap_pwrstate, PWAIT, "appwr",
-		//	nstosbt(1));
-		if (error)
-			return error;
-	}
-	return 0;
+	state->map_fn = map_fn;
+	state->map_arg = cookie;
 }
 
-int
-rtkit_set_iop_pwrstate(struct rtkit_state *state, uint16_t pwrstate)
-{
-	mbox_t mc = state->mc;
-	int error, timo;
+//int
+//rtkit_start_endpoint(struct rtkit_state *state, uint32_t endpoint,
+//    void (*callback)(void *, uint64_t), void *arg)
+//{
+//	if (endpoint < 32 || endpoint >= 64)
+//		return EINVAL;
+//
+//	if ((state->epmap & (1ULL << endpoint)) == 0)
+//		return EINVAL;
+//
+//	state->callback[endpoint - 32] = callback;
+//	state->arg[endpoint - 32] = arg;
+//	return rtkit_start(state, endpoint);
+//}
+//
+//int
+//rtkit_send_endpoint(struct rtkit_state *state, uint32_t endpoint,
+//    uint64_t data)
+//{
+//	return rtkit_send(state->mc, endpoint, 0, data);
+//}
 
-	debugf("changing power state: %d -> %d", state->iop_pwrstate, pwrstate);
-	/* nothing to do in this case */
-	if (state->iop_pwrstate == (pwrstate & 0xff))
-		return 0;
-
-	error = rtkit_send(mc, RTKIT_EP_MGMT, RTKIT_MGMT_IOP_PWR_STATE,
-		pwrstate);
-
-	debugf("rtkit_send returned %d", error);
-
-	if (error)
-		return error;
-
-	if (cold) {
-		debugf("setting IOP on cold boot");
-		for (timo = 0; timo < 100000; timo++) {
-			error = rtkit_poll(state);
-			if (error == EWOULDBLOCK) {
-				DELAY(10);
-				continue;
-			}
-			if (error)
-				return error;
-
-			if (state->iop_pwrstate == (pwrstate & 0xff))
-				return 0;
-		}
-	}
-	debugf("finished cold polling thing");
-
-	while (state->iop_pwrstate != (pwrstate & 0xff)) {
-		debugf("got here");
-		// TODO: can't sleep here
-		error = tsleep(&state->iop_pwrstate, PWAIT, "ioppwr", 1);
-		if (error)
-			return error;
-	}
-	return 0;
-}
-
-int
-rtkit_start_endpoint(struct rtkit_state *state, uint32_t endpoint,
-    void (*callback)(void *, uint64_t), void *arg)
-{
-	if (endpoint < 32 || endpoint >= 64)
-		return EINVAL;
-
-	if ((state->epmap & (1ULL << endpoint)) == 0)
-		return EINVAL;
-
-	state->callback[endpoint - 32] = callback;
-	state->arg[endpoint - 32] = arg;
-	return rtkit_start(state, endpoint);
-}
-
-int
-rtkit_send_endpoint(struct rtkit_state *state, uint32_t endpoint,
-    uint64_t data)
-{
-	return rtkit_send(state->mc, endpoint, 0, data);
-}

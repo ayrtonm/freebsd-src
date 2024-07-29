@@ -7,7 +7,6 @@ options 	SOC_APPLE_T8103
 
 options 	FDT
 
-device		mbox
 device		nvme_ans
 device		powerdom
 

@@ -50,6 +50,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/conf.h>
 #include <sys/proc.h>
 #include <sys/smp.h>
+#include <sys/taskqueue.h>
 
 #include <dev/ofw/openfirm.h>
 #include <dev/ofw/ofw_bus.h>
@@ -84,9 +85,22 @@ __FBSDID("$FreeBSD$");
 #define ANS_NVMMU_TCB_SIZE	0x4000
 #define ANS_NVMMU_TCB_PITCH	0x80
 
-#define debugf(fmt, ...) do { printf("%s: " fmt "\n", __func__, ##__VA_ARGS__); } while (0)
+struct nvme_ans_qpair {
+	struct nvme_qpair	*qpair;
+	struct nvme_ans_nvmmu_tcb *tcb;
 
-struct ans_nvmmu_tcb {
+	bus_addr_t			addr;
+	bus_size_t			size;
+	void				*kva;
+
+	bus_dma_tag_t		tag;
+	bus_dmamap_t		map;
+
+	struct nvme_ans_controller *sc;
+	bool is_admin;
+};
+
+struct nvme_ans_nvmmu_tcb {
 	uint8_t		tcb_opcode;
 	uint8_t		tcb_flags;
 #define ANS_NVMMU_TCB_WRITE		(1 << 0)
@@ -101,46 +115,57 @@ struct ans_nvmmu_tcb {
 };
 
 struct nvme_ans_controller {
-	struct nvme_controller	nvme;		/* base class, must be first */
-	/* SART info */
-	bus_space_tag_t		bus_tag;
-	bus_space_handle_t	bus_handle;
-	int			resource_id;
-	struct resource		*resource;
+	struct nvme_controller	sc_ctrlr;		/* base class, must be first */
 
-	uint32_t		 sart;
-	struct rtkit		 rtkit;
-	struct rtkit_state	*rtkit_state;
-	struct nvme_dmamem	*nvmmu;
-	mbox_t			mbox;
+	struct resource			*sc_ans;
+	int						sc_ans_id;
+	bus_space_tag_t			sc_ans_bus_tag;
+	bus_space_handle_t		sc_ans_bus_handle;
+
+	phandle_t				sc_sart;
+	struct rtkit_state		*sc_rtkit_state;
+
+	struct nvme_ans_qpair	sc_adminq;
+	struct nvme_ans_qpair	sc_ioq;
 };
 
 #define ANSDEVICE2SOFTC(dev) \
 	((struct nvme_ans_controller *) device_get_softc(dev))
 
-/*
- * The following two macros work on an nvme_ans_controller (for SART)
- * as well as nvme_controller (for NVME and Apple/ANS) by virtue of
- * common structure element names.
- */
-#define NVME_ANS_READ_4(_sc, reg) \
-    bus_space_read_4((_sc)->bus_tag, (_sc)->bus_handle, (reg))
-#define NVME_ANS_WRITE_4(_sc, reg, val) \
-    bus_space_write_4((_sc)->bus_tag, (_sc)->bus_handle, (reg), (val))
+#define NVME_READ_4(_sc, _reg) \
+	bus_space_read_4((_sc)->bus_tag, (_sc)->bus_handle, (_reg))
 
-static int	nvme_ans_probe(device_t dev);
-static int	nvme_ans_attach(device_t dev);
-//static int    nvme_ans_detach(device_t dev);
+#define NVME_WRITE_4(_sc, _reg, _val) \
+	bus_space_write_4((_sc)->bus_tag, (_sc)->bus_handle, (_reg), (_val))
+
+#define NVME_WRITE_8(_sc, _reg, _val) \
+	do { \
+		bus_space_write_4((_sc)->bus_tag, (_sc)->bus_handle, (_reg), (_val & 0xffffffff)); \
+		bus_space_write_4((_sc)->bus_tag, (_sc)->bus_handle, (_reg) + 4, (_val >> 32)); \
+	} while (0)
+
+#define NVME_ANS_READ_4(_sc, _reg) \
+	bus_space_read_4((_sc)->sc_ans_bus_tag, (_sc)->sc_ans_bus_handle, (_reg))
+#define NVME_ANS_WRITE_4(_sc, _reg, _val) \
+	bus_space_write_4((_sc)->sc_ans_bus_tag, (_sc)->sc_ans_bus_handle, (_reg), (_val))
+
+static int nvme_ans_probe(device_t dev);
+static int nvme_ans_attach(device_t dev);
+//static int nvme_ans_detach(device_t dev);
 
 static int	nvme_ans_sart_map(void *, bus_addr_t, bus_size_t);
-//extern int	apple_sart_map(uint32_t, bus_addr_t, bus_size_t);
-void		nvme_ans_enable(device_t dev, struct nvme_controller *ctrlr);
-uint32_t	nvme_ans_sq_enter(device_t dev,
-				  struct nvme_controller *ctrlr,
-				  struct nvme_qpair *qpair);
-void		nvme_ans_sq_leave(device_t dev,
-				  struct nvme_controller *ctrlr,
-				  struct nvme_qpair *qpair);
+
+static int nvme_ans_delayed_attach(device_t dev, struct nvme_controller *ctrlr);
+static void nvme_ans_enable(device_t dev);
+static uint32_t nvme_ans_sq_enter(device_t dev, struct nvme_qpair *qpair,
+	struct nvme_tracker *tr);
+static void nvme_ans_sq_leave(device_t dev, struct nvme_qpair *qpair,
+	struct nvme_tracker *tr);
+static void nvme_ans_cq_done(device_t dev, struct nvme_qpair *qpair,
+	struct nvme_tracker *tr);
+
+static int nvme_ans_qpair_construct(device_t dev, struct nvme_qpair *qpair,
+	uint32_t num_entries, uint32_t num_trackers, struct nvme_controller *ctrlr);
 
 static device_method_t nvme_ans_methods[] = {
 	/* Device interface */
@@ -150,11 +175,14 @@ static device_method_t nvme_ans_methods[] = {
 	DEVMETHOD(device_shutdown,  nvme_shutdown),
 
 	/* NVME interface */
-	DEVMETHOD(nvme_enable,      nvme_ans_enable),
-	DEVMETHOD(nvme_sq_enter,    nvme_ans_sq_enter),
-	DEVMETHOD(nvme_sq_leave,    nvme_ans_sq_leave),
+	DEVMETHOD(nvme_delayed_attach,	nvme_ans_delayed_attach),
+	DEVMETHOD(nvme_enable,			nvme_ans_enable),
+	DEVMETHOD(nvme_sq_enter,		nvme_ans_sq_enter),
+	DEVMETHOD(nvme_sq_leave,		nvme_ans_sq_leave),
+	DEVMETHOD(nvme_cq_done,			nvme_ans_cq_done),
+	DEVMETHOD(nvme_qpair_construct, nvme_ans_qpair_construct),
 
-	{ 0, 0 }
+	DEVMETHOD_END,
 };
 
 static driver_t nvme_ans_driver = {
@@ -165,9 +193,16 @@ static driver_t nvme_ans_driver = {
 
 DRIVER_MODULE(nvme, simplebus, nvme_ans_driver, NULL, NULL);
 
+static int
+nvme_ans_sart_map(void *cookie, bus_addr_t addr, bus_size_t size)
+{
+	struct nvme_ans_controller *sc = cookie;
+	
+	return (apple_sart_map(sc->sc_sart, addr, size));
+}
+
 static struct ofw_compat_data compat_data[] = {
-	{"apple,nvme-m1",		1},
-	{"apple,nvme-ans2",		1},
+	{"apple,nvme-ans2",	1},
 	{NULL,				0}
 };
 
@@ -188,72 +223,59 @@ nvme_ans_probe(device_t dev)
 static int
 nvme_ans_attach(device_t dev)
 {
+	int error;
 	struct nvme_ans_controller *sc = ANSDEVICE2SOFTC(dev);
-	struct nvme_controller *ctrlr = &sc->nvme;
+	struct nvme_controller *ctrlr = &sc->sc_ctrlr;
 	phandle_t node;
-	uint32_t ctrl, status;
-	ssize_t sret;
-	int ret;
 
-	/* need registers for NVME, SART */
-
-	debugf("ANS attach");
-	/* Map NVME registers */
 	node = ofw_bus_get_node(dev);
-	if (ofw_bus_find_string_index(node, "reg-names", "nvme",
-	    &ctrlr->resource_id) != 0) {
-		device_printf(dev, "couldn't get \"nvme\" regs\n");
-		ret = ENXIO;
-		goto bad;
-	}
-	debugf("found nvme");
-	ctrlr->resource = bus_alloc_resource_any(dev, SYS_RES_MEMORY,
-	    &ctrlr->resource_id, RF_ACTIVE);
 
+	error = ofw_bus_find_string_index(node, "reg-names", "ans",
+		&sc->sc_ans_id);
+	if (error != 0) {
+		device_printf(dev, "couldn't find 'ans' reg %d\n", error);
+		return ENXIO;
+	}
+
+	sc->sc_ans = bus_alloc_resource_any(dev, SYS_RES_MEMORY,
+		&sc->sc_ans_id, RF_ACTIVE);
+	if (sc->sc_ans == NULL) {
+		device_printf(dev, "couldn't allocate 'ans' mem resource\n");
+		return ENOMEM;
+	}
+
+	sc->sc_ans_bus_tag = rman_get_bustag(sc->sc_ans);
+	sc->sc_ans_bus_handle = rman_get_bushandle(sc->sc_ans);
+
+
+	error = ofw_bus_find_string_index(node, "reg-names", "nvme",
+		&ctrlr->resource_id);
+	if (error != 0) {
+		device_printf(dev, "couldn't find 'nvme' reg %d\n", error);
+		goto err_find_nvme;
+	}
+
+	ctrlr->resource = bus_alloc_resource_any(dev, SYS_RES_MEMORY,
+		&ctrlr->resource_id, RF_ACTIVE);
 	if (ctrlr->resource == NULL) {
-		device_printf(dev, "unable to allocate NVME mem resource\n");
-		ret = ENOMEM;
-		goto bad;
+		device_printf(dev, "couldn't allocate 'nvme' mem resource\n");
+		error = ENOMEM;
+		goto err_alloc_nvme;
 	}
 	ctrlr->bus_tag = rman_get_bustag(ctrlr->resource);
 	ctrlr->bus_handle = rman_get_bushandle(ctrlr->resource);
 	ctrlr->regs = (struct nvme_registers *)ctrlr->bus_handle;
 
-	debugf("SART");
-	/* Map SART registers */
-	if (ofw_bus_find_string_index(node, "reg-names", "ans",
-	    &sc->resource_id) != 0) {
-		device_printf(dev, "couldn't get \"ans\" regs\n");
-		ret = ENXIO;
-		goto bad;
-	}
-	sc->resource = bus_alloc_resource_any(dev, SYS_RES_MEMORY,
-	    &sc->resource_id, RF_ACTIVE);
-
-	if (sc->resource == NULL) {
-		device_printf(dev, "unable to allocate SART mem resource\n");
-		ret = ENOMEM;
-		goto bad;
-	}
-	sc->bus_tag = rman_get_bustag(sc->resource);
-	sc->bus_handle = rman_get_bushandle(sc->resource);
-
-	//power_domain_enable(faa->fa_node);
-
-	debugf("IRQ");
-	/* Allocate and setup IRQ */
 	ctrlr->rid = 0;
 	ctrlr->res = bus_alloc_resource_any(dev, SYS_RES_IRQ,
-	    &ctrlr->rid, RF_SHAREABLE | RF_ACTIVE);
+		&ctrlr->rid, RF_SHAREABLE | RF_ACTIVE);
 	if (ctrlr->res == NULL) {
-		device_printf(dev, "unable to allocate interrupt\n");
-		ret = ENOMEM;
-		goto bad;
+		device_printf(dev, "couldn't allocate irq resource\n");
+		error = ENOMEM;
+		goto err_alloc_irq;
 	}
-
 	ctrlr->msi_count = 0;
 	ctrlr->num_io_queues = 1;
-
 	/*
 	 * We're attached via this funky mechanism. Flag the controller so that
 	 * it avoids things that can't work when we do that, like asking for
@@ -261,129 +283,281 @@ nvme_ans_attach(device_t dev)
 	 */
 	ctrlr->quirks |= QUIRK_ANS;
 
-	sret = OF_getencprop(node, "apple,sart", &sc->sart,
-	    sizeof(sc->sart)); /* XXX ??? */
-	if (sret != sizeof(sc->sart))
-		device_printf(dev, "OF_getprop apple,sart %jd\n",
-		    (intmax_t) sret);
-	sc->rtkit.rk_cookie = sc;
-	// TODO: figure out a reasonable way to set a maximum. this is the value returned on my m2 macbook air with 16K pages enabled
-	sc->rtkit.rk_dma_maxsize = 0x20000;
-	debugf("cretaing dma tag with alignment/PAGE_SIZE: %x", PAGE_SIZE);
-	ret = bus_dma_tag_create(bus_get_dma_tag(dev),	/* parent? */
-		       PAGE_SIZE, 0,		/* alignment, bounds */
-		       BUS_SPACE_MAXADDR,	/* lowaddr */
-		       BUS_SPACE_MAXADDR,	/* highaddr */
-		       NULL, NULL,		/* filter, filterarg not supported by arm64 dma bounce anyway */
-		       sc->rtkit.rk_dma_maxsize,		/* maxsize */
-		       1,			/* nsegments */
-		       256 * 1024,		/* maxsegsize ??? */
-		       0 /*BUS_DMA_ALLOCNOW*/,	/* flags */
-		       NULL,			/* lockfunc */
-		       NULL,			/* lockarg */
-		       &sc->rtkit.rk_dmat);
-	if (ret != 0) {
-		device_printf(dev, "bus_dma_tag_create failed %d\n", ret);
-		goto bad;
-	}
-	sc->rtkit.rk_map = nvme_ans_sart_map;
-
-	ret = mbox_get_by_ofw_idx(dev, node, 0, &sc->mbox);
-	if (ret < 0) {
-		device_printf(dev, "can't set up rtkit mailbox ret %d\n", ret);
-		ret = ENXIO;
-		goto bad;
-	}
-	sc->rtkit_state = rtkit_init(node, NULL, &sc->rtkit, sc->mbox);
-	if (sc->rtkit_state == NULL) {
-		device_printf(dev, "can't set up rtkit\n");
-		ret = ENXIO;
-		goto bad;
-	}
-	/* XXX how do we set up mbox callback? */
-
-	debugf("hit regs");
-	ctrl = NVME_ANS_READ_4(sc, ANS_CPU_CTRL);
-	NVME_ANS_WRITE_4(sc, ANS_CPU_CTRL, ctrl | ANS_CPU_CTRL_RUN);
-
-	status = NVME_ANS_READ_4(ctrlr, ANS_BOOT_STATUS);
-	if (status != ANS_BOOT_STATUS_OK)
-		rtkit_boot(sc->rtkit_state);
-
-	status = NVME_ANS_READ_4(ctrlr, ANS_BOOT_STATUS);
-	if (status != ANS_BOOT_STATUS_OK) {
-		device_printf(dev, "firmware not ready\n");
-		ret = ENXIO;
-		goto bad;
+	error = OF_getencprop(node, "apple,sart", &sc->sc_sart,
+		sizeof(sc->sc_sart));
+	if (error != sizeof(sc->sc_sart)) {
+		device_printf(dev, "couldn't find 'apple,sart' property %d\n", error);
+		goto err_find_sart;
 	}
 
-	if (bus_setup_intr(dev, ctrlr->res,
-	    INTR_TYPE_MISC | INTR_MPSAFE, NULL, nvme_ctrlr_shared_handler,
-	    ctrlr, &ctrlr->tag) != 0) {
-		device_printf(dev, "unable to setup interrupt\n");
-		ret = ENOMEM;
-		goto bad;
-	}
-	ctrlr->tag = (void *)0x1;
-
-	NVME_ANS_WRITE_4(ctrlr, ANS_LINEAR_SQ_CTRL, ANS_LINEAR_SQ_CTRL_EN);
-	NVME_ANS_WRITE_4(ctrlr, ANS_MAX_PEND_CMDS_CTRL,
-	    (ANS_MAX_QUEUE_DEPTH << 16) | ANS_MAX_QUEUE_DEPTH);
-
-	ctrl = NVME_ANS_READ_4(ctrlr, ANS_UNKNOWN_CTRL);
-	NVME_ANS_WRITE_4(ctrlr, ANS_UNKNOWN_CTRL, ctrl & ~ANS_PRP_NULL_CHECK);
-
-	//ctrlr->sc_ios = faa->fa_reg[0].size;	/* XXX */
-	//ctrlr->sc_openings = 1;
-
-	debugf("nvme_attach");
-	return (nvme_attach(dev));	/* Note: failure frees resources */
-bad:
-	debugf("bad:");
-	if (ctrlr->resource != NULL) {
-		bus_release_resource(dev, SYS_RES_MEMORY,
-		    ctrlr->resource_id, ctrlr->resource);
-	}
-	if (sc->resource != NULL) {
-		bus_release_resource(dev, SYS_RES_MEMORY,
-		    sc->resource_id, sc->resource);
-	}
-	if (ctrlr->res) {
-		bus_release_resource(dev, SYS_RES_IRQ,
-		    rman_get_rid(ctrlr->res), ctrlr->res);
+	error = bus_setup_intr(dev, ctrlr->res, INTR_TYPE_MISC| INTR_MPSAFE, NULL,
+		nvme_ctrlr_shared_handler, ctrlr, &ctrlr->tag);
+	if (error != 0) {
+		device_printf(dev, "couldn't set up interrupt handler %d\n", error);
+		goto err_setup_intr;
 	}
 
-	return (ret);
+	// This frees ctrlr resources on failure
+	error = nvme_attach(dev);
+	if (error != 0) {
+		device_printf(dev, "generic nvme_attach failed %d\n", error);
+		goto err_ctrlr_attach;
+	}
+
+	error = rtkit_init(dev, &sc->sc_rtkit_state);
+	if (error != 0) {
+		device_printf(dev, "error initializing RTKit %d\n", error);
+		goto err_rtkit_init;
+	}
+	rtkit_set_map_callback(sc->sc_rtkit_state, nvme_ans_sart_map, sc);
+
+	return 0;
+
+err_rtkit_init:
+err_setup_intr:
+err_find_sart:
+	bus_release_resource(dev, SYS_RES_IRQ, ctrlr->rid, ctrlr->res);
+err_alloc_irq:
+	bus_release_resource(dev, SYS_RES_MEMORY, ctrlr->resource_id,
+		ctrlr->resource);
+// This label is out of order since nvme_attach frees ctrlr resources on failure
+// TODO: double check nvme_attach
+err_ctrlr_attach:
+err_alloc_nvme:
+err_find_nvme:
+	bus_release_resource(dev, SYS_RES_MEMORY, sc->sc_ans_id,
+		sc->sc_ans);
+	return error;
+}
+
+static void
+nvme_ans_dmamap_cb(void *arg, bus_dma_segment_t *segs, int nsegs, int error)
+{
+	struct nvme_ans_qpair *ans_qpair = arg;
+	struct nvme_controller *ctrlr = &ans_qpair->sc->sc_ctrlr;
+
+	MPASS(error == 0);
+	MPASS(nsegs == 1);
+
+	ans_qpair->addr = segs->ds_addr;
+	ans_qpair->size = segs->ds_len;
+
+	bus_size_t base;
+	if (ans_qpair->is_admin) {
+		base = ANS_NVMMU_BASE_ASQ;
+	} else {
+		base = ANS_NVMMU_BASE_IOSQ;
+	}
+
+	NVME_WRITE_8(ctrlr, base, ans_qpair->addr);
+
+	wakeup(&ans_qpair->addr);
 }
 
 static int
-nvme_ans_sart_map(void *cookie, bus_addr_t addr, bus_size_t size)
+nvme_ans_alloc_qpair(device_t dev, uint32_t id, struct nvme_ans_qpair *ans_qpair)
 {
-	struct nvme_ans_controller *sc = cookie;
-	
-	return (apple_sart_map(sc->sart, addr, size));
+	int rc;
+	struct nvme_ans_controller *sc = ANSDEVICE2SOFTC(dev);
+	struct nvme_controller *ctrlr = &sc->sc_ctrlr;
+
+	if (id == 0) {
+		ans_qpair->is_admin = true;
+	} else {
+		ans_qpair->is_admin = false;
+	}
+	ans_qpair->addr = 0;
+	ans_qpair->size = 0;
+	ans_qpair->sc = sc;
+
+	rc = bus_dma_tag_create(bus_get_dma_tag(dev),
+		PAGE_SIZE, /* TODO: alignment */
+		0, /* TODO: bounds */
+		BUS_SPACE_MAXADDR, BUS_SPACE_MAXADDR,
+		NULL, NULL,
+		ANS_NVMMU_TCB_SIZE,
+		1, ANS_NVMMU_TCB_SIZE, /* 1 segment */
+		BUS_DMA_COHERENT,
+		NULL, NULL,
+		&ans_qpair->tag);
+	if (rc != 0) {
+		nvme_printf(ctrlr, "unable to create dma tag %d\n", rc);
+		return rc;
+	}
+	nvme_printf(ctrlr, "created dma tag for qpair ID = %d\n", id);
+
+	rc = bus_dmamem_alloc(ans_qpair->tag, &ans_qpair->kva,
+		BUS_DMA_WAITOK | BUS_DMA_ZERO /* | BUS_DMA_COHERENT */, &ans_qpair->map);
+	if (rc != 0) {
+		nvme_printf(ctrlr, "unable to allocate dma mem %d\n", rc);
+		return rc;
+	}
+	nvme_printf(ctrlr, "allocated dma mem for qpair ID = %d\n", id);
+
+	rc = bus_dmamap_load(ans_qpair->tag, ans_qpair->map,
+		ans_qpair->kva, ANS_NVMMU_TCB_SIZE, nvme_ans_dmamap_cb, ans_qpair, 0);
+	if ((rc != 0) && (rc != EINPROGRESS)) {
+		nvme_printf(ctrlr, "dma map load failed %d\n", rc);
+		return rc;
+	}
+	nvme_printf(ctrlr, "loaded dma mem for qpair ID = %d\n", id);
+
+	bus_dmamap_sync(ans_qpair->tag, ans_qpair->map,
+		BUS_DMASYNC_PREREAD | BUS_DMASYNC_PREWRITE);
+	return 0;
 }
 
-void
-nvme_ans_enable(device_t dev, struct nvme_controller *ctrlr)
+static int
+nvme_ans_delayed_attach(device_t dev, struct nvme_controller *ctrlr)
 {
-nvme_printf(ctrlr, "enable\n");
-	bus_space_write_4(ctrlr->bus_tag, ctrlr->bus_handle, ANS_NVMMU_NUM,
-			  (ANS_NVMMU_TCB_SIZE / ANS_NVMMU_TCB_PITCH) - 1);
-	bus_space_write_4(ctrlr->bus_tag, ctrlr->bus_handle, ANS_MODESEL_REG, 0);
+	uint32_t ctrl, status;
+	struct nvme_ans_controller *sc = ANSDEVICE2SOFTC(dev);
+
+	ctrl = NVME_ANS_READ_4(sc, ANS_CPU_CTRL);
+	NVME_ANS_WRITE_4(sc, ANS_CPU_CTRL, ctrl | ANS_CPU_CTRL_RUN);
+
+	status = NVME_READ_4(ctrlr, ANS_BOOT_STATUS);
+	if (status != ANS_BOOT_STATUS_OK) {
+		rtkit_boot(sc->sc_rtkit_state);
+	}
+
+	device_printf(dev, "waiting for firmware\n");
+	for (int timo = 0; timo < 1000; timo++) {
+		status = NVME_READ_4(ctrlr, ANS_BOOT_STATUS);
+		if (status != ANS_BOOT_STATUS_OK) {
+			DELAY(1);
+		}
+	}
+	status = NVME_READ_4(ctrlr, ANS_BOOT_STATUS);
+	if (status != ANS_BOOT_STATUS_OK) {
+		device_printf(dev, "timed out waiting for firmware\n");
+		return ENXIO;
+	}
+	device_printf(dev, "firmware ready\n");
+
+	if (nvme_ans_alloc_qpair(dev, 0, &sc->sc_adminq)) {
+		device_printf(dev, "unable to allocate dma mem for admin q\n");
+		return ENXIO;
+	}
+	if (nvme_ans_alloc_qpair(dev, 1, &sc->sc_ioq)) {
+		device_printf(dev, "unable to allocate dma mem for IO q\n");
+		return ENXIO;
+	}
+
+	// wait for dmamap callback, probably not necessary
+	if (sc->sc_adminq.addr == 0) {
+		tsleep(&sc->sc_adminq.addr, PWAIT, "", 5 * hz);
+	}
+	if (sc->sc_ioq.addr == 0) {
+		tsleep(&sc->sc_ioq.addr, PWAIT, "", 5 * hz);
+	}
+
+	NVME_WRITE_4(ctrlr, ANS_LINEAR_SQ_CTRL, ANS_LINEAR_SQ_CTRL_EN);
+	NVME_WRITE_4(ctrlr, ANS_MAX_PEND_CMDS_CTRL,
+		(ANS_MAX_QUEUE_DEPTH << 16) | ANS_MAX_QUEUE_DEPTH);
+
+	ctrl = NVME_READ_4(ctrlr, ANS_UNKNOWN_CTRL);
+	NVME_WRITE_4(ctrlr, ANS_UNKNOWN_CTRL, ctrl & ~ANS_PRP_NULL_CHECK);
+
+	return 0;
 }
 
-uint32_t
-nvme_ans_sq_enter(device_t dev, struct nvme_controller *ctrlr,
-    struct nvme_qpair *qpair)
+static void
+nvme_ans_enable(device_t dev)
 {
-nvme_printf(ctrlr, "sq_enter\n");
-	return (0/*notyet*/);
+	struct nvme_ans_controller *sc = ANSDEVICE2SOFTC(dev);
+	struct nvme_controller *ctrlr = &sc->sc_ctrlr;
+
+	NVME_WRITE_4(ctrlr, ANS_NVMMU_NUM,
+		(ANS_NVMMU_TCB_SIZE / ANS_NVMMU_TCB_PITCH) - 1);
+	NVME_WRITE_4(ctrlr, ANS_MODESEL_REG, 0);
 }
 
-void
-nvme_ans_sq_leave(device_t dev, struct nvme_controller *ctrlr,
-    struct nvme_qpair *qpair)
+static uint32_t
+nvme_ans_sq_enter(device_t dev, struct nvme_qpair *qpair,
+	struct nvme_tracker *tr)
 {
-nvme_printf(ctrlr, "sq_leave\n");
+	return tr->req->cmd.cid;
+}
+
+static struct nvme_ans_nvmmu_tcb *
+nvme_ans_qpair_to_tcb(struct nvme_ans_qpair *ans_qpair, struct nvme_tracker *tr)
+{
+	return (struct nvme_ans_nvmmu_tcb *)(((char *)ans_qpair->kva) + (tr->req->cmd.cid * ANS_NVMMU_TCB_PITCH));
+}
+
+static void
+nvme_ans_sq_leave(device_t dev, struct nvme_qpair *qpair, struct nvme_tracker *tr)
+{
+	struct nvme_ans_controller *sc = ANSDEVICE2SOFTC(dev);
+	struct nvme_controller *ctrlr = &sc->sc_ctrlr;
+
+	uint16_t id = tr->req->cmd.cid;
+	struct nvme_ans_qpair *ans_qpair = &sc->sc_adminq;
+	if (qpair->id != 0) {
+		ans_qpair = &sc->sc_ioq;
+	}
+	//MPASS(ans_qpair->qpair == qpair);
+	struct nvme_ans_nvmmu_tcb *tcb = nvme_ans_qpair_to_tcb(ans_qpair, tr);
+
+	struct nvme_command *cmd = qpair->cmd;
+	cmd += id;
+
+	bus_dmamap_sync(ans_qpair->tag, ans_qpair->map, BUS_DMASYNC_POSTWRITE);
+
+	memset(tcb, 0, sizeof(*tcb));
+	tcb->tcb_opcode = cmd->opc;
+	tcb->tcb_flags = ANS_NVMMU_TCB_WRITE | ANS_NVMMU_TCB_READ;
+	tcb->tcb_cid = id;
+	tcb->tcb_prpl_len = cmd->cdw12;
+	tcb->tcb_prp[0] = cmd->prp1;
+	tcb->tcb_prp[1] = cmd->prp2;
+
+	bus_dmamap_sync(ans_qpair->tag, ans_qpair->map, BUS_DMASYNC_PREWRITE);
+
+	NVME_WRITE_4(ctrlr, qpair->sq_tdbl_off, id);
+}
+
+static void
+nvme_ans_cq_done(device_t dev, struct nvme_qpair *qpair, struct nvme_tracker *tr)
+{
+	struct nvme_ans_controller *sc = ANSDEVICE2SOFTC(dev);
+	struct nvme_controller *ctrlr = &sc->sc_ctrlr;
+
+	uint16_t id = tr->req->cmd.cid;
+	struct nvme_ans_qpair *ans_qpair = &sc->sc_adminq;
+	if (qpair->id != 0) {
+		ans_qpair = &sc->sc_ioq;
+	}
+	//MPASS(ans_qpair->qpair == qpair);
+	struct nvme_ans_nvmmu_tcb *tcb = nvme_ans_qpair_to_tcb(ans_qpair, tr);
+	uint32_t stat;
+
+	bus_dmamap_sync(ans_qpair->tag, ans_qpair->map, BUS_DMASYNC_POSTWRITE);
+	memset(tcb, 0, sizeof(*tcb));
+	bus_dmamap_sync(ans_qpair->tag, ans_qpair->map, BUS_DMASYNC_PREWRITE);
+
+	NVME_WRITE_4(ctrlr, ANS_NVMMU_TCB_INVAL, id);
+	stat = NVME_READ_4(ctrlr, ANS_NVMMU_TCB_STAT);
+	if (stat != 0) {
+		nvme_printf(ctrlr, "nvmmu tcb stat is non-zero %d\n", stat);
+	}
+}
+
+static int nvme_ans_qpair_construct(device_t dev, struct nvme_qpair *qpair,
+	uint32_t num_entries, uint32_t num_trackers, struct nvme_controller *ctrlr)
+{
+	struct nvme_ans_controller *sc = ANSDEVICE2SOFTC(dev);
+	int rc = nvme_qpair_construct(dev, qpair, num_entries, num_trackers, ctrlr);
+	if (rc != 0) {
+		return rc;
+	}
+	if (qpair->id == 0) {
+		qpair->sq_tdbl_off = ANS_LINEAR_ASQ_DB;
+		sc->sc_adminq.qpair = qpair;
+	} else {
+		qpair->sq_tdbl_off = ANS_LINEAR_IOSQ_DB;
+		sc->sc_ioq.qpair = qpair;
+	}
+	return 0;
 }

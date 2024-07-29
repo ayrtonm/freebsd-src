@@ -31,11 +31,7 @@
 #include <dev/ofw/ofw_bus.h>
 #include <dev/ofw/ofw_bus_subr.h>
 
-#include <dev/mbox/mbox.h>
-
-#include "apple_mboxvar.h"
-
-#include "mbox_if.h"
+#include "apple_mbox.h"
 
 #define MBOX_A2I_CTRL		0x110
 #define  MBOX_A2I_CTRL_FULL	(1 << 16)
@@ -61,10 +57,10 @@ struct apple_mbox_softc {
 	struct resource		*sc_irq_res;
 
 	void			*sc_intrhand;
-	mbox_rx_fn		*sc_rx_callback;
+	apple_mbox_rx	sc_rx_cb;
 	void			*sc_rx_arg;
 
-	struct mtx		sc_mtx;
+	struct mtx		sc_tx_mtx;
 };
 
 static int	apple_mbox_probe(device_t dev);
@@ -76,9 +72,6 @@ static struct ofw_compat_data compat_data[] = {
 };
 
 static void	apple_mbox_intr(void *);
-static int	apple_mbox_setup_channel(device_t, int, mbox_rx_fn *, void *);
-static int	apple_mbox_write(device_t, int, const void *, size_t);
-static int	apple_mbox_read(device_t, int, void *, size_t);
 
 static int
 apple_mbox_probe(device_t dev)
@@ -97,7 +90,7 @@ static int
 apple_mbox_attach(device_t dev)
 {
 	struct apple_mbox_softc *sc;
-	phandle_t node;
+	phandle_t node, xref;
 	int error, rid;
 
 	sc = device_get_softc(dev);
@@ -105,40 +98,47 @@ apple_mbox_attach(device_t dev)
 
 	rid = 0;
 	node = ofw_bus_get_node(dev);
+
 	sc->sc_mem_res = bus_alloc_resource_any(dev, SYS_RES_MEMORY, &rid,
 	    RF_ACTIVE);
 	if (sc->sc_mem_res == NULL) {
 		device_printf(dev, "cannot map regs\n");
-		return (ENXIO);
+		return ENXIO;
 	}
 
 	error = ofw_bus_find_string_index(node, "interrupt-names",
 	    "recv-not-empty", &rid);
-	if (error == 0) {
-		sc->sc_irq_res = bus_alloc_resource_any(dev, SYS_RES_IRQ, &rid,
-		    RF_ACTIVE);
-		if (sc->sc_irq_res == NULL) {
-			device_printf(dev, "cannot allocate recv irq\n");
-			error = ENXIO;
-			goto out;
-		}
+	if (error != 0) {
+		error = ENXIO;
+		goto err_find_recv_irq;
 	}
 
-	mtx_init(&sc->sc_mtx, "apple_mbox", NULL, MTX_DEF);
+	sc->sc_irq_res = bus_alloc_resource_any(dev, SYS_RES_IRQ, &rid, RF_ACTIVE);
+	if (sc->sc_irq_res == NULL) {
+		error = ENXIO;
+		goto err_alloc_irq;
+	}
 
 	error = bus_setup_intr(dev, sc->sc_irq_res,
-	    INTR_MPSAFE | INTR_TYPE_MISC, NULL, apple_mbox_intr, sc,
-	    &sc->sc_intrhand);
-
-	mbox_register_ofw_provider(dev);
-out:
+		INTR_MPSAFE | INTR_TYPE_MISC, NULL, apple_mbox_intr, sc,
+		&sc->sc_intrhand);
 	if (error != 0) {
-		bus_release_resource(dev, SYS_RES_MEMORY, 0, sc->sc_mem_res);
-		if (sc->sc_irq_res != NULL)
-			bus_release_resource(dev, SYS_RES_IRQ,
-			    rman_get_rid(sc->sc_irq_res), sc->sc_irq_res);
+		goto err_setup_intr;
 	}
 
+	xref = OF_xref_from_node(node);
+	OF_device_register_xref(xref, dev);
+
+	// TODO: witness code might not like this name when using more than one mbox
+	mtx_init(&sc->sc_tx_mtx, "apple mbox tx", NULL, MTX_SPIN);
+
+	return 0;
+
+err_setup_intr:
+	bus_release_resource(dev, SYS_RES_IRQ, rid, sc->sc_irq_res);
+err_alloc_irq:
+err_find_recv_irq:
+	bus_release_resource(dev, SYS_RES_MEMORY, 0, sc->sc_mem_res);
 	return (error);
 }
 
@@ -146,52 +146,31 @@ static void
 apple_mbox_intr(void *arg)
 {
 	struct apple_mbox_softc *sc = arg;
-	uint32_t ctrl;
+	struct apple_mbox_msg msg;
 
-	mtx_lock(&sc->sc_mtx);
-	ctrl = HREAD4(sc, MBOX_I2A_CTRL);
-	if (ctrl & MBOX_I2A_CTRL_EMPTY)
-		return;
+	// TODO: Add filter to mask mailbox interrupt
+	while ((HREAD4(sc, MBOX_I2A_CTRL) & MBOX_I2A_CTRL_EMPTY) == 0) {
+		msg.data0 = HREAD8(sc, MBOX_I2A_RECV0);
+		msg.data1 = HREAD8(sc, MBOX_I2A_RECV1);
 
-	if (sc->sc_rx_callback) {
-		(*sc->sc_rx_callback)(sc->sc_rx_arg, -1);
-	} else {
-		device_printf(sc->sc_dev, "0x%016jx 0x%016jx\n",
-		    HREAD8(sc, MBOX_I2A_RECV0), HREAD8(sc, MBOX_I2A_RECV1));
+		if (sc->sc_rx_cb) {
+			// TODO: what to do when this returns ENOMEM?
+			(sc->sc_rx_cb)(sc->sc_rx_arg, msg);
+		} else {
+			device_printf(sc->sc_dev,
+				"Received RTKit msg w/o callback installed\n");
+		}
 	}
-	mtx_unlock(&sc->sc_mtx);
 
+	// TODO: unmask mailbox interrupt here
 	return;
 }
 
 static int
-apple_mbox_setup_channel(device_t dev, int channel, mbox_rx_fn *rx_callback,
-    void *rx_data)
+apple_mbox_write_locked(device_t dev, const struct apple_mbox_msg *msg)
 {
 	struct apple_mbox_softc *sc = device_get_softc(dev);
-
-	/* XXX LOCKING */
-	if (channel != -1)
-		return (EINVAL);
-
-	sc->sc_rx_callback = rx_callback;
-	sc->sc_rx_arg = rx_data;
-
-	return (0);
-}
-
-static int
-apple_mbox_write(device_t dev, int channel, const void *data, size_t datasz)
-{
-	struct apple_mbox_softc *sc = device_get_softc(dev);
-	const struct apple_mbox_msg *msg = data;
 	uint32_t ctrl;
-
-	/* XXX LOCKING */
-	if (channel != -1)
-		return (EINVAL);
-	if (datasz != sizeof(struct apple_mbox_msg))
-		return (EINVAL);
 
 	ctrl = HREAD4(sc, MBOX_A2I_CTRL);
 	if (ctrl & MBOX_A2I_CTRL_FULL)
@@ -203,38 +182,49 @@ apple_mbox_write(device_t dev, int channel, const void *data, size_t datasz)
 	return (0);
 }
 
-static int
-apple_mbox_read(device_t dev, int channel, void *data, size_t datasz)
+int
+apple_mbox_write(struct apple_mbox *mbox, const struct apple_mbox_msg *msg)
 {
+	int rc;
+	device_t dev = mbox->dev;
 	struct apple_mbox_softc *sc = device_get_softc(dev);
-	struct apple_mbox_msg *msg = data;
-	uint32_t ctrl;
 
-	/* XXX LOCKING */
-	if (channel != -1)
-		return (EINVAL);
-	if (datasz != sizeof(struct apple_mbox_msg))
-		return (EINVAL);
+	mtx_lock_spin(&sc->sc_tx_mtx);
 
-	ctrl = HREAD4(sc, MBOX_I2A_CTRL);
-	if (ctrl & MBOX_I2A_CTRL_EMPTY)
-		return (EAGAIN);
+	rc = apple_mbox_write_locked(dev, msg);
 
-	msg->data0 = HREAD8(sc, MBOX_I2A_RECV0);
-	msg->data1 = HREAD8(sc, MBOX_I2A_RECV1);
+	mtx_unlock_spin(&sc->sc_tx_mtx);
 
-	return (0);
+	return rc;
 }
+//
+//static int
+//apple_mbox_read(device_t dev, int channel, void *data, size_t datasz)
+//{
+//	struct apple_mbox_softc *sc = device_get_softc(dev);
+//	struct apple_mbox_msg *msg = data;
+//	uint32_t ctrl;
+//
+//	/* XXX LOCKING */
+//	if (channel != -1)
+//		return (EINVAL);
+//	if (datasz != sizeof(struct apple_mbox_msg))
+//		return (EINVAL);
+//
+//	ctrl = HREAD4(sc, MBOX_I2A_CTRL);
+//	if (ctrl & MBOX_I2A_CTRL_EMPTY)
+//		return (EAGAIN);
+//
+//	msg->data0 = HREAD8(sc, MBOX_I2A_RECV0);
+//	msg->data1 = HREAD8(sc, MBOX_I2A_RECV1);
+//
+//	return (0);
+//}
 
 static device_method_t apple_mbox_methods[] = {
 	/* Device interface */
 	DEVMETHOD(device_probe,		apple_mbox_probe),
 	DEVMETHOD(device_attach,	apple_mbox_attach),
-
-	/* Mbox interface */
-	DEVMETHOD(mbox_setup_channel,	apple_mbox_setup_channel),
-	DEVMETHOD(mbox_read,		apple_mbox_read),
-	DEVMETHOD(mbox_write,		apple_mbox_write),
 
 	DEVMETHOD_END
 };
@@ -246,3 +236,35 @@ static driver_t apple_mbox_driver = {
 };
 
 DRIVER_MODULE(apple_mbox, simplebus, apple_mbox_driver, 0, 0);
+
+int
+apple_mbox_get(device_t client_dev, device_t *mboxp)
+{
+	int error;
+	phandle_t client_node, mbox_node;
+
+	if (mboxp == NULL)
+		return EINVAL;
+
+	client_node = ofw_bus_get_node(client_dev);
+	error = OF_getencprop(client_node, "mboxes", &mbox_node,
+		sizeof(mbox_node));
+
+	if (error != sizeof(mbox_node))
+		return error;
+
+	*mboxp = OF_device_from_xref(mbox_node);
+	if (*mboxp == NULL)
+		return ENODEV;
+
+	return 0;
+}
+
+void
+apple_mbox_set_rx(struct apple_mbox *mbox, apple_mbox_rx rx_cb, void *rx_arg)
+{
+	struct apple_mbox_softc *sc;
+	sc = device_get_softc(mbox->dev);
+	sc->sc_rx_cb = rx_cb;
+	sc->sc_rx_arg = rx_arg;
+}

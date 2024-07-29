@@ -31,27 +31,37 @@
 
 INTERFACE nvme;
 
-CODE {
-	static void
-	null_nvme_enable(struct nvme_controller *ctrlr)
-	{
-
-	}
+METHOD int delayed_attach {
+	device_t dev;
+	struct nvme_controller *ctrlr;
 };
 
 METHOD void enable {
 	device_t dev;
-	struct nvme_controller *ctrlr;
-} DEFAULT null_nvme_enable;
+};
 
 METHOD uint32_t sq_enter {
 	device_t dev;
-	struct nvme_controller *ctrlr;
 	struct nvme_qpair *qpair;
+	struct nvme_tracker *tr;
 } DEFAULT nvme_qpair_sq_enter;
 
 METHOD void sq_leave {
 	device_t dev;
-	struct nvme_controller *ctrlr;
 	struct nvme_qpair *qpair;
+	struct nvme_tracker *tr;
 } DEFAULT nvme_qpair_sq_leave;
+
+METHOD void cq_done {
+	device_t dev;
+	struct nvme_qpair *qpair;
+	struct nvme_tracker *tr;
+} DEFAULT nvme_qpair_cq_done;
+
+METHOD int qpair_construct {
+	device_t dev;
+	struct nvme_qpair *qpair;
+    uint32_t num_entries;
+	uint32_t num_trackers;
+    struct nvme_controller *ctrlr;
+} DEFAULT nvme_qpair_construct;

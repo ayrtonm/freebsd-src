@@ -19,3 +19,15 @@ struct apple_mbox_msg {
 	uint64_t data0;
 	uint32_t data1;
 };
+
+typedef int (*apple_mbox_rx)(void *, struct apple_mbox_msg);
+
+struct apple_mbox {
+	device_t		dev;
+};
+
+int apple_mbox_get(device_t, device_t *);
+
+void apple_mbox_set_rx(struct apple_mbox *, apple_mbox_rx, void *);
+
+int apple_mbox_write(struct apple_mbox *, const struct apple_mbox_msg *);
