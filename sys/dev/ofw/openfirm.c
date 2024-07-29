@@ -96,7 +96,7 @@ struct xrefinfo {
 
 static SLIST_HEAD(, xrefinfo) xreflist = SLIST_HEAD_INITIALIZER(xreflist);
 static struct mtx xreflist_lock;
-static bool xref_init_done;
+static boolean_t xref_init_done;
 
 #define	FIND_BY_XREF	0
 #define	FIND_BY_NODE	1
@@ -193,7 +193,7 @@ xrefinfo_add(phandle_t node, phandle_t xref, device_t dev)
  */
 SET_DECLARE(ofw_set, ofw_def_t);
 
-bool
+boolean_t
 OF_install(char *name, int prio)
 {
 	ofw_def_t *ofwp, **ofwpp;
@@ -202,7 +202,7 @@ OF_install(char *name, int prio)
 	/* Allow OF layer to be uninstalled */
 	if (name == NULL) {
 		ofw_def_impl = NULL;
-		return (false);
+		return (FALSE);
 	}
 
 	/*
@@ -216,11 +216,11 @@ OF_install(char *name, int prio)
 		    prio >= curr_prio) {
 			curr_prio = prio;
 			ofw_def_impl = ofwp;
-			return (true);
+			return (TRUE);
 		}
 	}
 
-	return (false);
+	return (FALSE);
 }
 
 /* Initializer */
@@ -703,6 +703,25 @@ OF_device_register_xref(phandle_t xref, device_t dev)
 	}
 	panic("Attempt to register device before xreflist_init");
 }
+
+int
+OF_device_unregister_xref(phandle_t xref, device_t dev)
+{
+	struct xrefinfo *xi;
+
+	if (xref_init_done) {
+		xi = xrefinfo_find(xref, FIND_BY_XREF);
+		KASSERT(xi != NULL, ("phandle not associated with a device"));
+
+		if (xi->dev != dev)
+			return (0);
+
+		xi->dev = NULL;
+		return (0);
+	}
+	panic("Attempt to unregister device before xreflist_init");
+}
+
 
 /*  Call the method in the scope of a given instance. */
 int
