@@ -69,8 +69,8 @@ enum {
 };
 
 struct apple_dc_irqsrc {
-	struct intr_irqsrc	isrc;
-	uint32_t			irq;
+	struct intr_irqsrc	isrc; /* base class must be first */
+	int					irq;
 };
 
 struct apple_dc_softc {
@@ -90,7 +90,6 @@ static struct resource_spec apple_dc_res_spec[] = {
 
 static device_probe_t apple_dc_probe;
 static device_attach_t apple_dc_attach;
-#if 0
 static device_detach_t apple_dc_detach;
 
 static pic_disable_intr_t apple_dc_disable_intr;
@@ -99,7 +98,6 @@ static pic_map_intr_t apple_dc_map_intr;
 static pic_setup_intr_t apple_dc_setup_intr;
 static pic_teardown_intr_t apple_dc_teardown_intr;
 
-#endif
 static void apple_dc_intr(void *);
 
 static int
@@ -111,7 +109,7 @@ apple_dc_probe(device_t dev)
 	if (!ofw_bus_is_compatible(dev, "apple,dockchannel"))
 		return (ENXIO);
 
-	device_set_desc(dev, "Apple Dockchannel");
+	device_set_desc(dev, "Apple DockChannel");
 	return (BUS_PROBE_DEFAULT);
 }
 
@@ -144,10 +142,16 @@ error:
 	return (ENXIO);
 }
 
+static int
+apple_dc_detach(device_t dev)
+{
+	panic("uh oh");
+}
+
 static void
 apple_dc_intr(void *arg)
 {
-	int irq;
+	uint32_t irq;
 	uint32_t stat, pending;
 
 	struct apple_dc_softc *sc = arg;
@@ -162,37 +166,75 @@ apple_dc_intr(void *arg)
 		dcisrc = &sc->dcisrcs[irq];
 
 		if (intr_isrc_dispatch(&dcisrc->isrc, tf) != 0) {
-			return FILTER_STRAY;
 		}
 
 		pending &= ~(1 << irq);
 	}
 	HWRITE4(sc, IRQ_STAT, stat);
-
-	return FILTER_HANDLED;
 }
-#if 0
 
 static void
 apple_dc_enable_intr(device_t dev, struct intr_irqsrc *isrc)
 {
+	struct apple_dc_softc *sc = device_get_softc(dev);
+	struct apple_dc_irqsrc *dcisrc = (struct apple_dc_irqsrc *)isrc;
+	uint32_t irq = dcisrc->irq;
+	uint32_t mask;
+
+	MPASS(irq < MAX_INTR);
+	mask = HREAD4(sc, IRQ_MASK);
+	mask |= 1 << irq;
+	HWRITE4(sc, IRQ_MASK, mask);
 }
 
 static void
 apple_dc_disable_intr(device_t dev, struct intr_irqsrc *isrc)
 {
+	struct apple_dc_softc *sc = device_get_softc(dev);
+	struct apple_dc_irqsrc *dcisrc = (struct apple_dc_irqsrc *)isrc;
+	uint32_t irq = dcisrc->irq;
+	uint32_t mask;
+
+	MPASS(irq < MAX_INTR);
+	mask = HREAD4(sc, IRQ_MASK);
+	mask &= ~(1 << irq);
+	HWRITE4(sc, IRQ_MASK, mask);
 }
 
 static int
 apple_dc_map_intr(device_t dev, struct intr_map_data *data,
     struct intr_irqsrc **isrcp)
 {
+	struct apple_dc_softc *sc = device_get_softc(dev);
+	if (data->type != INTR_MAP_DATA_FDT) {
+		return ENOTSUP;
+	}
+	struct intr_map_data_fdt *daf = (struct intr_map_data_fdt *)data;
+
+	if (daf->ncells != 2) {
+		return EINVAL;
+	}
+	/* The first cell is the interrupt number. The second cells is the level. */
+	uint32_t irq = daf->cells[0];
+	if (irq >= MAX_INTR) {
+		return EINVAL;
+	}
+	*isrcp = &sc->dcisrcs[irq].isrc;
+	return 0;
 }
 
+#if 0
 static int
 apple_dc_setup_intr(device_t dev, struct intr_irqsrc *isrc,
     struct resource *res, struct intr_map_data *data)
 {
+	uint32_t irq;
+	struct apple_dc_softc *sc = device_get_softc(dev);
+	struct apple_dc_irqsrc *dcisrc = (struct apple_dc_irqsrc *)isrc;
+
+	if (data == NULL) {
+		return ENOTSUP;
+	}
 }
 
 static int
@@ -200,12 +242,11 @@ apple_dc_teardown_intr(device_t dev, struct intr_irqsrc *isrc,
     struct resource *res, struct intr_map_data *data)
 {
 }
-#endif
 
 static device_method_t apple_dc_methods[] = {
+	/* Device interface */
 	DEVMETHOD(device_probe, apple_dc_probe),
 	DEVMETHOD(device_attach, apple_dc_attach),
-#if 0
 	DEVMETHOD(device_detach, apple_dc_detach),
 
 	DEVMETHOD(pic_disable_intr, apple_dc_disable_intr),
@@ -213,13 +254,12 @@ static device_method_t apple_dc_methods[] = {
 	DEVMETHOD(pic_map_intr ,apple_dc_map_intr),
 	DEVMETHOD(pic_setup_intr, apple_dc_setup_intr),
 	DEVMETHOD(pic_teardown_intr, apple_dc_teardown_intr),
-#endif
 
 	DEVMETHOD_END
 };
 
 static driver_t apple_dc_driver = {
-	.name = "apple dc",
+	.name = "apple dockchannel",
 	.methods = apple_dc_methods,
 	.size = sizeof(struct apple_dc_softc),
 };
@@ -239,7 +279,7 @@ struct apple_dc_hid_softc {
 	struct resource *sc_irq_res;
 
 	void *intrhand;
-}
+};
 
 static struct resource_spec apple_dc_hid_res_spec[] = {
 	{ SYS_RES_MEMORY, APPLE_DOCKCHANNEL_HID_CONFIG, RF_ACTIVE },
@@ -252,9 +292,7 @@ static struct resource_spec apple_dc_hid_res_spec[] = {
 
 static device_probe_t apple_dc_hid_probe;
 static device_attach_t apple_dc_hid_attach;
-#if 0
 static device_detach_t apple_dc_hid_detach;
-#endif
 static void apple_dc_hid_intr(void *);
 
 static int
@@ -301,7 +339,6 @@ apple_dc_hid_attach(device_t dev)
 	bus_setup_intr(dev, sc->sc_irq_res, INTR_MPSAFE | INTR_TYPE_MISC /* INTR_TYPE_TTY? */,
 		apple_dc_hid_intr, NULL, sc, &sc->intrhand);
 
-#if 0
 	phandle = OF_getpropint(faa->fa_node, "apple,helper-cpu", 0);
 	if (phandle) {
 		error = aplrtk_start(phandle);
@@ -310,7 +347,6 @@ apple_dc_hid_attach(device_t dev)
 			return;
 		}
 	}
-#endif
 
 	return (0);
 error:
@@ -352,9 +388,7 @@ apple_dc_hid_intr(void *arg)
 static device_method_t apple_dc_hid_methods[] = {
 	DEVMETHOD(device_probe, apple_dc_hid_probe),
 	DEVMETHOD(device_attach, apple_dc_hid_attach),
-#if 0
 	DEVMETHOD(device_detach, apple_dc_detach),
-#endif
 
 	DEVMETHOD_END
 };
@@ -365,3 +399,4 @@ static driver_t apple_dc_hid_driver = {
 	.size = sizeof(struct apple_dc_hid_softc),
 };
 DRIVER_MODULE(apple_dc_hid, simplebus, apple_dc_hid_driver, 0, 0);
+#endif
