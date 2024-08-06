@@ -55,17 +55,31 @@
 #define IRQ_MASK	0x0000
 #define IRQ_STAT	0x0004
 
+#define CONFIG_TX_THRESH 0x0
+#define CONFIG_RX_THRESH 0x4
+
+#define DATA_TX8		0x4
+#define DATA_TX32		0x10
+#define DATA_TX_FREE	0x14
+#define DATA_RX8		0x1c
+#define DATA_RX32		0x28
+#define DATA_RX_COUNT	0x2c
+
 #define MAX_INTR	32
 
-#define HREAD4(sc, reg) \
+#define DC_READ4(sc, reg) \
 	bus_read_4((sc)->sc_res[APPLE_DC_MEMRES], reg)
-#define HWRITE4(sc, reg, val) \
+#define DC_WRITE4(sc, reg, val) \
 	bus_write_4((sc)->sc_res[APPLE_DC_MEMRES], reg, val)
 
-#define HSET4(sc, reg, bit) HWRITE4(sc, reg, HREAD4(sc, reg) | (1 << bit))
+#define DC_SET4(sc, reg, bit) DC_WRITE4(sc, reg, DC_READ4(sc, reg) | (1 << bit))
 
-#define HCLEAR4(sc, reg, bit) \
-	HWRITE4(sc, reg, HREAD4(sc, reg) & ~(1 << bit))
+#define DC_CLEAR4(sc, reg, bit) \
+	DC_WRITE4(sc, reg, DC_READ4(sc, reg) & ~(1 << bit))
+
+#define HID_READ4(sc, memres, reg) bus_read_4((sc)->sc_res[memres], reg)
+#define HID_WRITE4(sc, memres, reg, val) \
+	bus_write_4((sc)->sc_res[memres], reg, val)
 
 enum {
 	APPLE_DC_MEMRES = 0,
@@ -108,14 +122,14 @@ static void
 apple_dc_mask_irq(struct apple_dc_softc *sc, uint32_t irq)
 {
 	MPASS(irq < MAX_INTR);
-	HCLEAR4(sc, IRQ_MASK, irq);
+	DC_CLEAR4(sc, IRQ_MASK, irq);
 }
 
 static void
 apple_dc_unmask_irq(struct apple_dc_softc *sc, uint32_t irq)
 {
 	MPASS(irq < MAX_INTR);
-	HSET4(sc, IRQ_MASK, irq);
+	DC_SET4(sc, IRQ_MASK, irq);
 }
 
 static int apple_dc_intr(void *);
@@ -150,8 +164,8 @@ apple_dc_attach(device_t dev)
 	}
 
 	/* mask and clear interrupts */
-	HWRITE4(sc, IRQ_MASK, 0);
-	HWRITE4(sc, IRQ_STAT, 0xffffffff);
+	DC_WRITE4(sc, IRQ_MASK, 0);
+	DC_WRITE4(sc, IRQ_STAT, 0xffffffff);
 
 	if (bus_setup_intr(dev, sc->sc_res[APPLE_DC_IRQRES],
 		INTR_TYPE_CLK | INTR_MPSAFE, apple_dc_intr, NULL, sc,
@@ -205,7 +219,7 @@ apple_dc_intr(void *arg)
 	sc = arg;
 	tf = curthread->td_intr_frame;
 
-	stat = HREAD4(sc, IRQ_STAT);
+	stat = DC_READ4(sc, IRQ_STAT);
 	pending = stat;
 	while (pending) {
 		irq = ffs(pending) - 1;
@@ -219,7 +233,7 @@ apple_dc_intr(void *arg)
 
 		pending &= ~(1 << irq);
 	}
-	HWRITE4(sc, IRQ_STAT, stat);
+	DC_WRITE4(sc, IRQ_STAT, stat);
 
 	return FILTER_HANDLED;
 }
@@ -375,6 +389,8 @@ struct apple_dc_hid_softc {
 	device_t		sc_dev;
 	struct resource *sc_res[APPLE_DC_HID_NMEMRES + APPLE_DC_HID_NIRQRES];
 	void			*sc_intrhand;
+	struct intr_config_hook	config_hook;
+	phandle_t		sc_mtp;
 };
 
 static struct resource *
@@ -396,7 +412,7 @@ static struct resource_spec apple_dc_hid_res_spec[] = {
 static device_probe_t apple_dc_hid_probe;
 static device_attach_t apple_dc_hid_attach;
 static device_detach_t apple_dc_hid_detach;
-static int apple_dc_hid_intr(void *arg);
+static int apple_dc_hid_rx_intr(void *arg);
 
 static int
 apple_dc_hid_probe(device_t dev)
@@ -416,11 +432,12 @@ apple_dc_hid_attach(device_t dev)
 {
 	int rc;
 	struct apple_dc_hid_softc *sc;
+	phandle_t node;
 
 	sc = device_get_softc(dev);
 	sc->sc_dev = dev;
 
-	//node = ofw_bus_get_node(dev);
+	node = ofw_bus_get_node(dev);
 
 	if (bus_alloc_resources(dev, apple_dc_hid_res_spec, sc->sc_res) != 0) {
 		device_printf(dev, "cannot allocate device resources\n");
@@ -428,13 +445,27 @@ apple_dc_hid_attach(device_t dev)
 	}
 
 	rc = bus_setup_intr(dev, apple_dc_hid_irq_res(sc, APPLE_DC_HID_RX),
-		INTR_MPSAFE | INTR_TYPE_MISC, apple_dc_hid_intr, NULL, sc,
+		INTR_MPSAFE | INTR_TYPE_MISC, apple_dc_hid_rx_intr, NULL, sc,
 		&sc->sc_intrhand);
 	if (rc != 0) {
 		device_printf(dev, "cannot setup intr (%d)\n", rc);
 		return rc;
 	}
-	return -1;
+
+	rc = OF_getencprop(node, "apple,helper-cpu", &sc->sc_mtp,
+		sizeof(sc->sc_mtp));
+	if (rc != sizeof(sc->sc_mtp)) {
+		device_printf(dev, "couldn't find 'apple-helper-cpu' prop %d\n", rc);
+		return rc;
+	}
+
+	//sc->config_hook.ich_func = apple_dc_hid_start_config_hook;
+	//sc->config_hook.ich_arg = sc;
+
+	//if (config_intrhook_establish(&ctrlr->config_hook) != 0)
+	//	return (ENOMEM);
+
+	return 0;
 }
 
 static int
@@ -444,9 +475,9 @@ apple_dc_hid_detach(device_t dev)
 }
 
 static int
-apple_dc_hid_intr(void *arg)
+apple_dc_hid_rx_intr(void *arg)
 {
-	//struct apple_dc_hid_softc *sc = arg;
+	struct apple_dc_hid_softc *sc = arg;
 	return FILTER_HANDLED;
 }
 
