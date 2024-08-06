@@ -58,9 +58,9 @@
 #define MAX_INTR	32
 
 #define HREAD4(sc, reg) \
-	bus_read_4((sc)->sc_res[APPLE_DOCKCHANNEL_MEMRES], reg)
+	bus_read_4((sc)->sc_res[APPLE_DC_MEMRES], reg)
 #define HWRITE4(sc, reg, val) \
-	bus_write_4((sc)->sc_res[APPLE_DOCKCHANNEL_MEMRES], reg, val)
+	bus_write_4((sc)->sc_res[APPLE_DC_MEMRES], reg, val)
 
 #define HSET4(sc, reg, bit) HWRITE4(sc, reg, HREAD4(sc, reg) | (1 << bit))
 
@@ -68,9 +68,9 @@
 	HWRITE4(sc, reg, HREAD4(sc, reg) & ~(1 << bit))
 
 enum {
-	APPLE_DOCKCHANNEL_MEMRES = 0,
-	APPLE_DOCKCHANNEL_IRQRES,
-	APPLE_DOCKCHANNEL_NRES,
+	APPLE_DC_MEMRES = 0,
+	APPLE_DC_IRQRES,
+	APPLE_DC_NRES,
 };
 
 struct apple_dc_irqsrc {
@@ -82,7 +82,7 @@ struct apple_dc_irqsrc {
 struct apple_dc_softc {
 	device_t		sc_dev;
 
-	struct resource	*sc_res[APPLE_DOCKCHANNEL_NRES];
+	struct resource	*sc_res[APPLE_DC_NRES];
 	void			*sc_intrhand;
 
 	struct apple_dc_irqsrc	sc_isrcs[MAX_INTR];
@@ -153,7 +153,7 @@ apple_dc_attach(device_t dev)
 	HWRITE4(sc, IRQ_MASK, 0);
 	HWRITE4(sc, IRQ_STAT, 0xffffffff);
 
-	if (bus_setup_intr(dev, sc->sc_res[APPLE_DOCKCHANNEL_IRQRES],
+	if (bus_setup_intr(dev, sc->sc_res[APPLE_DC_IRQRES],
 		INTR_TYPE_CLK | INTR_MPSAFE, apple_dc_intr, NULL, sc,
 		&sc->sc_intrhand)) {
 		device_printf(dev, "can't establish interrupt\n");
@@ -356,35 +356,47 @@ static driver_t apple_dc_driver = {
 
 DRIVER_MODULE(apple_dc, simplebus, apple_dc_driver, 0, 0);
 
-#if 0
-#define APPLE_DOCKCHANNEL_HID_NRES 4
-//#define APPLE_DOCKCHANNEL_HID_IRQRES 4
-#define APPLE_DOCKCHANNEL_HID_CONFIG 0
-#define APPLE_DOCKCHANNEL_HID_DATA 1
-#define APPLE_DOCKCHANNEL_HID_RMT_CONFIG 2
-#define APPLE_DOCKCHANNEL_HID_RMT_DATA 3
 
-struct apple_dc_hid_softc {
-	device_t dev;
-	struct resource *sc_mem_res[APPLE_DOCKCHANNEL_HID_NRES];
-	struct resource *sc_irq_res;
-
-	void *intrhand;
+enum {
+	APPLE_DC_HID_CONFIG = 0,
+	APPLE_DC_HID_DATA,
+	APPLE_DC_HID_RMT_CONFIG,
+	APPLE_DC_HID_RMT_DATA,
+	APPLE_DC_HID_NMEMRES,
 };
 
+enum {
+	APPLE_DC_HID_TX = 0,
+	APPLE_DC_HID_RX,
+	APPLE_DC_HID_NIRQRES,
+};
+
+struct apple_dc_hid_softc {
+	device_t		sc_dev;
+	struct resource *sc_res[APPLE_DC_HID_NMEMRES + APPLE_DC_HID_NIRQRES];
+	void			*sc_intrhand;
+};
+
+static struct resource *
+apple_dc_hid_irq_res(struct apple_dc_hid_softc *sc, int idx)
+{
+	return sc->sc_res[idx + APPLE_DC_HID_NMEMRES];
+}
+
 static struct resource_spec apple_dc_hid_res_spec[] = {
-	{ SYS_RES_MEMORY, APPLE_DOCKCHANNEL_HID_CONFIG, RF_ACTIVE },
-	{ SYS_RES_MEMORY, APPLE_DOCKCHANNEL_HID_DATA, RF_ACTIVE },
-	{ SYS_RES_MEMORY, APPLE_DOCKCHANNEL_HID_RMT_CONFIG, RF_ACTIVE },
-	{ SYS_RES_MEMORY, APPLE_DOCKCHANNEL_HID_RMT_DATA, RF_ACTIVE },
-//	{ SYS_RES_IRQ, 0, RF_ACTIVE },
+	{ SYS_RES_MEMORY, APPLE_DC_HID_CONFIG, RF_ACTIVE },
+	{ SYS_RES_MEMORY, APPLE_DC_HID_DATA, RF_ACTIVE },
+	{ SYS_RES_MEMORY, APPLE_DC_HID_RMT_CONFIG, RF_ACTIVE },
+	{ SYS_RES_MEMORY, APPLE_DC_HID_RMT_DATA, RF_ACTIVE },
+	{ SYS_RES_IRQ, APPLE_DC_HID_TX, RF_ACTIVE },
+	{ SYS_RES_IRQ, APPLE_DC_HID_RX, RF_ACTIVE },
 	{ -1, 0, 0 },
 };
 
 static device_probe_t apple_dc_hid_probe;
 static device_attach_t apple_dc_hid_attach;
 static device_detach_t apple_dc_hid_detach;
-static void apple_dc_hid_intr(void *);
+static int apple_dc_hid_intr(void *arg);
 
 static int
 apple_dc_hid_probe(device_t dev)
@@ -392,88 +404,50 @@ apple_dc_hid_probe(device_t dev)
 	if (!ofw_bus_status_okay(dev))
 		return (ENXIO);
 
-	if (!ofw_bus_is_compatible(dev, "apple,dc-hid"))
+	if (!ofw_bus_is_compatible(dev, "apple,dockchannel-hid"))
 		return (ENXIO);
 
-	device_set_desc(dev, "Apple Dockchannel HID");
+	device_set_desc(dev, "Apple DockChannel HID");
 	return (BUS_PROBE_DEFAULT);
 }
 
 static int
 apple_dc_hid_attach(device_t dev)
 {
-	phandle_t node;
-	int rid;
+	int rc;
 	struct apple_dc_hid_softc *sc;
 
 	sc = device_get_softc(dev);
-	sc->dev = dev;
+	sc->sc_dev = dev;
 
-	node = ofw_bus_get_node(dev);
+	//node = ofw_bus_get_node(dev);
 
-	if (bus_alloc_resources(dev, apple_dc_hid_res_spec, sc->sc_mem_res) != 0) {
-		device_printf(dev, "cannot allocate device memory resources\n");
-		return (ENXIO);
+	if (bus_alloc_resources(dev, apple_dc_hid_res_spec, sc->sc_res) != 0) {
+		device_printf(dev, "cannot allocate device resources\n");
+		return ENXIO;
 	}
 
-	if (ofw_bus_find_string_index(node, "interrupt-names", "rx", &rid) != 0) {
-		device_printf(dev, "could not find rx irq\n");
-		goto error;
+	rc = bus_setup_intr(dev, apple_dc_hid_irq_res(sc, APPLE_DC_HID_RX),
+		INTR_MPSAFE | INTR_TYPE_MISC, apple_dc_hid_intr, NULL, sc,
+		&sc->sc_intrhand);
+	if (rc != 0) {
+		device_printf(dev, "cannot setup intr (%d)\n", rc);
+		return rc;
 	}
-
-	sc->sc_irq_res = bus_alloc_resources_any(dev, SYS_RES_IRQ, &rid, RF_ACTIVE);
-	if (sc->sc_irq_res == NULL) {
-		device_printf(dev, "cannot allocate device irq resource\n");
-		goto error
-	}
-
-	bus_setup_intr(dev, sc->sc_irq_res, INTR_MPSAFE | INTR_TYPE_MISC /* INTR_TYPE_TTY? */,
-		apple_dc_hid_intr, NULL, sc, &sc->intrhand);
-
-	phandle = OF_getpropint(faa->fa_node, "apple,helper-cpu", 0);
-	if (phandle) {
-		error = aplrtk_start(phandle);
-		if (error) {
-			printf(": can't start helper CPU\n");
-			return;
-		}
-	}
-
-	return (0);
-error:
-	bus_release_resources(dev, apple_dc_hid_res_spec, sc->res);
-	return (ENXIO);
+	return -1;
 }
 
-struct mtp_hdr {
-	uint8_t hdr_len;
-	uint8_t chan;
-	uint16_t pkt_len;
-	uint8_t seq;
-	uint8_t iface;
-	uint16_t pad;
-} __packed;
-
-static void
-apple_dc_hid_read(struct apple_dc_hid_softc *sc, void *buf, size_t len,
-	uint32_t *cksum)
+static int
+apple_dc_hid_detach(device_t dev)
 {
+	panic("uh oh");
 }
 
-// this is the rx interrupt handler... do we need a tx handler at some point?
-static void
+static int
 apple_dc_hid_intr(void *arg)
 {
-	struct apple_dc_hid_softc *sc = arg;
-	struct mtp_hdr hdr;
-	uint32_t cksum = 0;
-	char buf[1024];
-
-	apple_dc_hid_read(sc, &hdr, sizeof(hdr), &cksum);
-	apple_dc_hid_read(sc, buf, hdr.pkt_len + 4, &cksum);
-	if (cksum != 0xffffffff) {
-		return;
-	}
+	//struct apple_dc_hid_softc *sc = arg;
+	return FILTER_HANDLED;
 }
 
 static device_method_t apple_dc_hid_methods[] = {
@@ -490,4 +464,3 @@ static driver_t apple_dc_hid_driver = {
 	.size = sizeof(struct apple_dc_hid_softc),
 };
 DRIVER_MODULE(apple_dc_hid, simplebus, apple_dc_hid_driver, 0, 0);
-#endif
