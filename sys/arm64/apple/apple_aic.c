@@ -946,8 +946,11 @@ apple_aic_ipi_setup(device_t dev, u_int ipi, struct intr_irqsrc **isrcp)
 }
 
 static void
-apple_aic_init_secondary(device_t dev)
+apple_aic_init_secondary(device_t dev, uint32_t root)
 {
+	if (root == INTR_ROOT_FIQ) {
+		return;
+	}
 	struct apple_aic_softc *sc = device_get_softc(dev);
 	u_int cpu = PCPU_GET(cpuid);
 	/*
