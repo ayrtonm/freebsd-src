@@ -13,7 +13,8 @@ int rtkit_boot(struct rtkit_state *);
 
 void rtkit_set_map_callback(struct rtkit_state *, rtkit_map, void *);
 int	apple_sart_map(uint32_t, bus_addr_t, bus_size_t);
-int rtkit_helper_start(phandle_t);
+
+int rtkit_set_ap_pwrstate(struct rtkit_state *state, uint16_t pwrstate);
 
 
 

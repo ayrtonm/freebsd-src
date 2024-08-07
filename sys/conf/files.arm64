@@ -537,6 +537,7 @@ arm64/apple/apple_dc.c						optional soc_apple_t8103 fdt
 arm64/apple/apple_mbox.c					optional soc_apple_t8103 fdt
 arm64/apple/apple_pmgr.c					optional soc_apple_t8103 fdt
 arm64/apple/apple_sart.c					optional soc_apple_t8103 fdt
+arm64/apple/apple_rtkit.c					optional soc_apple_t8103 fdt
 #arm64/apple/apple_wdog.c					optional soc_apple_t8103 fdt
 arm64/apple/rtkit.c						optional soc_apple_t8103 fdt
 dev/nvme/nvme_ans.c						optional nvme_ans nvme fdt

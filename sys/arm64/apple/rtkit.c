@@ -164,7 +164,7 @@ rtkit_send(struct apple_mbox *mbox, uint32_t endpoint, uint8_t type,
 	return apple_mbox_write(mbox, &msg);
 }
 
-static int
+int
 rtkit_set_ap_pwrstate(struct rtkit_state *state, uint16_t pwrstate)
 {
 	int error;

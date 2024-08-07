@@ -370,7 +370,6 @@ static driver_t apple_dc_driver = {
 
 DRIVER_MODULE(apple_dc, simplebus, apple_dc_driver, 0, 0);
 
-
 enum {
 	APPLE_DC_HID_CONFIG = 0,
 	APPLE_DC_HID_DATA,
@@ -477,7 +476,7 @@ apple_dc_hid_detach(device_t dev)
 static int
 apple_dc_hid_rx_intr(void *arg)
 {
-	struct apple_dc_hid_softc *sc = arg;
+	//struct apple_dc_hid_softc *sc = arg;
 	return FILTER_HANDLED;
 }
 
