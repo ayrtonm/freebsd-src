@@ -70,6 +70,11 @@ struct dart_cfg {
 	uint64_t nsid;
 };
 
+static const struct dart_cfg t8110_dart_cfg = {
+	.shift = 0,
+	.nsid = DART_STREAM_MAX,
+};
+
 static const struct dart_cfg t8103_dart_cfg = {
 	.shift = 0,
 	.nsid = DART_STREAM_MAX,
@@ -83,6 +88,7 @@ static const struct dart_cfg t6000_dart_cfg = {
 static const struct ofw_compat_data compat_data[] = {
 	{ "apple,t6000-dart",	(uintptr_t)&t6000_dart_cfg },
 	{ "apple,t8103-dart",	(uintptr_t)&t8103_dart_cfg },
+	{ "apple,t8110-dart",	(uintptr_t)&t8110_dart_cfg },
 	{ NULL,			0  },
 };
 
