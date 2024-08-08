@@ -99,6 +99,9 @@ apple_rtkit_attach(device_t dev)
 	phandle_t node;
 	struct apple_rtkit_softc *sc;
 
+	device_printf(dev, "attaching apple RTKit helper...\n");
+	DELAY(1000000);
+
 	sc = device_get_softc(dev);
 	sc->sc_dev = dev;
 	node = ofw_bus_get_node(dev);
@@ -172,9 +175,9 @@ static device_method_t apple_rtkit_methods[] = {
 };
 
 static driver_t apple_rtkit_driver = {
-	.name = "apple rtkit",
+	.name = "rtkit_helper",
 	.methods = apple_rtkit_methods,
 	.size = sizeof(struct apple_rtkit_softc),
 };
 
-DRIVER_MODULE(apple_rtkit, simplebus, apple_rtkit_driver, 0, 0);
+EARLY_DRIVER_MODULE(apple_rtkit, simplebus, apple_rtkit_driver, 0, 0, BUS_PASS_DEFAULT-2);

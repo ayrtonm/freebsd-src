@@ -235,7 +235,7 @@ static driver_t apple_mbox_driver = {
 	sizeof(struct apple_mbox_softc),
 };
 
-DRIVER_MODULE(apple_mbox, simplebus, apple_mbox_driver, 0, 0);
+EARLY_DRIVER_MODULE(apple_mbox, simplebus, apple_mbox_driver, 0, 0, BUS_PASS_DEFAULT-3);
 
 int
 apple_mbox_get(device_t client_dev, device_t *mboxp)

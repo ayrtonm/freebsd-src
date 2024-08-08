@@ -155,6 +155,8 @@ apple_dc_attach(device_t dev)
 	const char *name;
 	phandle_t node;
 
+	device_printf(dev, "attaching dockchannel...\n");
+	DELAY(1000000);
 	sc->sc_dev = dev;
 	node = ofw_bus_get_node(sc->sc_dev);
 
@@ -363,12 +365,12 @@ static device_method_t apple_dc_methods[] = {
 };
 
 static driver_t apple_dc_driver = {
-	.name = "apple dockchannel",
+	.name = "dockchannel",
 	.methods = apple_dc_methods,
 	.size = sizeof(struct apple_dc_softc),
 };
 
-DRIVER_MODULE(apple_dc, simplebus, apple_dc_driver, 0, 0);
+EARLY_DRIVER_MODULE(apple_dc, simplebus, apple_dc_driver, 0, 0, BUS_PASS_DEFAULT-1);
 
 enum {
 	APPLE_DC_HID_CONFIG = 0,
@@ -433,6 +435,9 @@ apple_dc_hid_attach(device_t dev)
 	struct apple_dc_hid_softc *sc;
 	phandle_t node;
 
+	device_printf(dev, "attaching dockchannel HID...\n");
+	DELAY(1000000);
+
 	sc = device_get_softc(dev);
 	sc->sc_dev = dev;
 
@@ -489,7 +494,7 @@ static device_method_t apple_dc_hid_methods[] = {
 };
 
 static driver_t apple_dc_hid_driver = {
-	.name = "apple dc hid",
+	.name = "dockchannel_HID",
 	.methods = apple_dc_hid_methods,
 	.size = sizeof(struct apple_dc_hid_softc),
 };
