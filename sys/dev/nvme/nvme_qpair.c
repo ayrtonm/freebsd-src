@@ -37,6 +37,8 @@
 
 #include "nvme_private.h"
 
+#include "nvme_if.h"
+
 typedef enum error_print { ERROR_PRINT_NONE, ERROR_PRINT_NO_RETRY, ERROR_PRINT_ALL } error_print_t;
 #define DO_NOT_RETRY	1
 
@@ -206,6 +208,11 @@ nvme_completion_is_retry(const struct nvme_completion *cpl)
 	}
 }
 
+void
+nvme_qpair_cq_done(struct nvme_qpair *qpair, struct nvme_tracker *tr)
+{
+}
+
 static void
 nvme_qpair_complete_tracker(struct nvme_tracker *tr,
     struct nvme_completion *cpl, error_print_t print_on_error)
@@ -241,6 +248,7 @@ nvme_qpair_complete_tracker(struct nvme_tracker *tr,
 			    tr->payload_dma_map,
 			    BUS_DMASYNC_POSTREAD | BUS_DMASYNC_POSTWRITE);
 		}
+		NVME_CQ_DONE(qpair->ctrlr->dev, qpair, tr);
 		if (req->cb_fn)
 			req->cb_fn(req->cb_arg, cpl);
 	}
@@ -515,7 +523,7 @@ nvme_qpair_msi_handler(void *arg)
 }
 
 int
-nvme_qpair_construct(struct nvme_qpair *qpair,
+nvme_qpair_construct(device_t dev, struct nvme_qpair *qpair,
     uint32_t num_entries, uint32_t num_trackers,
     struct nvme_controller *ctrlr)
 {
@@ -1026,6 +1034,24 @@ do_reset:
 	}
 }
 
+uint32_t
+nvme_qpair_sq_enter(struct nvme_qpair *qpair, struct nvme_tracker *tr)
+{
+	return (qpair->sq_tail);
+}
+
+void
+nvme_qpair_sq_leave(struct nvme_qpair *qpair, struct nvme_tracker *tr)
+{
+	if (++qpair->sq_tail == qpair->num_entries)
+		qpair->sq_tail = 0;
+
+	bus_dmamap_sync(qpair->dma_tag, qpair->queuemem_map,
+	    BUS_DMASYNC_PREREAD | BUS_DMASYNC_PREWRITE);
+	bus_space_write_4(qpair->ctrlr->bus_tag, qpair->ctrlr->bus_handle,
+	    qpair->sq_tdbl_off, qpair->sq_tail);
+}
+
 /*
  * Submit the tracker to the hardware. Must already be in the
  * outstanding queue when called.
@@ -1035,6 +1061,7 @@ nvme_qpair_submit_tracker(struct nvme_qpair *qpair, struct nvme_tracker *tr)
 {
 	struct nvme_request	*req;
 	struct nvme_controller	*ctrlr;
+	uint32_t indx;
 	int timeout;
 
 	mtx_assert(&qpair->lock, MA_OWNED);
@@ -1061,15 +1088,10 @@ nvme_qpair_submit_tracker(struct nvme_qpair *qpair, struct nvme_tracker *tr)
 		tr->deadline = SBT_MAX;
 
 	/* Copy the command from the tracker to the submission queue. */
-	memcpy(&qpair->cmd[qpair->sq_tail], &req->cmd, sizeof(req->cmd));
+	indx = NVME_SQ_ENTER(ctrlr->dev, qpair, tr);
+	memcpy(&qpair->cmd[/*qpair->sq_tail*/indx], &req->cmd, sizeof(req->cmd));
+	NVME_SQ_LEAVE(ctrlr->dev, qpair, tr);
 
-	if (++qpair->sq_tail == qpair->num_entries)
-		qpair->sq_tail = 0;
-
-	bus_dmamap_sync(qpair->dma_tag, qpair->queuemem_map,
-	    BUS_DMASYNC_PREREAD | BUS_DMASYNC_PREWRITE);
-	bus_space_write_4(ctrlr->bus_tag, ctrlr->bus_handle,
-	    qpair->sq_tdbl_off, qpair->sq_tail);
 	qpair->num_cmds++;
 }
 
