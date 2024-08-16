@@ -2576,6 +2576,7 @@ dev/nvme/nvme.c			optional nvme
 dev/nvme/nvme_ahci.c		optional nvme ahci
 dev/nvme/nvme_ctrlr.c		optional nvme
 dev/nvme/nvme_ctrlr_cmd.c	optional nvme
+dev/nvme/nvme_if.m	optional nvme
 dev/nvme/nvme_ns.c		optional nvme
 dev/nvme/nvme_ns_cmd.c		optional nvme
 dev/nvme/nvme_pci.c		optional nvme pci

@@ -47,6 +47,7 @@
 
 #include "nvme_private.h"
 #include "nvme_linux.h"
+#include "nvme_if.h"
 
 #include "nvme_if.h"
 
@@ -139,8 +140,8 @@ nvme_ctrlr_construct_admin_qpair(struct nvme_controller *ctrlr)
 	 * The admin queue's max xfer size is treated differently than the
 	 *  max I/O xfer size.  16KB is sufficient here - maybe even less?
 	 */
-	error = nvme_qpair_construct(qpair, num_entries, NVME_ADMIN_TRACKERS,
-	     ctrlr);
+	error = NVME_QPAIR_CONSTRUCT(nvme_ctrlr_get_device(ctrlr),
+		qpair, num_entries, NVME_ADMIN_TRACKERS, ctrlr);
 	return (error);
 }
 
@@ -220,8 +221,8 @@ nvme_ctrlr_construct_io_qpairs(struct nvme_controller *ctrlr)
 		 * For I/O queues, use the controller-wide max_xfer_size
 		 *  calculated in nvme_attach().
 		 */
-		error = nvme_qpair_construct(qpair, num_entries, num_trackers,
-		    ctrlr);
+		error = NVME_QPAIR_CONSTRUCT(nvme_ctrlr_get_device(ctrlr), 
+			qpair, num_entries, num_trackers, ctrlr);
 		if (error)
 			return (error);
 
@@ -360,6 +361,8 @@ nvme_ctrlr_enable(struct nvme_controller *ctrlr)
 			return (0);
 		return (nvme_ctrlr_wait_for_ready(ctrlr, 1));
 	}
+
+	NVME_ENABLE(ctrlr->dev);
 
 	/* EN == 0 already wait for RDY == 0 or timeout & fail */
 	err = nvme_ctrlr_wait_for_ready(ctrlr, 0);
@@ -1046,7 +1049,10 @@ nvme_ctrlr_start(void *ctrlr_arg, bool resetting)
 		return;
 	}
 
-	nvme_ctrlr_configure_aer(ctrlr);
+	/* apple nvme controller doesn't support async events but this could be a separate quirk */
+	if ((ctrlr->quirks & QUIRK_ANS) == 0)
+		nvme_ctrlr_configure_aer(ctrlr);
+
 	nvme_ctrlr_configure_int_coalescing(ctrlr);
 
 	for (i = 0; i < ctrlr->num_io_queues; i++)
@@ -1060,6 +1066,8 @@ nvme_ctrlr_start_config_hook(void *arg)
 	struct nvme_controller *ctrlr = arg;
 
 	TSENTER();
+
+	NVME_DELAYED_ATTACH(ctrlr->dev, ctrlr);
 
 	if (nvme_ctrlr_hw_reset(ctrlr) != 0 || ctrlr->fail_on_reset != 0) {
 		nvme_ctrlr_fail(ctrlr, true);
