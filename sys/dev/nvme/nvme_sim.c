@@ -198,13 +198,18 @@ nvme_sim_action(struct cam_sim *sim, union ccb *ccb)
 		cpi->protocol = PROTO_NVME;
 		cpi->protocol_version = nvme_mmio_read_4(ctrlr, vs);
 		cpi->xport_specific.nvme.nsid = xpt_path_lun_id(ccb->ccb_h.path);
+		strlcpy(cpi->xport_specific.nvme.dev_name, device_get_nameunit(dev),
+			sizeof(cpi->xport_specific.nvme.dev_name));
+		if (ctrlr->quirks & QUIRK_ANS) {
+			cpi->ccb_h.status = CAM_REQ_CMP;
+			break;
+		}
+
 		cpi->xport_specific.nvme.domain = pci_get_domain(dev);
 		cpi->xport_specific.nvme.bus = pci_get_bus(dev);
 		cpi->xport_specific.nvme.slot = pci_get_slot(dev);
 		cpi->xport_specific.nvme.function = pci_get_function(dev);
 		cpi->xport_specific.nvme.extra = 0;
-		strlcpy(cpi->xport_specific.nvme.dev_name, device_get_nameunit(dev),
-		    sizeof(cpi->xport_specific.nvme.dev_name));
 		cpi->hba_vendor = pci_get_vendor(dev);
 		cpi->hba_device = pci_get_device(dev);
 		cpi->hba_subvendor = pci_get_subvendor(dev);
