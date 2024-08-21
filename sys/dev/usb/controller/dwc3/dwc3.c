@@ -96,7 +96,7 @@ struct snps_dwc3_softc {
 #define	DWC3_READ(_sc, _off)		\
     bus_space_read_4(_sc->bst, _sc->bsh, _off)
 
-#define	IS_DMA_32B	1
+#define	IS_DMA_32B	0
 
 static void
 xhci_interrupt_poll(void *_sc)
@@ -373,12 +373,14 @@ snps_dwc3_probe_common(device_t dev)
 		device_printf(dev, "Cannot determine dr_mode\n");
 		return (ENXIO);
 	}
+#if 0
 	if (strcmp(dr_mode, "host") != 0) {
 		device_printf(dev,
 		    "Found dr_mode '%s' but only 'host' supported. s=%zd\n",
 		    dr_mode, s);
 		return (ENXIO);
 	}
+#endif
 
 	device_set_desc(dev, "Synopsys Designware DWC3");
 	return (BUS_PROBE_DEFAULT);
@@ -489,6 +491,10 @@ snps_dwc3_common_attach(device_t dev, bool is_fdt)
 				DWC3_WRITE(sc, DWC3_GUCTL1, reg);
 			}
 		}
+	}
+
+	if (ofw_bus_is_compatible(dev, "apple,dwc3") == 1) {
+		// set up callback to reset controller on new connections
 	}
 	snps_dwc3_configure_phy(sc, node);
 skip_phys:
