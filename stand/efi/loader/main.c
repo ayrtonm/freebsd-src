@@ -1208,6 +1208,7 @@ main(int argc, CHAR16 *argv[])
 
 	/* Set up currdev variable to have hooks in place. */
 	env_setenv("currdev", EV_VOLATILE, "", gen_setcurrdev, env_nounset);
+	setenv("rootdev", "disk0p7:", 1);
 
 	/* Init the time source */
 	efi_time_init();
