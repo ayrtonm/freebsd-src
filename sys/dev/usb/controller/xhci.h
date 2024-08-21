@@ -58,7 +58,7 @@
 #define	XHCI_SCRATCH_BUFFER_ALIGN	USB_PAGE_SIZE
 #define	XHCI_TRB_ALIGN			16	/* bytes */
 #define	XHCI_TD_ALIGN			64	/* bytes */
-#define	XHCI_PAGE_SIZE			4096	/* bytes */
+#define	XHCI_PAGE_SIZE			PAGE_SIZE /* bytes */
 
 struct xhci_dev_ctx_addr {
 	volatile uint64_t	qwBaaDevCtxAddr[USB_MAX_DEVICES + 1];
@@ -408,7 +408,7 @@ struct xhci_hw_root {
 	struct xhci_trb			hwr_commands[XHCI_MAX_COMMANDS];
 };
 
-CTASSERT(sizeof(struct xhci_hw_root) == XHCI_PAGE_SIZE);
+CTASSERT(sizeof(struct xhci_hw_root) <= XHCI_PAGE_SIZE);
 
 struct xhci_endpoint_ext {
 	struct xhci_trb		*trb;
