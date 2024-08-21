@@ -63,6 +63,7 @@ struct devsw *devsw[] = {
 };
 
 struct fs_ops *file_system[] = {
+	&elffs_fsops,
 #ifdef EFI_ZFS_BOOT
 	&zfs_fsops,
 	&zstdfs_fsops,

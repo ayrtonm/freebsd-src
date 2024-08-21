@@ -70,7 +70,7 @@ elf_open(const char *path, struct open_file *fd)
 	size_t rsize;
 	int err;
 
-	if (strcmp(path, "/boot/kernel/kernel.gz") != 0)
+	if (strcmp(path, "/asahi") != 0)
 		return (ENOENT);
 
 	f = malloc(sizeof(*f));
