@@ -45,6 +45,7 @@ struct uart_bas {
 	u_int	regshft;
 	u_int	regiowidth;
 	u_int	busy_detect;
+	void *driver1;
 };
 
 #define	uart_regofs(bas, reg)		((reg) << (bas)->regshft)
