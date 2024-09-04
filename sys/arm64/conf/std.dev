@@ -46,7 +46,7 @@ device		uart			# Generic UART driver
 
 # Console
 device		vt
-device		kbdmux
+#device		kbdmux
 
 device		vt_efifb
 device		vt_simplefb
