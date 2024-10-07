@@ -11,7 +11,7 @@ struct rtkit_state;
 
 typedef int (*rtkit_map)(void *, bus_addr_t, bus_size_t);
 
-int rtkit_init(device_t, struct rtkit_state **, bool);
+struct rtkit_state *rtkit_init(device_t, bool);
 int rtkit_boot(struct rtkit_state *);
 
 void rtkit_set_map_callback(struct rtkit_state *, rtkit_map, void *);

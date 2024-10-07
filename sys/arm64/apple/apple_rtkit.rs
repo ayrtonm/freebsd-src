@@ -1,12 +1,16 @@
 #![no_std]
 #![feature(concat_idents)]
 
+extern crate alloc;
+
+use alloc::boxed::Box;
 use core::ffi::c_int;
 use core::ptr::{addr_of_mut, null_mut};
 use kpi::bus::{Resource, ResourceSpec};
 use kpi::device::{Device, DeviceIf, ProbeRes, UniqDevice};
 use kpi::driver;
 use kpi::ofw::XRef;
+use rtkit::RTKit;
 
 const CPU_CTRL: u64 = 0x44;
 const CPU_CTRL_RUN: u32 = 1 << 4;
@@ -19,7 +23,7 @@ const SPEC: [ResourceSpec; 2] = [
 
 struct Softc {
     mem: [Resource; 2],
-    rtkit_state: *mut bindings::rtkit_state,
+    rtkit: Box<RTKit>,
 }
 
 impl DeviceIf for Driver {
@@ -45,15 +49,9 @@ impl DeviceIf for Driver {
 
         dev.register_xref(xref);
 
-        let mut sc = self.claim_softc(&mut dev)?.init_from(Softc {
-            mem,
-            rtkit_state: null_mut(),
-        });
+        let rtkit = RTKit::new(&dev, false);
 
-        let rc = unsafe { bindings::rtkit_init(dev.dup(), addr_of_mut!(sc.rtkit_state), false) };
-        if rc != 0 {
-            return Err(ENXIO);
-        }
+        let sc = self.claim_softc(&mut dev)?.init_from(Softc { mem, rtkit });
 
         self.release_softc(&mut dev, sc);
 
@@ -68,17 +66,13 @@ impl DeviceIf for Driver {
 fn apple_rtkit_boot2(helper: XRef) -> Result<()> {
     let dev = helper.device_from_xref()?;
     let mut dev = unsafe { dev.is_unique() };
-    let sc = unsafe { apple_rtkit_driver.driver.claim_softc(&mut dev)?.is_init() };
+    let mut sc = unsafe { apple_rtkit_driver.driver.claim_softc(&mut dev)?.is_init() };
     let ctrl = sc.mem[0].read_4(CPU_CTRL);
     sc.mem[0].write_4(CPU_CTRL, ctrl | CPU_CTRL_RUN);
 
-    let rc = unsafe { bindings::rtkit_boot(sc.rtkit_state) };
-    if rc != 0 {
-        return Err(ENXIO);
-    }
-    unsafe {
-        bindings::rtkit_set_ap_pwrstate(sc.rtkit_state, bindings::RTKIT_MGMT_PWR_STATE_ON as u16);
-    }
+    sc.rtkit.boot()?;
+    sc.rtkit
+        .set_ap_pwrstate(bindings::RTKIT_MGMT_PWR_STATE_ON as u16);
     Ok(())
 }
 

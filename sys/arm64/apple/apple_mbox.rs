@@ -6,9 +6,9 @@ use core::ptr::{addr_of_mut, null_mut};
 use kpi::bus::Resource;
 use kpi::device::{Device, DeviceIf, ProbeRes, RawDevice, UniqDevice};
 use kpi::ofw::XRef;
-use kpi::{dprintln, driver, Ref, UniqRef};
+use kpi::{dprintln, driver, AsRustType, Ref, UniqRef};
 
-type CbTy = extern "C" fn(*mut c_void, bindings::apple_mbox_msg) -> c_int;
+type CbTy = unsafe extern "C" fn(*mut c_void, bindings::apple_mbox_msg) -> c_int;
 
 struct Softc {
     dev: RawDevice,
@@ -62,31 +62,6 @@ impl DeviceIf for Driver {
     }
 }
 
-pub fn apple_mbox_get2(client: Device) -> Result<Device> {
-    let client_node = client.ofw_bus_get_node();
-    let mbox_ref = client_node.get_xref_prop(c"mboxes")?;
-    mbox_ref.device_from_xref()
-}
-
-use kpi::AsRustType;
-
-#[no_mangle]
-pub extern "C" fn apple_mbox_get(client: *mut bindings::_device) -> *mut bindings::_device {
-    let client = client.as_rust_type();
-
-    apple_mbox_get2(client).unwrap().as_ptr()
-    //match apple_mbox_get2(client) {
-    //    Ok(res) => res.as_ptr(),
-    //    Err(e) => core::ptr::null_mut(),
-    //}
-}
-
-#[no_mangle]
-pub extern "C" fn apple_mbox_set_rx(mbox: bindings::device_t, cb: Option<CbTy>, arg: *mut c_void) {
-    let mbox = mbox.as_rust_type();
-    apple_mbox_driver.driver.set_rx(mbox, cb, arg).unwrap();
-}
-
 #[no_mangle]
 pub extern "C" fn apple_mbox_write(
     mbox: *mut bindings::_device,
@@ -112,9 +87,9 @@ extern "C" fn apple_mbox_intr(mut sc: Ref<Softc>) {
             data1: sc.mem.read_8(MBOX_I2A_RECV1) as u32,
         };
         match sc.callback {
-            Some(callback) => {
+            Some(callback) => unsafe {
                 callback(sc.arg, msg);
-            }
+            },
             None => {
                 dprintln!(sc.dev, "Received RTKit msg w/o callback installed\n");
             }
@@ -123,10 +98,16 @@ extern "C" fn apple_mbox_intr(mut sc: Ref<Softc>) {
 }
 
 impl Driver {
-    fn set_rx(&self, mbox: Device, callback: Option<CbTy>, arg: *mut c_void) -> Result<()> {
+    pub fn get(client: Device) -> Result<Device> {
+        let client_node = client.ofw_bus_get_node();
+        let mbox_ref = client_node.get_xref_prop(c"mboxes")?;
+        mbox_ref.device_from_xref()
+    }
+
+    pub fn set_rx(&self, mbox: Device, callback: CbTy, arg: *mut c_void) -> Result<()> {
         let mut mbox = unsafe { mbox.is_unique() };
         let mut sc = unsafe { self.claim_softc(&mut mbox)?.is_init() };
-        sc.callback = callback;
+        sc.callback = Some(callback);
         sc.arg = arg;
         let irq = sc.irq.take().unwrap();
         let intrhand = addr_of_mut!(sc.intrhand);

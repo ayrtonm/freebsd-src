@@ -101,51 +101,8 @@ static bool rtkit_verbose = true;
     do { if (rtkit_verbose && state->verbose) { \
 	device_printf(state->dev, fmt, ##__VA_ARGS__); } } while (0)
 
-struct rtkit_buffer {
-	bus_addr_t			addr;
-	bus_size_t			size;
-	void				*kva;
-
-	bus_dma_tag_t		tag;
-	bus_dmamap_t		map;
-
-	// TODO: this is a pretty ugly workaround for making handle_buffer_req
-	// endpoint oblivious. I should probably find a better way to dedup code
-	struct rtkit_state	*state;
-};
-
-struct rtkit_task {
-	struct task				task;
-	struct apple_mbox_msg	msg;
-	struct rtkit_state		*state;
-};
-
-struct rtkit_state {
-	device_t			dev;
-	struct apple_mbox	mbox;
-
-	uint16_t			iop_pwrstate;
-	uint16_t			ap_pwrstate;
-
-	uint64_t			epmap;
-	void (*callbacks[32])(void *, uint64_t);
-	void				*args[32];
-
-	struct rtkit_buffer crashlog_buffer;
-	struct rtkit_buffer syslog_buffer;
-	struct rtkit_buffer ioreport_buffer;
-	struct rtkit_buffer oslog_buffer;
-
-	rtkit_map			map_fn;
-	void				*map_arg;
-
-	uint8_t				syslog_entries;
-	uint8_t				syslog_msg_size;
-	char				*syslog_msg;
-
-	bool				verbose;
-	bool				noalloc;
-};
+#define BINDINGS_AS_HEADER
+#include <rust/bindings.c>
 
 static bool
 rtkit_endpoint_is_valid(uint32_t endpoint)
@@ -220,7 +177,7 @@ rtkit_set_ap_pwrstate(struct rtkit_state *state, uint16_t pwrstate)
 	return error;
 }
 
-static int
+int
 rtkit_set_iop_pwrstate(struct rtkit_state *state, uint16_t pwrstate)
 {
 	int error;
@@ -618,7 +575,7 @@ rtkit_handle_oslog(struct rtkit_state *state, struct apple_mbox_msg *msg)
 }
 
 // called in kthread
-static void
+void
 rtkit_rx_task(void *context, int pending)
 {
 	struct rtkit_task *task = (struct rtkit_task *)context;
@@ -668,68 +625,6 @@ rtkit_rx_task(void *context, int pending)
 	}
 
 	free(task, M_DEVBUF);
-}
-
-// called in ithread can't sleep here
-static int
-rtkit_rx_callback(void *cookie, struct apple_mbox_msg msg)
-{
-	struct rtkit_state *state = (struct rtkit_state *)cookie;
-
-	struct rtkit_task *task = malloc(sizeof(*task), M_DEVBUF,
-		M_NOWAIT | M_USE_RESERVE);
-
-	if (task == NULL)
-		return ENOMEM;
-
-	task->msg = msg;
-	task->state = state;
-
-	TASK_INIT(&task->task, 0, rtkit_rx_task, task);
-	taskqueue_enqueue(taskqueue_thread, &task->task);
-
-	return 0;
-}
-
-int
-rtkit_init(device_t dev, struct rtkit_state **statep, bool noalloc)
-{
-	struct rtkit_state *state;
-
-	if (statep == NULL) {
-		return EINVAL;
-	}
-
-	state = malloc(sizeof(*state), M_DEVBUF, M_WAITOK | M_ZERO);
-	if (state == NULL) {
-		return ENOMEM;
-	}
-
-	state->dev = dev;
-	state->iop_pwrstate = RTKIT_MGMT_PWR_STATE_SLEEP;
-	state->ap_pwrstate = RTKIT_MGMT_PWR_STATE_QUIESCED;
-	state->verbose = false;
-	state->noalloc = noalloc;
-
-	*statep = state;
-
-	return 0;
-}
-
-int
-rtkit_boot(struct rtkit_state *state)
-{
-	state->mbox.dev = apple_mbox_get(state->dev);
-	if (state->mbox.dev == NULL) {
-		free(state, M_DEVBUF);
-		return (-1);
-	}
-
-	apple_mbox_set_rx(state->mbox.dev, rtkit_rx_callback, state);
-
-	/* Wake up! */
-	rtkit_printf(state, "setting RTKit IOP power state ON\n");
-	return rtkit_set_iop_pwrstate(state, RTKIT_MGMT_PWR_STATE_ON);
 }
 
 void
