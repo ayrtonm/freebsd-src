@@ -4,7 +4,7 @@
 use core::ffi::{c_int, c_void};
 use core::ptr::{addr_of_mut, null_mut};
 use kpi::bus::Resource;
-use kpi::device::{Device, DeviceIf, ProbeRes, RawDevice, UniqDevice};
+use kpi::device::{Device, DeviceIf, ProbeRes, RawDevice};
 use kpi::ofw::XRef;
 use kpi::{dprintln, driver, AsRustType, Ref, UniqRef};
 
@@ -35,7 +35,7 @@ impl DeviceIf for Driver {
         Ok(BUS_PROBE_SPECIFIC)
     }
 
-    fn device_attach(&self, mut dev: UniqDevice) -> Result<()> {
+    fn device_attach(&self, mut dev: Device) -> Result<()> {
         let mem = dev.bus_alloc_resource(SYS_RES_MEMORY, 0)?;
         let node = dev.ofw_bus_get_node();
         let rid = node.ofw_bus_find_string_index(c"interrupt-names", c"recv-not-empty")?;
@@ -44,7 +44,7 @@ impl DeviceIf for Driver {
         dev.register_xref(xref);
 
         let sc = Softc {
-            dev: dev.dup(),
+            dev: dev.as_ptr(),
             mem,
             irq,
             intrhand: null_mut(),
@@ -104,8 +104,7 @@ impl Driver {
         mbox_ref.device_from_xref()
     }
 
-    pub fn set_rx(&self, mbox: Device, callback: CbTy, arg: *mut c_void) -> Result<()> {
-        let mut mbox = unsafe { mbox.is_unique() };
+    pub fn set_rx(&self, mut mbox: Device, callback: CbTy, arg: *mut c_void) -> Result<()> {
         let mut sc = unsafe { self.claim_softc(&mut mbox)?.is_init() };
         sc.callback = Some(callback);
         sc.arg = arg;
@@ -123,8 +122,7 @@ impl Driver {
         Ok(())
     }
 
-    fn write(&self, mbox: Device, msg: *const bindings::apple_mbox_msg) -> c_int {
-        let mut mbox = unsafe { mbox.is_unique() };
+    fn write(&self, mut mbox: Device, msg: *const bindings::apple_mbox_msg) -> c_int {
         let mut sc = unsafe { self.share_softc(&mut mbox).unwrap().is_init() };
         let ctrl = sc.mem.read_4(MBOX_A2I_CTRL);
         if (ctrl & MBOX_A2I_CTRL_FULL) != 0 {

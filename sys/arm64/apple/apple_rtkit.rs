@@ -7,7 +7,7 @@ use alloc::boxed::Box;
 use core::ffi::c_int;
 use core::ptr::{addr_of_mut, null_mut};
 use kpi::bus::{Resource, ResourceSpec};
-use kpi::device::{Device, DeviceIf, ProbeRes, UniqDevice};
+use kpi::device::{Device, DeviceIf, ProbeRes};
 use kpi::driver;
 use kpi::ofw::XRef;
 use rtkit::RTKit;
@@ -41,7 +41,7 @@ impl DeviceIf for Driver {
         Ok(BUS_PROBE_SPECIFIC)
     }
 
-    fn device_attach(&self, mut dev: UniqDevice) -> Result<()> {
+    fn device_attach(&self, mut dev: Device) -> Result<()> {
         let mem = dev.bus_alloc_resources(SPEC)?;
 
         let node = dev.ofw_bus_get_node();
@@ -64,8 +64,7 @@ impl DeviceIf for Driver {
 }
 
 fn apple_rtkit_boot2(helper: XRef) -> Result<()> {
-    let dev = helper.device_from_xref()?;
-    let mut dev = unsafe { dev.is_unique() };
+    let mut dev = helper.device_from_xref()?;
     let mut sc = unsafe { apple_rtkit_driver.driver.claim_softc(&mut dev)?.is_init() };
     let ctrl = sc.mem[0].read_4(CPU_CTRL);
     sc.mem[0].write_4(CPU_CTRL, ctrl | CPU_CTRL_RUN);
