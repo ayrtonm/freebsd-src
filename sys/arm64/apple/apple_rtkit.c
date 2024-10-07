@@ -42,6 +42,7 @@
 
 #include <arm64/apple/rtkit.h>
 
+#if 0
 #define CPU_CTRL		0x44
 #define CPU_CTRL_RUN	(1 << 4)
 
@@ -173,6 +174,10 @@ static driver_t apple_rtkit_driver = {
 	.methods = apple_rtkit_methods,
 	.size = sizeof(struct apple_rtkit_softc),
 };
+
+#else
+extern driver_t apple_rtkit_driver;
+#endif
 
 EARLY_DRIVER_MODULE(apple_rtkit, simplebus, apple_rtkit_driver, 0, 0,
     BUS_PASS_INTERRUPT + BUS_PASS_ORDER_LAST);
