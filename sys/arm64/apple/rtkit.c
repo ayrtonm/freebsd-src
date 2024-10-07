@@ -182,7 +182,7 @@ rtkit_send(struct apple_mbox *mbox, uint32_t endpoint, uint8_t type,
 	msg.data0 |= data;
 	msg.data1 = endpoint;
 
-	return apple_mbox_write(mbox, &msg);
+	return apple_mbox_write(mbox->dev, &msg);
 }
 
 int
@@ -719,14 +719,13 @@ rtkit_init(device_t dev, struct rtkit_state **statep, bool noalloc)
 int
 rtkit_boot(struct rtkit_state *state)
 {
-	int error;
-	error = apple_mbox_get(state->dev, &state->mbox.dev);
-	if (error != 0) {
+	state->mbox.dev = apple_mbox_get(state->dev);
+	if (state->mbox.dev == NULL) {
 		free(state, M_DEVBUF);
-		return error;
+		return (-1);
 	}
 
-	apple_mbox_set_rx(&state->mbox, rtkit_rx_callback, state);
+	apple_mbox_set_rx(state->mbox.dev, rtkit_rx_callback, state);
 
 	/* Wake up! */
 	rtkit_printf(state, "setting RTKit IOP power state ON\n");

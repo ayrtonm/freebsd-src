@@ -28,6 +28,7 @@
 #include <machine/intr.h>
 #include <machine/resource.h>
 
+#if 0
 #include <dev/ofw/ofw_bus.h>
 #include <dev/ofw/ofw_bus_subr.h>
 
@@ -177,10 +178,10 @@ apple_mbox_write_locked(device_t dev, const struct apple_mbox_msg *msg)
 }
 
 int
-apple_mbox_write(struct apple_mbox *mbox, const struct apple_mbox_msg *msg)
+apple_mbox_write(device_t dev, const struct apple_mbox_msg *msg)
 {
 	int rc;
-	device_t dev = mbox->dev;
+	//device_t dev = mbox->dev;
 	//struct apple_mbox_softc *sc = device_get_softc(dev);
 
 	//mtx_lock_spin(&sc->sc_tx_mtx);
@@ -192,45 +193,40 @@ apple_mbox_write(struct apple_mbox *mbox, const struct apple_mbox_msg *msg)
 	return rc;
 }
 
-int
-apple_mbox_get(device_t client_dev, device_t *mboxp)
+device_t
+apple_mbox_get(device_t client_dev)
 {
 	int error;
 	phandle_t client_node, mbox_node;
-
-	if (mboxp == NULL)
-		return EINVAL;
+    device_t mbox;
 
 	client_node = ofw_bus_get_node(client_dev);
 	error = OF_getencprop(client_node, "mboxes", &mbox_node,
 		sizeof(mbox_node));
 
 	if (error != sizeof(mbox_node))
-		return error;
+		return NULL;
 
-	*mboxp = OF_device_from_xref(mbox_node);
-	if (*mboxp == NULL) {
-		for (int timo = 0; timo < 100000; timo++) {
-			DELAY(1);
-		}
+	//mbox = OF_device_from_xref(mbox_node);
+	//if (mbox == NULL) {
+	for (int timo = 0; timo < 100000; timo++) {
+		DELAY(1);
 	}
-	*mboxp = OF_device_from_xref(mbox_node);
-	if (*mboxp == NULL) {
-		return ENODEV;
-	}
+	//}
+	mbox = OF_device_from_xref(mbox_node);
 
-	return 0;
+	return mbox;
 }
 
 void
-apple_mbox_set_rx(struct apple_mbox *mbox, apple_mbox_rx rx_cb, void *rx_arg)
+apple_mbox_set_rx(device_t dev, apple_mbox_rx rx_cb, void *rx_arg)
 {
 	struct apple_mbox_softc *sc;
-	sc = device_get_softc(mbox->dev);
+	sc = device_get_softc(dev);
 	sc->sc_rx_cb = rx_cb;
 	sc->sc_rx_arg = rx_arg;
 
-	int error = bus_setup_intr(mbox->dev, sc->sc_irq_res,
+	int error = bus_setup_intr(dev, sc->sc_irq_res,
 		INTR_MPSAFE | INTR_TYPE_MISC, NULL, apple_mbox_intr, sc,
 		&sc->sc_intrhand);
 	MPASS(error == 0);
@@ -249,6 +245,10 @@ static driver_t apple_mbox_driver = {
 	apple_mbox_methods,
 	sizeof(struct apple_mbox_softc),
 };
+
+#else
+extern driver_t apple_mbox_driver;
+#endif
 
 EARLY_DRIVER_MODULE(apple_mbox, simplebus, apple_mbox_driver, 0, 0,
     BUS_PASS_INTERRUPT + BUS_PASS_ORDER_LATE);

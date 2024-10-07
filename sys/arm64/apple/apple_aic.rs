@@ -7,16 +7,15 @@ extern crate kpi;
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use core::cell::LazyCell;
 use core::mem::{transmute, MaybeUninit};
 use kpi::arm64::in_vhe;
 use kpi::bus::Resource;
 use kpi::device::{Device, DeviceIf, ProbeRes};
-use kpi::intr::{IrqSrc, Pic, PicIf, FilterRes};
+use kpi::intr::{FilterRes, IrqSrc, Pic, PicIf};
 use kpi::ofw::{CompatData, CompatEntry};
 // This glob imports KPI Result, error codes, BUS_PROBE_* and relevant SYS_RES_* macros
 use kpi::prelude::*;
-use kpi::{bindings, curthread, driver, isb, pcpu_get, read_reg, write_reg};
+use kpi::{bindings, curthread, driver, isb, pcpu_get, read_reg, write_reg, Unique};
 
 #[derive(Copy, Clone, Debug)]
 struct Cfg {
@@ -128,10 +127,7 @@ static COMPAT: CompatData<Cfg, 3> = CompatData::new(|| {
 
 #[derive(Debug)]
 enum IntrKind {
-    Irq {
-        die: u32,
-        irq: u32,
-    },
+    Irq { die: u32, irq: u32 },
     Fiq(u32),
     Ipi,
 }
@@ -174,9 +170,8 @@ extern "C" fn irq_handler(sc: &mut Softc) -> FilterRes {
 
     let ty = event.ty;
 
-    if ty != AIC_EVENT_TYPE_IRQ  {
-        if ty != AIC_EVENT_TYPE_NONE {
-        }
+    if ty != AIC_EVENT_TYPE_IRQ {
+        if ty != AIC_EVENT_TYPE_NONE {}
     }
     //    // get curthread td_intr_frame from x18 PCPU
     //    let tf = unsafe { (*curthread!()).td_intr_frame };
@@ -324,7 +319,7 @@ impl PicIf for Driver {
 }
 
 impl DeviceIf for Driver {
-    fn device_probe(&self, dev: &Device) -> Result<ProbeRes> {
+    fn device_probe(&self, dev: Device) -> Result<ProbeRes> {
         if !dev.ofw_bus_status_okay() {
             return Err(ENXIO);
         }
@@ -335,15 +330,19 @@ impl DeviceIf for Driver {
         Ok(BUS_PROBE_DEFAULT)
     }
 
-    fn device_attach(&self, dev: &mut Device) -> Result<()> {
+    fn device_attach(&self, dev: Device<Unique>) -> Result<()> {
         let mut sc = self.claim_softc(dev)?;
         sc.cfg = *dev
             .ofw_bus_search_compatible(&*COMPAT.0)
             .expect("reached device_attach with missing config");
 
-        sc.mem = dev.bus_alloc_resource(SYS_RES_MEMORY, 0)?;
+        sc.mem = dev
+            .bus_alloc_resource(SYS_RES_MEMORY, 0)
+            .inspect_err(|e| dprintln!(dev, "could not allocate 'core' memory resource {:?}", e))?;
         if sc.cfg.version == 2 {
-            sc.event = dev.bus_alloc_resource(SYS_RES_MEMORY, 1)?;
+            sc.event = dev.bus_alloc_resource(SYS_RES_MEMORY, 1).inspect_err(|e| {
+                dprintln!(dev, "could not allocate 'event' memory resource {:?}", e)
+            })?;
         }
 
         let info = sc.mem.read_4(AIC_INFO);
@@ -353,19 +352,18 @@ impl DeviceIf for Driver {
         let name = dev.get_nameunit();
 
         for die in 0..sc.ndie {
-            for irq in 0..sc.nirqs {
-            }
+            for irq in 0..sc.nirqs {}
         }
 
-        let node = dev.ofw_bus_get_node()?;
-        let xref = node.get_xref();
+        let node = dev.ofw_bus_get_node();
+        let xref = node.xref_from_node();
 
         let pic = Pic::register(dev, xref)?;
 
         dev.register_xref(xref);
 
-        //pic.claim_root_mut(dev, irq_handler, sc, INTR_ROOT_IRQ)?;
-        //pic.claim_root_mut(dev, fiq_handler, sc, INTR_ROOT_FIQ)?;
+        pic.claim_root(dev, irq_handler, sc, INTR_ROOT_IRQ)?;
+        pic.claim_root(dev, fiq_handler, sc, INTR_ROOT_FIQ)?;
 
         if sc.cfg.version == 2 {
             let config = sc.mem.read_4(AIC2_CONFIG);

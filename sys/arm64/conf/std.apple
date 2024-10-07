@@ -11,4 +11,4 @@ options		IOMMU
 device		nvme_ans
 device		dockchannel
 device		powerdom
-device		dwc3
+#device		dwc3
