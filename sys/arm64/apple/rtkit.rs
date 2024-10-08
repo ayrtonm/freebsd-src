@@ -9,7 +9,7 @@ use core::mem::MaybeUninit;
 use core::ptr::{addr_of_mut, null_mut};
 use kpi::device::Device;
 use kpi::prelude::*;
-use kpi::{bindings, AsRustType};
+use kpi::{bindings, AsRustType, PointsTo};
 
 use apple_mbox::apple_mbox_driver;
 
@@ -30,9 +30,12 @@ extern "C" fn rtkit_rx_callback(cookie: *mut c_void, msg: bindings::apple_mbox_m
         },
         NOWAIT,
     );
-    task.task.ta_context = addr_of_mut!(task).cast();
+    let tq_ptr = addr_of_mut!(task.task);
+    let ctx_ptr = addr_of_mut!(task.task.ta_context);
+    let task_ptr = Box::into_raw(task);
     unsafe {
-        bindings::taskqueue_enqueue(bindings::taskqueue_thread, addr_of_mut!(task.task));
+        *ctx_ptr = task_ptr.cast();
+        bindings::taskqueue_enqueue(bindings::taskqueue_thread, tq_ptr);
     }
     0
 }
@@ -44,7 +47,7 @@ pub struct RTKit {
 }
 
 impl RTKit {
-    pub fn new(dev: &Device, noalloc: bool) -> Box<Self> {
+    pub fn new(dev: Device, noalloc: bool) -> Box<Self> {
         let mut init: bindings::rtkit_state = unsafe { MaybeUninit::zeroed().assume_init() };
         init.dev = dev.as_ptr();
         init.iop_pwrstate = bindings::RTKIT_MGMT_PWR_STATE_SLEEP as u16;
@@ -84,7 +87,7 @@ impl RTKit {
 #[no_mangle]
 extern "C" fn rtkit_init(dev: bindings::device_t, noalloc: bool) -> *mut bindings::rtkit_state {
     let dev = dev.as_rust_type();
-    Box::into_raw(RTKit::new(&dev, noalloc)).cast()
+    Box::into_raw(RTKit::new(dev, noalloc)).cast()
 }
 
 #[no_mangle]

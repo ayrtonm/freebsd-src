@@ -1,5 +1,5 @@
 #![no_std]
-#![feature(try_with_capacity, concat_idents)]
+#![feature(try_with_capacity, concat_idents, variant_count)]
 #![deny(unused_must_use)]
 
 extern crate alloc;
@@ -7,15 +7,14 @@ extern crate kpi;
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use core::mem::{transmute, MaybeUninit};
+use core::mem::{transmute, variant_count, MaybeUninit};
+use core::ptr::{addr_of_mut, null_mut};
 use kpi::arm64::in_vhe;
 use kpi::bus::Resource;
 use kpi::device::{Device, DeviceIf, ProbeRes};
 use kpi::intr::{FilterRes, IrqSrc, Pic, PicIf};
 use kpi::ofw::{CompatData, CompatEntry};
-// This glob imports KPI Result, error codes, BUS_PROBE_* and relevant SYS_RES_* macros
-use kpi::prelude::*;
-use kpi::{bindings, curthread, driver, isb, pcpu_get, read_reg, write_reg, Unique};
+use kpi::{bindings, curthread, driver, isb, pcpu_get, read_reg, write_reg, PointsTo, Ref};
 
 #[derive(Copy, Clone, Debug)]
 struct Cfg {
@@ -82,12 +81,13 @@ macro_rules! aic_write_reg {
 
 const AIC_INFO: u64 = 0x0004;
 
-fn info_ndie(info: u32) -> u32 {
-    ((info >> 24) & 0xf) + 1
+fn info_ndie(info: u32) -> usize {
+    let res = ((info >> 24) & 0xf) + 1;
+    res as usize
 }
 
-fn info_nirqs(info: u32) -> u32 {
-    info & 0xffff
+fn info_nirqs(info: u32) -> usize {
+    (info & 0xffff) as usize
 }
 
 const AIC_WHOAMI: u64 = 0x2000;
@@ -114,8 +114,8 @@ const AIC2_CONFIG_ENABLE: u32 = 1 << 0;
 
 const AIC_IRQ_CR_EL1_DISABLE: u32 = 3 << 0;
 
-//const AIC_MAXCPUS: u64 = 32;
-//const AIC_MAXDIES: u64 = 4;
+const AIC_MAXCPUS: u64 = 32;
+const AIC_MAXDIES: usize = 4;
 
 static COMPAT: CompatData<Cfg, 3> = CompatData::new(|| {
     [
@@ -126,9 +126,22 @@ static COMPAT: CompatData<Cfg, 3> = CompatData::new(|| {
 });
 
 #[derive(Debug)]
+enum FiqKind {
+    TmrHvPhys,
+    TmrHvVirt,
+    TmrGuestPhys,
+    TmrGuestVirt,
+    CpuPmuE,
+    CpuPmuU,
+}
+
+const NUM_FIQS: usize = variant_count::<FiqKind>();
+const NUM_IPIS: usize = bindings::INTR_IPI_COUNT as usize;
+
+#[derive(Debug)]
 enum IntrKind {
-    Irq { die: u32, irq: u32 },
-    Fiq(u32),
+    Irq { die: usize, irq: usize },
+    Fiq(FiqKind),
     Ipi,
 }
 
@@ -140,78 +153,121 @@ struct Intr {
     trig: bindings::intr_trigger,
 }
 
+impl Intr {
+    pub fn irq(die: usize, irq: usize) -> Self {
+        Self {
+            isrc: IrqSrc::new(),
+            kind: IntrKind::Irq { die, irq },
+            pol: bindings::INTR_POLARITY_CONFORM,
+            trig: bindings::INTR_TRIGGER_CONFORM,
+        }
+    }
+
+    pub fn fiq(kind: FiqKind) -> Self {
+        Self {
+            isrc: IrqSrc::new(),
+            kind: IntrKind::Fiq(kind),
+            pol: bindings::INTR_POLARITY_CONFORM,
+            trig: bindings::INTR_TRIGGER_CONFORM,
+        }
+    }
+
+    pub fn fiqs() -> [Self; NUM_FIQS] {
+        let kinds = [
+            FiqKind::TmrHvPhys,
+            FiqKind::TmrHvVirt,
+            FiqKind::TmrGuestPhys,
+            FiqKind::TmrGuestVirt,
+            FiqKind::CpuPmuE,
+            FiqKind::CpuPmuU,
+        ];
+        kinds.map(|k| Self::fiq(k))
+    }
+
+    pub const fn ipi() -> Self {
+        Self {
+            isrc: IrqSrc::new(),
+            kind: IntrKind::Ipi,
+            pol: bindings::INTR_POLARITY_CONFORM,
+            trig: bindings::INTR_TRIGGER_CONFORM,
+        }
+    }
+}
+
 #[derive(Debug)]
 struct Softc {
+    dev: Device,
     mem: Resource,
-    event: Resource,
-    nirqs: u32,
-    ndie: u32,
-    irq_srcs: Option<Box<[Intr]>>,
-    //fiq_srcs: Box<[Intr]>,
-    cfg: Cfg,
+    event: Option<Resource>,
+    nirqs: usize,
+    ndie: usize,
+    irq_srcs: [Option<Box<[Intr]>>; AIC_MAXDIES],
+    fiq_srcs: [Option<[Intr; NUM_FIQS]>; AIC_MAXDIES],
+    ipi_srcs: [Intr; NUM_IPIS],
+    cfg: &'static Cfg,
 }
 
-extern "C" fn irq_handler(sc: &mut Softc) -> FilterRes {
-    let tf = curthread!(td_intr_frame);
-    #[repr(C)]
-    struct Event {
-        irq: u16,
-        ty: u8,
-        die: u8,
-    }
+//extern "C" fn irq_handler(sc: &mut Softc) -> FilterRes {
+//    let tf = curthread!(td_intr_frame);
+//    #[repr(C)]
+//    struct Event {
+//        irq: u16,
+//        ty: u8,
+//        die: u8,
+//    }
+//
+//    let event = if sc.cfg.version == 1 {
+//        sc.mem.read_4(AIC_EVENT)
+//    } else {
+//        sc.event.read_4(0)
+//    };
+//
+//    let event: Event = unsafe { transmute(event) };
+//
+//    let ty = event.ty;
+//
+//    if ty != AIC_EVENT_TYPE_IRQ {
+//        if ty != AIC_EVENT_TYPE_NONE {}
+//    }
+//    //    // get curthread td_intr_frame from x18 PCPU
+//    //    let tf = unsafe { (*curthread!()).td_intr_frame };
+//    //    #[repr(C)]
+//    //    struct Event {
+//    //        irq: u16,
+//    //        ty: u8,
+//    //        die: u8,
+//    //    }
+//    //    let event = if sc.cfg.version == 1 {
+//    //        sc.mem.read_4(bindings::AIC_EVENT as u64)
+//    //    } else {
+//    //        sc.event.read_4(0)
+//    //    };
+//    //    // TODO: there's probably a cleaner way to do this...
+//    //    let event: Event = unsafe { transmute(event) };
+//    //
+//    //    let ty = event.ty;
+//    //
+//    //    if ty != bindings::AIC_EVENT_TYPE_IRQ as u8 {
+//    //        if ty != bindings::AIC_EVENT_TYPE_NONE as u8 {
+//    //            dprintln!(sc.dev, "unexpected event type {ty}");
+//    //            return FILTER_STRAY;
+//    //        }
+//    //    }
+//    //
+//    //    let die = event.die as usize;
+//    //    let irq = event.irq as usize;
+//    //    let idx = (irq + (die * sc.nirqs as usize));
+//    //    if Pic::isrc_dispatch(&mut sc.irq_srcs[idx].isrc, tf).is_err() {
+//    //        dprintln!(sc.dev, "Stray irq {die}:{irq} disabled");
+//    //        return FILTER_STRAY;
+//    //    }
+//    //
+//    FILTER_HANDLED
+//}
 
-    let event = if sc.cfg.version == 1 {
-        sc.mem.read_4(AIC_EVENT)
-    } else {
-        sc.event.read_4(0)
-    };
-
-    let event: Event = unsafe { transmute(event) };
-
-    let ty = event.ty;
-
-    if ty != AIC_EVENT_TYPE_IRQ {
-        if ty != AIC_EVENT_TYPE_NONE {}
-    }
-    //    // get curthread td_intr_frame from x18 PCPU
-    //    let tf = unsafe { (*curthread!()).td_intr_frame };
-    //    #[repr(C)]
-    //    struct Event {
-    //        irq: u16,
-    //        ty: u8,
-    //        die: u8,
-    //    }
-    //    let event = if sc.cfg.version == 1 {
-    //        sc.mem.read_4(bindings::AIC_EVENT as u64)
-    //    } else {
-    //        sc.event.read_4(0)
-    //    };
-    //    // TODO: there's probably a cleaner way to do this...
-    //    let event: Event = unsafe { transmute(event) };
-    //
-    //    let ty = event.ty;
-    //
-    //    if ty != bindings::AIC_EVENT_TYPE_IRQ as u8 {
-    //        if ty != bindings::AIC_EVENT_TYPE_NONE as u8 {
-    //            dprintln!(sc.dev, "unexpected event type {ty}");
-    //            return FILTER_STRAY;
-    //        }
-    //    }
-    //
-    //    let die = event.die as usize;
-    //    let irq = event.irq as usize;
-    //    let idx = (irq + (die * sc.nirqs as usize));
-    //    if Pic::isrc_dispatch(&mut sc.irq_srcs[idx].isrc, tf).is_err() {
-    //        dprintln!(sc.dev, "Stray irq {die}:{irq} disabled");
-    //        return FILTER_STRAY;
-    //    }
-    //
-    FILTER_HANDLED
-}
-
-extern "C" fn fiq_handler(sc: &mut Softc) -> FilterRes {
-    FILTER_STRAY
-}
+//extern "C" fn fiq_handler(sc: &mut Softc) -> FilterRes {
+//    FILTER_STRAY
+//}
 
 fn irq_bitmask(irq: u32) -> u32 {
     1 << (irq & 0x1f)
@@ -323,49 +379,139 @@ impl DeviceIf for Driver {
         if !dev.ofw_bus_status_okay() {
             return Err(ENXIO);
         }
-        if dev.ofw_bus_search_compatible(&*COMPAT.0).is_none() {
+
+        if dev.ofw_bus_search_compatible(&*COMPAT.0).is_err() {
             return Err(ENXIO);
         }
+
         dev.set_desc(c"Apple Interrupt Controller");
-        Ok(BUS_PROBE_DEFAULT)
+
+        Ok(BUS_PROBE_SPECIFIC)
     }
 
-    fn device_attach(&self, dev: Device<Unique>) -> Result<()> {
-        let mut sc = self.claim_softc(dev)?;
-        sc.cfg = *dev
-            .ofw_bus_search_compatible(&*COMPAT.0)
-            .expect("reached device_attach with missing config");
+    fn device_attach(&self, mut dev: Device) -> Result<()> {
+        let cfg = dev.ofw_bus_search_compatible(&*COMPAT.0)?;
 
-        sc.mem = dev
+        let mem = dev
             .bus_alloc_resource(SYS_RES_MEMORY, 0)
-            .inspect_err(|e| dprintln!(dev, "could not allocate 'core' memory resource {:?}", e))?;
-        if sc.cfg.version == 2 {
-            sc.event = dev.bus_alloc_resource(SYS_RES_MEMORY, 1).inspect_err(|e| {
-                dprintln!(dev, "could not allocate 'event' memory resource {:?}", e)
-            })?;
-        }
+            .inspect_err(|e| dprintln!(dev, "could not allocate 'core' register {e:?}"))?;
 
-        let info = sc.mem.read_4(AIC_INFO);
-        sc.nirqs = info_nirqs(info);
-        sc.ndie = info_ndie(info);
+        let event = if cfg.version == 2 {
+            let reg = dev
+                .bus_alloc_resource(SYS_RES_MEMORY, 1)
+                .inspect_err(|e| dprintln!(dev, "coult not allocate 'event' register {e:?}"))?;
+            Some(reg)
+        } else {
+            None
+        };
+
+        let info = mem.read_4(AIC_INFO);
+        let nirqs = info_nirqs(info);
+        let ndie = info_ndie(info);
 
         let name = dev.get_nameunit();
+        let mut irq_srcs = [const { None }; AIC_MAXDIES];
+        let mut fiq_srcs = [const { None }; AIC_MAXDIES];
 
-        for die in 0..sc.ndie {
-            for irq in 0..sc.nirqs {}
+        for die in 0..ndie {
+            let mut irqs: Vec<Intr> = Vec::try_with_capacity(nirqs)?;
+            for irq in 0..nirqs {
+                irqs.push(Intr::irq(die, irq));
+
+                let isrc_ptr = addr_of_mut!(irqs[irq].isrc);
+                let rc = unsafe {
+                    bindings::intr_isrc_register(
+                        isrc_ptr,
+                        dev.as_ptr(),
+                        0,
+                        c"%s,die%d,irq%d".as_ptr(),
+                        name.as_ptr(),
+                        die,
+                        irq,
+                    )
+                };
+                if rc != 0 {
+                    return Err(ENXIO);
+                }
+            }
+            irq_srcs[die] = Some(irqs.into_boxed_slice());
+
+            let mut fiqs = Intr::fiqs();
+            for fiq in &mut fiqs {
+                // TODO: Not sure I can expose fiq.isrc's temporary address to C but whatever
+                let isrc_ptr = addr_of_mut!(fiq.isrc);
+                let rc = unsafe {
+                    bindings::intr_isrc_register(
+                        isrc_ptr,
+                        dev.as_ptr(),
+                        bindings::INTR_ISRCF_PPI as u32,
+                        c"%s,die%d,fiq".as_ptr(),
+                        name.as_ptr(),
+                        die,
+                    )
+                };
+                if rc != 0 {
+                    return Err(ENXIO);
+                }
+            }
+            fiq_srcs[die] = Some(fiqs);
         }
 
-        let node = dev.ofw_bus_get_node();
-        let xref = node.xref_from_node();
+        let ipi_srcs = [const { Intr::ipi() }; NUM_IPIS];
 
-        let pic = Pic::register(dev, xref)?;
+        let rc = unsafe { bindings::intr_ipi_pic_register(dev.as_ptr(), 0) };
+        if rc != 0 {
+            return Err(ENXIO);
+        }
+        /*#ifdef SMP
+            sc->sc_ipimasks = malloc(sizeof(*sc->sc_ipimasks) * mp_maxid + 1,
+                M_DEVBUF, M_WAITOK | M_ZERO);
+            if (sc->sc_cfg->version == 1) {
+                sc->sc_cpuids = malloc(sizeof(*sc->sc_cpuids) * mp_maxid + 1,
+                    M_DEVBUF, M_WAITOK | M_ZERO);
+                cpu = PCPU_GET(cpuid);
+                sc->sc_cpuids[cpu] = bus_read_4(sc->sc_mem, AIC_WHOAMI);
+            }
+            for (ipi = 0; ipi < AIC_NIPIS; ipi++) {
+                isrc->ai_irq = ipi;
+                isrc = &sc->sc_ipi_srcs[ipi];
+                isrc->ai_type = AIC_TYPE_IPI;
+                error = intr_isrc_register(&isrc->ai_isrc, dev, INTR_ISRCF_IPI,
+                    "%s,ipi%d", name, ipi);
+                if (error != 0) {
+                    return (ENXIO);
+                }
+            }
+            error = intr_ipi_pic_register(dev, 0);
+            if (error != 0) {
+                return (ENXIO);
+            }
+        #endif*/
+
+        let xref = dev.ofw_bus_get_node().xref_from_node();
+        let mut pic = dev.pic_register(xref)?;
 
         dev.register_xref(xref);
 
-        pic.claim_root(dev, irq_handler, sc, INTR_ROOT_IRQ)?;
-        pic.claim_root(dev, fiq_handler, sc, INTR_ROOT_FIQ)?;
+        let sc = Softc {
+            dev,
+            mem,
+            event,
+            nirqs,
+            ndie,
+            irq_srcs,
+            fiq_srcs,
+            ipi_srcs,
+            cfg,
+        };
 
-        if sc.cfg.version == 2 {
+        self.softc_init(dev, sc)?;
+        let sc = self.softc_share(dev)?;
+
+        pic.claim_root(irq_handler, sc, INTR_ROOT_IRQ)?;
+        pic.claim_root(fiq_handler, sc, INTR_ROOT_IRQ)?;
+
+        if cfg.version == 2 {
             let config = sc.mem.read_4(AIC2_CONFIG);
             sc.mem.write_4(AIC2_CONFIG, config | AIC2_CONFIG_ENABLE);
         }
@@ -378,6 +524,14 @@ impl DeviceIf for Driver {
     fn device_detach(&self, dev: Device) -> Result<()> {
         panic!("not yet")
     }
+}
+
+extern "C" fn irq_handler(sc: Ref<Softc>) -> FilterRes {
+    FILTER_HANDLED
+}
+
+extern "C" fn fiq_handler(sc: Ref<Softc>) -> FilterRes {
+    FILTER_HANDLED
 }
 
 driver!(apple_aic_driver, c"aic", apple_aic_methods, Softc,

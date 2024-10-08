@@ -5,7 +5,6 @@ extern crate alloc;
 
 use alloc::boxed::Box;
 use core::ffi::c_int;
-use core::ptr::{addr_of_mut, null_mut};
 use kpi::bus::{Resource, ResourceSpec};
 use kpi::device::{Device, DeviceIf, ProbeRes};
 use kpi::driver;
@@ -49,23 +48,21 @@ impl DeviceIf for Driver {
 
         dev.register_xref(xref);
 
-        let rtkit = RTKit::new(&dev, false);
+        let rtkit = RTKit::new(dev, false);
 
-        let sc = self.claim_softc(&mut dev)?.init_from(Softc { mem, rtkit });
-
-        self.release_softc(&mut dev, sc);
+        self.softc_init(dev, Softc { mem, rtkit })?;
 
         Ok(())
     }
 
-    fn device_detach(&self, dev: Device) -> Result<()> {
+    fn device_detach(&self, _dev: Device) -> Result<()> {
         panic!("not yet")
     }
 }
 
 fn apple_rtkit_boot2(helper: XRef) -> Result<()> {
-    let mut dev = helper.device_from_xref()?;
-    let mut sc = unsafe { apple_rtkit_driver.driver.claim_softc(&mut dev)?.is_init() };
+    let dev = helper.device_from_xref()?;
+    let mut sc = apple_rtkit_driver.driver.softc_claim(dev)?;
     let ctrl = sc.mem[0].read_4(CPU_CTRL);
     sc.mem[0].write_4(CPU_CTRL, ctrl | CPU_CTRL_RUN);
 

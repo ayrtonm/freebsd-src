@@ -4,14 +4,14 @@
 use core::ffi::{c_int, c_void};
 use core::ptr::{addr_of_mut, null_mut};
 use kpi::bus::Resource;
-use kpi::device::{Device, DeviceIf, ProbeRes, RawDevice};
+use kpi::device::{Device, DeviceIf, ProbeRes};
 use kpi::ofw::XRef;
-use kpi::{dprintln, driver, AsRustType, Ref, UniqRef};
+use kpi::{dprintln, driver, AsRustType, Ref};
 
 type CbTy = unsafe extern "C" fn(*mut c_void, bindings::apple_mbox_msg) -> c_int;
 
 struct Softc {
-    dev: RawDevice,
+    dev: Device,
     mem: Resource,
     irq: Option<Resource>,
 
@@ -44,15 +44,14 @@ impl DeviceIf for Driver {
         dev.register_xref(xref);
 
         let sc = Softc {
-            dev: dev.as_ptr(),
+            dev,
             mem,
             irq,
             intrhand: null_mut(),
             callback: None,
             arg: null_mut(),
         };
-        let sc = self.claim_softc(&mut dev)?.init_from(sc);
-        self.release_softc(&mut dev, sc);
+        self.softc_init(dev, sc)?;
 
         Ok(())
     }
@@ -105,17 +104,16 @@ impl Driver {
     }
 
     pub fn set_rx(&self, mut mbox: Device, callback: CbTy, arg: *mut c_void) -> Result<()> {
-        let mut sc = unsafe { self.claim_softc(&mut mbox)?.is_init() };
+        let mut sc = self.softc_claim(mbox)?;
         sc.callback = Some(callback);
         sc.arg = arg;
         let irq = sc.irq.take().unwrap();
         let intrhand = addr_of_mut!(sc.intrhand);
-        self.release_softc(&mut mbox, sc);
+        self.softc_release(mbox, sc);
 
-        let sc = unsafe { self.share_softc(&mut mbox)?.is_init() };
+        let sc = self.softc_share(mbox)?;
 
-        // TODO: FreeBSD tends to avoid reusing identifiers so tweak bindgen flags to remove the prefixes
-        let flags = bindings::intr_type_INTR_MPSAFE | bindings::intr_type_INTR_TYPE_MISC;
+        let flags = bindings::INTR_MPSAFE | bindings::INTR_TYPE_MISC;
         mbox.bus_setup_intr(irq, flags, None, Some(apple_mbox_intr), sc, intrhand)
             .unwrap();
 
@@ -123,7 +121,7 @@ impl Driver {
     }
 
     fn write(&self, mut mbox: Device, msg: *const bindings::apple_mbox_msg) -> c_int {
-        let mut sc = unsafe { self.share_softc(&mut mbox).unwrap().is_init() };
+        let mut sc = self.softc_share(mbox).unwrap();
         let ctrl = sc.mem.read_4(MBOX_A2I_CTRL);
         if (ctrl & MBOX_A2I_CTRL_FULL) != 0 {
             return bindings::EBUSY;
