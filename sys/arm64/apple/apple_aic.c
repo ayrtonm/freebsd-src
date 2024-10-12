@@ -692,7 +692,7 @@ apple_aic_setup_intr(device_t dev, struct intr_irqsrc *isrc,
 	ai->ai_pol = pol;
 	ai->ai_trig = trig;
 	ai->ai_die = die;
-
+//
 	//aic_trace("set up %s %d on die %d\n", type == AIC_TYPE_IRQ ? "IRQ" : "FIQ", irq, die);
 
 	if (isrc->isrc_flags & INTR_ISRCF_PPI) {

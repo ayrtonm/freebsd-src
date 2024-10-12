@@ -1,14 +1,33 @@
+/*	$OpenBSD: aplmbox.c,v 1.2 2022/01/04 20:55:48 kettenis Exp $	*/
+/*
+ * Copyright (c) 2021 Mark Kettenis <kettenis@openbsd.org>
+ * Copyright (c) 2022 Kyle Evans <kevans@FreeBSD.org>
+ *
+ * Permission to use, copy, modify, and distribute this software for any
+ * purpose with or without fee is hereby granted, provided that the above
+ * copyright notice and this permission notice appear in all copies.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+ * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+ */
+
 #![no_std]
 #![feature(concat_idents)]
 
 use core::ffi::{c_int, c_void};
 use core::ptr::{addr_of_mut, null_mut};
+use kpi::bindings::{INTR_MPSAFE, INTR_TYPE_MISC};
 use kpi::bus::Resource;
 use kpi::device::{Device, DeviceIf, ProbeRes};
 use kpi::ofw::XRef;
 use kpi::{dprintln, driver, AsRustType, Ref};
 
-type CbTy = unsafe extern "C" fn(*mut c_void, bindings::apple_mbox_msg) -> c_int;
+type CbTy = extern "C" fn(*mut c_void, bindings::apple_mbox_msg) -> c_int;
 
 struct Softc {
     dev: Device,
@@ -51,7 +70,7 @@ impl DeviceIf for Driver {
             callback: None,
             arg: null_mut(),
         };
-        self.softc_init(dev, sc)?;
+        self.init_softc(dev, sc)?;
 
         Ok(())
     }
@@ -104,16 +123,16 @@ impl Driver {
     }
 
     pub fn set_rx(&self, mut mbox: Device, callback: CbTy, arg: *mut c_void) -> Result<()> {
-        let mut sc = self.softc_claim(mbox)?;
+        let mut sc = self.claim_softc(mbox)?;
         sc.callback = Some(callback);
         sc.arg = arg;
         let irq = sc.irq.take().unwrap();
         let intrhand = addr_of_mut!(sc.intrhand);
-        self.softc_release(mbox, sc);
+        self.release_softc(mbox, sc);
 
-        let sc = self.softc_share(mbox)?;
+        let sc = self.share_softc(mbox)?;
 
-        let flags = bindings::INTR_MPSAFE | bindings::INTR_TYPE_MISC;
+        let flags = INTR_MPSAFE | INTR_TYPE_MISC;
         mbox.bus_setup_intr(irq, flags, None, Some(apple_mbox_intr), sc, intrhand)
             .unwrap();
 
@@ -121,7 +140,7 @@ impl Driver {
     }
 
     fn write(&self, mut mbox: Device, msg: *const bindings::apple_mbox_msg) -> c_int {
-        let mut sc = self.softc_share(mbox).unwrap();
+        let mut sc = self.share_softc(mbox).unwrap();
         let ctrl = sc.mem.read_4(MBOX_A2I_CTRL);
         if (ctrl & MBOX_A2I_CTRL_FULL) != 0 {
             return bindings::EBUSY;
