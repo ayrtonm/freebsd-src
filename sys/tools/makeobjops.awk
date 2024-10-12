@@ -39,9 +39,10 @@
 
 function usage ()
 {
-	print "usage: makeobjops.awk <srcfile.m> [-d] [-p] [-l <nr>] [-c|-h]";
+	print "usage: makeobjops.awk <srcfile.m> [-d] [-p] [-l <nr>] [-c|-h|-r]";
 	print "where -c   produce only .c files";
 	print "      -h   produce only .h files";
+	print "      -r   produce only .rs files";
 	print "      -p   use the path component in the source file for destination dir";
 	print "      -l   set line width for output files [80]";
 	print "      -d   switch on debugging";
@@ -73,6 +74,7 @@ function die (msg)
 #   These are just for convenience ...
 function printc(s) {if (opt_c) print s > ctmpfilename;}
 function printh(s) {if (opt_h) print s > htmpfilename;}
+function printrs(s) {if (opt_r) print s > rstmpfilename;}
 
 #
 #   If a line exceeds maxlength, split it into multiple
@@ -124,6 +126,27 @@ function system_check (cmd)
 {
 	if ((rc = system(cmd)))
 		warn(cmd " failed (" rc ")");
+}
+
+#
+#   Convert a C type into the equivalent rust type
+#
+function as_rust_type(type)
+{
+	rusttype = type;
+	# Remove the struct keyword. The following space ensures that this doesn't
+	# match types which containing struct in their name.
+	gsub(/struct /, "", rusttype);
+    rusttype = "kpi::bindings::" rusttype;
+	# Change T * into *mut T taking into account the possibility of multiple
+	# levels of indirection
+	nstar = gsub(/\*/, "", rusttype);
+	if (nstar != 0) {
+		for (j = 1; j <= nstar; j++) {
+			rusttype = "*mut " rusttype;
+		}
+	}
+	return rusttype;
 }
 
 #
@@ -264,22 +287,24 @@ function handle_method (static, doc)
 
 	num_arguments = split(line, arguments, / *; */) - 1;
 	delete varnames;		# list of varnames
+	delete rustargs;
+	delete rustvars;
 	num_varnames = 0;
 	for (i = 1; i <= num_arguments; i++) {
 		if (!arguments[i])
 			continue;	# skip argument if argument is empty
-		num_ar = split(arguments[i], ar, /[* 	]+/);
-		if (num_ar < 2) {	# only 1 word in argument?
-			warnsrc("no type for '" arguments[i] "'");
-			error = 1;
-			return;
-		}
-		#   Last element is name of variable.
-		varnames[++num_varnames] = ar[num_ar];
+		n = match(arguments[i], /[a-zA-Z_0-9]*$/)
+		arg_ty = substr(arguments[i], 1, n - 1);
+		arg_name = substr(arguments[i], n);
+		varnames[++num_varnames] = arg_name;
+		rustargs[num_varnames] = arg_name ": " as_rust_type(arg_ty);
+		rustvars[num_varnames] = "let mut " arg_name " = " arg_name ".as_rust_type();";
 	}
 
 	argument_list = join(", ", arguments, num_arguments);
 	varname_list = join(", ", varnames, num_varnames);
+    rustarg_list = join(", ", rustargs, num_arguments);
+    rustvar_list = join("\n", rustvars, num_arguments);
 
 	if (opt_d) {
 		warn("Arguments: " argument_list);
@@ -307,6 +332,35 @@ function handle_method (static, doc)
 	printc("struct kobjop_desc " mname "_desc = {");
 	printc("\t0, { &" mname "_desc, (kobjop_t)" default_function " }");
 	printc("};\n");
+
+	printrs("#[macro_export]");
+	printrs("macro_rules! " mname "{");
+	printrs("    ($impl:ident, $cdriver:ident) => {");
+	printrs("        #[no_mangle]");
+	if (ret != "void")
+		printrs("        extern \"C\" fn $impl(" rustarg_list ") -> " as_rust_type(ret)" {");
+	else
+		printrs("        extern \"C\" fn $impl(" rustarg_list ") {");
+	if (ret != "void")
+		printrs("            use core::ffi::c_int;");
+	printrs("            use kpi::{AsCType, AsRustType};\n");
+	printrs(rustvar_list);
+	if (precond != "")
+		printrs("            " precond);
+
+	if (ret != "void") {
+		printrs("let res =");
+	}
+	printrs("$cdriver.driver." mname "(" varname_list ");");
+	if (ret != "void") {
+		printrs("            match res {");
+		printrs("                Ok(r) => r.as_c_int(),");
+		printrs("                Err(e) => e as c_int,");
+		printrs("            }");
+	}
+	printrs("        }");
+	printrs("    };");
+	printrs("}");
 
 	# Print out the method itself
 	printh(doc);
@@ -362,6 +416,7 @@ for (i = 1; i < ARGC; i++) {
 			o = substr(ARGV[i], j, 1);
 			if	(o == "c")	opt_c = 1;
 			else if	(o == "h")	opt_h = 1;
+			else if	(o == "r")	opt_r = 1;
 			else if	(o == "p")	opt_p = 1;
 			else if	(o == "d")	opt_d = 1;
 			else if	(o == "l") {
@@ -386,7 +441,7 @@ for (i = 1; i < ARGC; i++) {
 		usage();
 }
 
-if (!num_files || !(opt_c || opt_h))
+if (!num_files || !(opt_c || opt_h || opt_r))
 	usage();
 
 if (opt_p)
@@ -404,18 +459,21 @@ for (i = 0; i < num_files; i++)
 
 for (file_i = 0; file_i < num_files; file_i++) {
 	src = filenames[file_i];
-	cfilename = hfilename = src;
+	cfilename = hfilename = rsfilename = src;
 	sub(/\.m$/, ".c", cfilename);
 	sub(/\.m$/, ".h", hfilename);
+	sub(/\.m$/, ".rs", rsfilename);
 	if (!opt_p) {
 		sub(/^.*\//, "", cfilename);
 		sub(/^.*\//, "", hfilename);
+		sub(/^.*\//, "", rsfilename);
 	}
 
-	debug("Processing from " src " to " cfilename " / " hfilename);
+	debug("Processing from " src " to " cfilename " / " hfilename " / " rsfilename);
 
 	ctmpfilename = cfilename ".tmp";
 	htmpfilename = hfilename ".tmp";
+    rstmpfilename = rsfilename ".tmp";
 
 	# Avoid a literal generated file tag here.
 	generated = "@" "generated";
@@ -440,6 +498,7 @@ for (file_i = 0; file_i < num_files; file_i++) {
 	    "#include <sys/kobj.h>");
 
 	printh(common_head);
+	printrs(common_head);
 
 	delete methods;		# clear list of methods
 	intname = "";
@@ -448,6 +507,7 @@ for (file_i = 0; file_i < num_files; file_i++) {
 	lastdoc = "";
 	prolog = "";
 	epilog = "";
+	precond = "";
 
 	while (!error && (getline < src) > 0) {
 		lineno++;
@@ -488,15 +548,19 @@ for (file_i = 0; file_i < num_files; file_i++) {
 			lastdoc = "";
 			prolog = "";
 			epilog = "";
+			precond = "";
 		} else if (/^STATICMETHOD/) {
 			handle_method(1, lastdoc);
 			lastdoc = "";
 			prolog = "";
 			epilog = "";
+			precond = "";
 		} else if (/^PROLOG[ 	]*{$/)
 			prolog = handle_code();
 		else if (/^EPILOG[ 	]*{$/)
 			epilog = handle_code();
+		else if (/^PRECOND[ 	]*{$/)
+			precond = handle_code();
 		else {
 			debug($0);
 			warnsrc("Invalid line encountered");
@@ -511,6 +575,7 @@ for (file_i = 0; file_i < num_files; file_i++) {
 
 	close (ctmpfilename);
 	close (htmpfilename);
+	close (rstmpfilename);
 
 	if (error) {
 		warn("Output skipped");
@@ -522,6 +587,8 @@ for (file_i = 0; file_i < num_files; file_i++) {
 			system_check("mv -f " ctmpfilename " " cfilename);
 		if (opt_h)
 			system_check("mv -f " htmpfilename " " hfilename);
+		if (opt_r)
+			system_check("mv -f " rstmpfilename " " rsfilename);
 	}
 }
 
