@@ -297,9 +297,9 @@ nvme_ans_attach(device_t dev)
 		goto err_find_sart;
 	}
 
-	error = rtkit_init(dev, &sc->sc_rtkit_state, false);
-	if (error != 0) {
-		device_printf(dev, "error initializing RTKit %d\n", error);
+	sc->sc_rtkit_state = rtkit_init(dev, false);
+	if (sc->sc_rtkit_state == NULL) {
+		device_printf(dev, "error initializing RTKit\n");
 		goto err_rtkit_init;
 	}
 	rtkit_set_map_callback(sc->sc_rtkit_state, nvme_ans_sart_map, sc);

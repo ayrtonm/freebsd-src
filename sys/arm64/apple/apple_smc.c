@@ -182,9 +182,9 @@ apple_smc_start_config_hook(void *arg)
 
 	node = ofw_bus_get_node(dev);
 
-	error = rtkit_init(dev, &sc->sc_rtkit_state, true);
-	if (error != 0) {
-		device_printf(dev, "error initializing RTKit %d\n", error);
+	sc->sc_rtkit_state = rtkit_init(dev, true);
+	if (sc->sc_rtkit_state == NULL) {
+		device_printf(dev, "error initializing RTKit\n");
 		panic("uh oh");
 	}
 
