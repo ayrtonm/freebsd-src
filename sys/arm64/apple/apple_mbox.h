@@ -29,10 +29,10 @@ struct apple_mbox {
 	device_t		dev;
 };
 
-int apple_mbox_get(device_t, device_t *);
+device_t apple_mbox_get(device_t);
 
-void apple_mbox_set_rx(struct apple_mbox *, apple_mbox_rx, void *);
+void apple_mbox_set_rx(device_t, apple_mbox_rx, void *);
 
-int apple_mbox_write(struct apple_mbox *, const struct apple_mbox_msg *);
+int apple_mbox_write(device_t, const struct apple_mbox_msg *);
 
 #endif /* _APPLE_MBOX_H_ */
