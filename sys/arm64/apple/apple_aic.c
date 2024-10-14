@@ -56,7 +56,7 @@
 
 #include "pic_if.h"
 
-#if 0
+#if 1
 
 #define	AIC_INFO		0x0004
 #define  AIC_INFO_NDIE(val)	(((val) >> 24) & 0xf)
