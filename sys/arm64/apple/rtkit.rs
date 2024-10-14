@@ -44,7 +44,7 @@ struct RTKitTask {
 
 extern "C" fn rtkit_rx_callback(cookie: *mut c_void, msg: bindings::apple_mbox_msg) -> c_int {
     let mut rktask = RefMut::new_in_heap(RTKitTask {
-        task: Task::new(), ctx: /*RTKitCtx*/bindings::rtkit_task { msg, state: null_mut() }
+        task: Task::new(), ctx: /*RTKitCtx*/bindings::rtkit_task { msg, state: cookie.cast() }
     }, NOWAIT);
     get_field!(rktask, task).init(bindings::rtkit_rx_task, get_field!(rktask, ctx).as_ptr());
     get_field!(rktask, task).enqueue(unsafe { bindings::taskqueue_thread }).unwrap();
