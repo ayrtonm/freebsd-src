@@ -25,35 +25,29 @@ use core::ffi::{c_int, c_void};
 use core::mem::MaybeUninit;
 use core::ptr::{addr_of_mut, null_mut};
 use kpi::device::Device;
+use kpi::taskq::Task;
 use kpi::prelude::*;
-use kpi::{bindings, AsRustType, PointsTo};
+use kpi::{bindings, RefMut, get_field, AsRustType, PointsTo};
 
 use apple_mbox::apple_mbox_driver;
 
+#[repr(C)]
+struct RTKitCtx {
+    msg: bindings::apple_mbox_msg,
+    state: *mut bindings::rtkit_state,
+}
+
+struct RTKitTask {
+    task: Task,
+    ctx: bindings::rtkit_task,//RTKitCtx,
+}
+
 extern "C" fn rtkit_rx_callback(cookie: *mut c_void, msg: bindings::apple_mbox_msg) -> c_int {
-    let state = cookie.cast::<bindings::rtkit_state>();
-    let mut task = Box::new_in(
-        bindings::rtkit_task {
-            task: bindings::task {
-                ta_link: unsafe { MaybeUninit::zeroed().assume_init() },
-                ta_pending: 0,
-                ta_priority: 0,
-                ta_flags: 0,
-                ta_func: Some(bindings::rtkit_rx_task),
-                ta_context: null_mut(),
-            },
-            msg,
-            state,
-        },
-        NOWAIT,
-    );
-    let tq_ptr = addr_of_mut!(task.task);
-    let ctx_ptr = addr_of_mut!(task.task.ta_context);
-    let task_ptr = Box::into_raw(task);
-    unsafe {
-        *ctx_ptr = task_ptr.cast();
-        bindings::taskqueue_enqueue(bindings::taskqueue_thread, tq_ptr);
-    }
+    let mut rktask = RefMut::new_in_heap(RTKitTask {
+        task: Task::new(), ctx: /*RTKitCtx*/bindings::rtkit_task { msg, state: null_mut() }
+    }, NOWAIT);
+    get_field!(rktask, task).init(bindings::rtkit_rx_task, get_field!(rktask, ctx).as_ptr());
+    get_field!(rktask, task).enqueue(unsafe { bindings::taskqueue_thread }).unwrap();
     0
 }
 
@@ -82,7 +76,6 @@ impl RTKit {
             (*state).mbox.dev = mbox.as_ptr();
         }
         apple_mbox_driver
-            .driver
             .set_rx(mbox, rtkit_rx_callback, state.cast())
             .unwrap();
         let res = self.set_iop_pwrstate(bindings::RTKIT_MGMT_PWR_STATE_ON as u16);

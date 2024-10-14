@@ -24,18 +24,18 @@ use core::ptr::{addr_of_mut, null_mut};
 use kpi::bindings::{INTR_MPSAFE, INTR_TYPE_MISC};
 use kpi::bus::Resource;
 use kpi::device::{Device, DeviceIf, ProbeRes};
-use kpi::ofw::XRef;
-use kpi::{dprintln, driver, AsRustType, Ref};
+use kpi::{dprintln, driver, get_field, AsRustType, Ref};
+use kpi::sync::SpinLock;
 
-type CbTy = extern "C" fn(*mut c_void, bindings::apple_mbox_msg) -> c_int;
+type Callback = extern "C" fn(*mut c_void, bindings::apple_mbox_msg) -> c_int;
 
 struct Softc {
     dev: Device,
-    mem: Resource,
+    mem: SpinLock<Resource>,
     irq: Option<Resource>,
 
     intrhand: *mut c_void,
-    callback: Option<CbTy>,
+    callback: Option<Callback>,
     arg: *mut c_void,
 }
 
@@ -55,7 +55,8 @@ impl DeviceIf for Driver {
     }
 
     fn device_attach(&self, mut dev: Device) -> Result<()> {
-        let mem = dev.bus_alloc_resource(SYS_RES_MEMORY, 0)?;
+        let res = dev.bus_alloc_resource(SYS_RES_MEMORY, 0)?;
+        let mem = SpinLock::new_uninit(res);
         let node = dev.ofw_bus_get_node();
         let rid = node.ofw_bus_find_string_index(c"interrupt-names", c"recv-not-empty")?;
         let irq = Some(dev.bus_alloc_resource(SYS_RES_IRQ, rid)?);
@@ -71,11 +72,14 @@ impl DeviceIf for Driver {
             arg: null_mut(),
         };
         self.init_softc(dev, sc)?;
+        let mut sc = self.claim_softc(dev)?;
+        get_field!(sc, mem).init(c"Apple MBox Tx", None);
+        self.release_softc(dev, sc);
 
         Ok(())
     }
 
-    fn device_detach(&self, dev: Device) -> Result<()> {
+    fn device_detach(&self, _dev: Device) -> Result<()> {
         panic!("not yet")
     }
 }
@@ -86,7 +90,7 @@ pub extern "C" fn apple_mbox_write(
     msg: *const bindings::apple_mbox_msg,
 ) -> c_int {
     let mbox = mbox.as_rust_type();
-    apple_mbox_driver.driver.write(mbox, msg)
+    apple_mbox_driver.write(mbox, msg)
 }
 
 const MBOX_A2I_CTRL: u64 = 0x110;
@@ -98,14 +102,15 @@ const MBOX_A2I_SEND1: u64 = 0x808;
 const MBOX_I2A_RECV0: u64 = 0x830;
 const MBOX_I2A_RECV1: u64 = 0x838;
 
-extern "C" fn apple_mbox_intr(mut sc: Ref<Softc>) {
-    while (sc.mem.read_4(MBOX_I2A_CTRL) & MBOX_I2A_CTRL_EMPTY) == 0 {
+extern "C" fn apple_mbox_intr(sc: Ref<Softc>) {
+    let mut mem = sc.mem.lock().unwrap();
+    while (mem.read_4(MBOX_I2A_CTRL) & MBOX_I2A_CTRL_EMPTY) == 0 {
         let msg = bindings::apple_mbox_msg {
-            data0: sc.mem.read_8(MBOX_I2A_RECV0),
-            data1: sc.mem.read_8(MBOX_I2A_RECV1) as u32,
+            data0: mem.read_8(MBOX_I2A_RECV0),
+            data1: mem.read_8(MBOX_I2A_RECV1) as u32,
         };
         match sc.callback {
-            Some(callback) => unsafe {
+            Some(callback) => {
                 callback(sc.arg, msg);
             },
             None => {
@@ -122,7 +127,7 @@ impl Driver {
         mbox_ref.device_from_xref()
     }
 
-    pub fn set_rx(&self, mut mbox: Device, callback: CbTy, arg: *mut c_void) -> Result<()> {
+    pub fn set_rx(&self, mut mbox: Device, callback: Callback, arg: *mut c_void) -> Result<()> {
         let mut sc = self.claim_softc(mbox)?;
         sc.callback = Some(callback);
         sc.arg = arg;
@@ -139,16 +144,15 @@ impl Driver {
         Ok(())
     }
 
-    fn write(&self, mut mbox: Device, msg: *const bindings::apple_mbox_msg) -> c_int {
-        let mut sc = self.share_softc(mbox).unwrap();
-        let ctrl = sc.mem.read_4(MBOX_A2I_CTRL);
+    fn write(&self, mbox: Device, msg: *const bindings::apple_mbox_msg) -> c_int {
+        let sc = self.share_softc(mbox).unwrap();
+        let mut mem = sc.mem.lock().unwrap();
+        let ctrl = mem.read_4(MBOX_A2I_CTRL);
         if (ctrl & MBOX_A2I_CTRL_FULL) != 0 {
             return bindings::EBUSY;
         }
-        unsafe {
-            sc.mem.write_8(MBOX_A2I_SEND0, (*msg).data0);
-            sc.mem.write_8(MBOX_A2I_SEND1, (*msg).data1 as u64);
-        }
+        mem.write_8(MBOX_A2I_SEND0, unsafe { (*msg).data0 });
+        mem.write_8(MBOX_A2I_SEND1, unsafe { (*msg).data1 as u64 });
         0
     }
 }

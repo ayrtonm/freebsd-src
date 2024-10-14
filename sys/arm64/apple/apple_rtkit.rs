@@ -90,7 +90,7 @@ impl DeviceIf for Driver {
 
 fn apple_rtkit_boot2(helper: XRef) -> Result<()> {
     let dev = helper.device_from_xref()?;
-    let mut sc = apple_rtkit_driver.driver.claim_softc(dev)?;
+    let mut sc = apple_rtkit_driver.claim_softc(dev)?;
     let ctrl = sc.mem[0].read_4(CPU_CTRL);
     sc.mem[0].write_4(CPU_CTRL, ctrl | CPU_CTRL_RUN);
 

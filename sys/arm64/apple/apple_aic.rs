@@ -53,7 +53,7 @@ use kpi::intr::{FilterRes, IrqSrc, MapData, Pic, PicIf};
 use kpi::ofw::{CompatData, CompatEntry};
 use kpi::{
     bindings, curthread, driver, enum_c_macros, isb, pcpu_get, read_reg, write_reg, PointsTo, Ptr,
-    Ref, SharedValue, SubClass,
+    Ref, SubClass,
 };
 
 #[derive(Copy, Clone, Debug)]
@@ -249,12 +249,16 @@ struct Softc {
     cfg: &'static Cfg,
 }
 
-fn get_irq_src(sc: &Ref<Softc>, die: u32, irq: u32) -> &AppleIrqSrc {
-    /*unsafe { pinned_sc.map_unchecked(|sc|*/ &sc.irq_srcs[die as usize].as_ref().unwrap()[irq as usize]//) }
+fn get_irq_src(sc: Ref<Softc>, die: u32, irq: u32) -> Ref<AppleIrqSrc> {
+    sc.map_ref(|sc| {
+        &sc.irq_srcs[die as usize].as_ref().unwrap()[irq as usize]
+    })
 }
 
-fn get_fiq_src(sc: &Ref<Softc>, fiq: FiqKind) -> &AppleIrqSrc {
-    /*unsafe { pinned_sc.map_unchecked(|sc|*/ &sc.fiq_srcs[fiq as i32 as u32 as usize]//) }
+fn get_fiq_src(sc: Ref<Softc>, fiq: FiqKind) -> Ref<AppleIrqSrc> {
+    sc.map_ref(|sc| {
+        &sc.fiq_srcs[fiq as i32 as u32 as usize]
+    })
 }
 
 fn irq_bitmask(irq: u32) -> u32 {
@@ -338,13 +342,11 @@ fn init_cpu() {
     /* mask pending IPI FIQs */
     aic_write_reg!(AIC_IPI_SR_EL1, AIC_IPI_SR_EL1_PENDING);
 
-    write_reg!(
-        stringify!(cntp_ctl_el0),
-        read_reg!(stringify!(cntp_ctl_el0)) | CNTV_CTL_IMASK
+    write_reg!("cntp_ctl_el0",
+        read_reg!("cntp_ctl_el0") | CNTV_CTL_IMASK
     );
-    write_reg!(
-        stringify!(cntv_ctl_el0),
-        read_reg!(stringify!(cntv_ctl_el0)) | CNTV_CTL_IMASK
+    write_reg!("cntv_ctl_el0",
+        read_reg!("cntv_ctl_el0") | CNTV_CTL_IMASK
     );
 
     if in_vhe() {
@@ -549,46 +551,20 @@ impl DeviceIf for Driver {
         self.init_softc(dev, sc)?;
         let sc = self.share_softc(dev)?;
 
-        // TODO: isrc_register doesn't force the isrc to have a fixed address yet
         for die in 0..ndie {
             for irq in 0..nirqs {
-                self.isrc_register(dev, get_irq_src(&sc, die, irq), 0, c"%s,die%d,irq%d", name, die, irq)?;
+                let irq_ref = get_irq_src(sc, die, irq);
+                self.isrc_register(dev, irq_ref, 0, c"%s,die%d,irq%d", name, die, irq)?;
             }
         }
         for fiq in FiqKind::fiqs() {
-            self.isrc_register(dev, get_fiq_src(&sc, fiq), INTR_ISRCF_PPI, c"%s,fiq%d", name, fiq as i32 as u32, 0)?;
+            let fiq_ref = get_fiq_src(sc, fiq);
+            self.isrc_register(dev, fiq_ref, INTR_ISRCF_PPI, c"%s,fiq%d", name, fiq as u32, 0)?;
         }
-        /*
-        for die in 0..ndie {
-            let mut irqs = Vec::try_with_capacity(nirqs as usize)?;
-            for irq in 0..nirqs {
-                irqs.push(new_irq(die, irq));
-                self.isrc_register(dev, &irqs[irq], 0, c"irq")?;
-            }
-            irq_srcs[die] = Some(irqs.into_boxed_slice());
-
+        for ipi in 0..NUM_IPIS {
+            let ipi_ref = sc.map_ref(|sc| &sc.ipi_srcs[ipi]);
+            self.isrc_register(dev, ipi_ref, INTR_ISRCF_IPI, c"%s,ipi%d", name, ipi as u32, 0)?;
         }
-        let fiq_srcs = fiqs();
-        for fiq in *fiq_srcs {
-            self.isrc_register(dev, fiq, INTR_ISRCF_PPI, c"fiq")?;
-        }
-
-        let ipi_srcs = [const { new_ipi() }; NUM_IPIS];
-        */
-        /*#ifdef SMP
-            sc->sc_ipimasks = malloc(sizeof(*sc->sc_ipimasks) * mp_maxid + 1,
-                M_DEVBUF, M_WAITOK | M_ZERO);
-            if (sc->sc_cfg->version == 1) {
-                sc->sc_cpuids = malloc(sizeof(*sc->sc_cpuids) * mp_maxid + 1,
-                    M_DEVBUF, M_WAITOK | M_ZERO);
-                cpu = PCPU_GET(cpuid);
-                sc->sc_cpuids[cpu] = bus_read_4(sc->sc_mem, AIC_WHOAMI);
-            }
-        #endif*/
-
-        //for ipi in &ipi_srcs {
-        //    self.isrc_register(dev, ipi, INTR_ISRCF_IPI, c"ipi")?;
-        //}
 
         dev.ipi_pic_register(0)?;
 
@@ -596,8 +572,6 @@ impl DeviceIf for Driver {
         let mut pic = dev.pic_register(xref)?;
 
         dev.register_xref(xref);
-
-        //let sc = self.share_softc(dev)?;
 
         pic.claim_root(irq_handler, sc, INTR_ROOT_IRQ)?;
         pic.claim_root(fiq_handler, sc, INTR_ROOT_IRQ)?;
@@ -653,7 +627,7 @@ extern "C" fn irq_handler(sc: Ref<Softc>) -> FilterRes {
             let die = event_die(event);
             let irq = event_irq(event);
 
-            let irq_src = get_irq_src(&sc, die, irq);
+            let irq_src = get_irq_src(sc, die, irq);
             if irq_src.isrc_dispatch(tf) != 0 {
                 dprintln!(sc.dev, "Stray irq {irq:} disabled");
                 return FILTER_STRAY;
@@ -667,7 +641,45 @@ extern "C" fn irq_handler(sc: Ref<Softc>) -> FilterRes {
     FILTER_HANDLED
 }
 
+fn ipi_received(sc: Ref<Softc>, tf: *mut bindings::trapframe) {
+}
+
 extern "C" fn fiq_handler(sc: Ref<Softc>) -> FilterRes {
+    let tf = curthread!(td_intr_frame);
+
+// gate under SMP
+    if aic_read_reg!(AIC_IPI_SR_EL1) & AIC_IPI_SR_EL1_PENDING != 0 {
+        aic_write_reg!(AIC_IPI_SR_EL1, AIC_IPI_SR_EL1_PENDING);
+        isb!();
+        ipi_received(sc, tf);
+    }
+    let phys = read_reg!("cntp_ctl_el0");
+    if (phys & CNTV_CTL_BITS) == (CNTV_CTL_ENABLE | CNTV_CTL_ISTATUS) {
+        get_fiq_src(sc, FiqKind::AIC_TMR_HV_PHYS).isrc_dispatch(tf);
+    }
+
+    let virt = read_reg!("cntv_ctl_el0");
+    if (virt & CNTV_CTL_BITS) == (CNTV_CTL_ENABLE | CNTV_CTL_ISTATUS) {
+        get_fiq_src(sc, FiqKind::AIC_TMR_HV_VIRT).isrc_dispatch(tf);
+    }
+
+    if in_vhe() {
+        let reg = aic_read_reg!(AIC_FIQ_VM_TIMER);
+
+        if (reg & AIC_FIQ_VM_TIMER_PEN) != 0 {
+            let guest_phys = aic_read_reg!(AIC_TMR_CTL_GUEST_PHYS);
+            if (guest_phys & CNTV_CTL_BITS) == (CNTV_CTL_ENABLE | CNTV_CTL_ISTATUS) {
+                get_fiq_src(sc, FiqKind::AIC_TMR_GUEST_PHYS).isrc_dispatch(tf);
+            }
+        }
+
+        if (reg & AIC_FIQ_VM_TIMER_VEN) != 0 {
+            let guest_virt = aic_read_reg!(AIC_TMR_CTL_GUEST_VIRT);
+            if (guest_virt & CNTV_CTL_BITS) == (CNTV_CTL_ENABLE | CNTV_CTL_ISTATUS) {
+                get_fiq_src(sc, FiqKind::AIC_TMR_GUEST_VIRT).isrc_dispatch(tf);
+            }
+        }
+    }
     FILTER_HANDLED
 }
 

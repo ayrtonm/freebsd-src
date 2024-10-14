@@ -576,9 +576,9 @@ rtkit_handle_oslog(struct rtkit_state *state, struct apple_mbox_msg *msg)
 
 // called in kthread
 void
-rtkit_rx_task(void *context, int pending)
+rtkit_rx_task(struct rtkit_task *task, int pending)
 {
-	struct rtkit_task *task = (struct rtkit_task *)context;
+	//struct rtkit_task *task = (struct rtkit_task *)context;
 	struct rtkit_state *state = task->state;
 	struct apple_mbox_msg *msg = &task->msg;
 	uint32_t endpoint = msg->data1;

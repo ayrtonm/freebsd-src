@@ -351,7 +351,7 @@ function handle_method (static, doc)
 	if (ret != "void") {
 		printrs("let res =");
 	}
-	printrs("$cdriver.driver." mname "(" varname_list ");");
+	printrs("$cdriver." mname "(" varname_list ");");
 	if (ret != "void") {
 		printrs("            match res {");
 		printrs("                Ok(r) => r.as_c_int(),");
