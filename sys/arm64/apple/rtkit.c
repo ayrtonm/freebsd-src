@@ -300,7 +300,7 @@ rtkit_start(struct rtkit_state *state, uint32_t endpoint)
 	return rtkit_send(mbox, RTKIT_EP_MGMT, RTKIT_MGMT_STARTEP, reply);
 }
 
-static int
+int
 rtkit_handle_mgmt(struct rtkit_state *state, struct apple_mbox_msg *msg)
 {
 	device_t dev = state->dev;
