@@ -33,7 +33,7 @@ extern crate alloc;
 
 use alloc::boxed::Box;
 use core::ffi::c_int;
-use kpi::bus::{Resource, ResourceSpec};
+use kpi::bus::{Register, ResourceSpec};
 use kpi::device::{Device, DeviceIf, ProbeRes};
 use kpi::driver;
 use kpi::ofw::XRef;
@@ -49,7 +49,7 @@ const SPEC: [ResourceSpec; 2] = [
 ];
 
 struct Softc {
-    mem: [Resource; 2],
+    mem: [Register; 2],
     rtkit: Box<RTKit>,
 }
 
@@ -70,6 +70,7 @@ impl DeviceIf for Driver {
 
     fn device_attach(&self, mut dev: Device) -> Result<()> {
         let mem = dev.bus_alloc_resources(SPEC)?;
+        let mem = mem.map(|r| r.whole_register());
 
         let node = dev.ofw_bus_get_node();
         let xref = node.xref_from_node();
