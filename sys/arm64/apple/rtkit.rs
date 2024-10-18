@@ -28,6 +28,7 @@ use kpi::device::Device;
 use kpi::taskq::Task;
 use kpi::prelude::*;
 use kpi::{bindings, enum_c_macros, RefMut, get_field, AsRustType, PointsTo};
+use kpi::allocator::NOWAIT;
 
 use apple_mbox::apple_mbox_driver;
 
@@ -83,6 +84,11 @@ extern "C" fn rx_task(mut ctx: RefMut<RTKitTask>, pending: c_int) {
 }
 
 extern "C" fn rx_callback(cookie: *mut c_void, msg: bindings::apple_mbox_msg) -> c_int {
+    let mut rtk = Box::new_in(RTKitTask {
+        task: Task::uninit(),
+        ctx: bindings::rtkit_task { msg, state: cookie.cast() },
+    }, NOWAIT
+    );
     /*
     let mut rktask = RefMut::new_in_heap(RTKitTask {
         task: Task::new(), ctx: /*RTKitCtx*/bindings::rtkit_task { msg, state: cookie.cast() }
