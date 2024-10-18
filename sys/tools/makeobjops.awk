@@ -354,8 +354,8 @@ function handle_method (static, doc)
 	printrs("$cdriver." mname "(" varname_list ");");
 	if (ret != "void") {
 		printrs("            match res {");
-		printrs("                Ok(r) => r.as_c_int(),");
-		printrs("                Err(e) => e as c_int,");
+		printrs("                Ok(r) => r.as_c_type(),");
+		printrs("                Err(e) => e.as_c_type(),");
 		printrs("            }");
 	}
 	printrs("        }");
