@@ -20,13 +20,13 @@
 #![feature(concat_idents)]
 
 use core::ffi::{c_int, c_void};
+use core::ops::DerefMut;
 use core::ptr::{addr_of_mut, null_mut};
 use kpi::bindings::{INTR_MPSAFE, INTR_TYPE_MISC};
 use kpi::bus::{Register, Resource};
 use kpi::device::{Device, DeviceIf, ProbeRes};
 use kpi::sync::SpinLock;
-use kpi::{dprintln, driver, get_field, AsRustType, Ref, RefMut};
-use core::ops::DerefMut;
+use kpi::{dprintln, driver, get_field, AsCType, AsRustType, Claimable, Ref, RefMut};
 
 type Callback = extern "C" fn(*mut c_void, bindings::apple_mbox_msg) -> c_int;
 
@@ -48,19 +48,14 @@ type I2ACtrl = Register<MBOX_I2A_CTRL, 4>;
 type I2ARecv = Register<MBOX_I2A_RECV0, 0x10>;
 
 struct Softc {
-    rtkit_softc: RTKitSoftc,
-    intr_softc: IntrSoftc,
-    irq: Option<Resource>,
-}
-
-struct RTKitSoftc {
-    dev: Device,
+    intr_softc: Claimable<IntrSoftc>,
     a2i_ctrl: A2ICtrl,
     a2i_send: A2ISend,
 }
 
 struct IntrSoftc {
     dev: Device,
+    irq: Option<Resource>,
     i2a_ctrl: I2ACtrl,
     i2a_recv: I2ARecv,
     intrhand: *mut c_void,
@@ -101,20 +96,17 @@ impl DeviceIf for Driver {
         let i2a_recv = mem.take_register()?;
 
         let sc = Softc {
-            rtkit_softc: RTKitSoftc {
+            intr_softc: Claimable::new(IntrSoftc {
                 dev,
-                a2i_ctrl,
-                a2i_send,
-            },
-            intr_softc: IntrSoftc {
-                dev,
+                irq,
                 i2a_ctrl,
                 i2a_recv,
                 intrhand: null_mut(),
                 callback: None,
                 arg: null_mut(),
-            },
-            irq,
+            }),
+            a2i_ctrl,
+            a2i_send,
         };
         self.init_softc(dev, sc)?;
 
@@ -132,7 +124,13 @@ pub extern "C" fn apple_mbox_write(
     msg: *const bindings::apple_mbox_msg,
 ) -> c_int {
     let mbox = mbox.as_rust_type();
-    apple_mbox_driver.write(mbox, msg)
+    // TODO: I can't impl AsRustType for apple_mbox_msg from here should I should consider per-crate
+    // bindgen invocations
+    let msg = unsafe { core::ptr::read(msg) };
+    match apple_mbox_driver.write(mbox, msg) {
+        Ok(_) => 0,
+        Err(e) => e.as_c_type(),
+    }
 }
 
 extern "C" fn apple_mbox_intr(mut sc: RefMut<IntrSoftc>) {
@@ -149,10 +147,10 @@ extern "C" fn apple_mbox_intr(mut sc: RefMut<IntrSoftc>) {
         match sc.callback {
             Some(callback) => {
                 callback(sc.arg, msg);
-            },
+            }
             None => {
                 dprintln!(sc.dev, "Received RTKit msg w/o callback installed\n");
-            },
+            }
         }
     }
 }
@@ -166,20 +164,13 @@ impl Driver {
 
     pub fn set_rx(&self, mut mbox: Device, callback: Callback, arg: *mut c_void) -> Result<()> {
         let mut sc = self.claim_softc(mbox)?;
-        sc.intr_softc.callback = Some(callback);
-        sc.intr_softc.arg = arg;
-
-        let irq = sc.irq.take().unwrap();
-        let intrhand = addr_of_mut!(sc.intr_softc.intrhand);
-        let intr_softc = get_field!(sc, intr_softc);
-
-        // TODO: the fact that this compiles after the get_field! above means
-        // there's a soundness hole. Tying a lifetime to RefMut or at least the result of
-        // RefMut::get_field_helper would cause the compiler error I'm expecting, but that brings
-        // up the question of what the CSoftc state should be between set_rx and calls to the write
-        // fn. I think the answer is to wrap the intr_softc field in a type that makes it
-        // inaccessible to further softc claims
+        let mut intr_softc = sc.intr_softc.claim()?;
         self.release_softc(mbox, sc);
+
+        let irq = intr_softc.irq.take().unwrap();
+        intr_softc.callback = Some(callback);
+        intr_softc.arg = arg;
+        let intrhand = addr_of_mut!(intr_softc.intrhand);
 
         let flags = INTR_MPSAFE | INTR_TYPE_MISC;
         mbox.bus_setup_intr(
@@ -189,22 +180,20 @@ impl Driver {
             Some(apple_mbox_intr),
             intr_softc,
             intrhand,
-        )
-        .unwrap();
+        )?;
 
         Ok(())
     }
 
-    fn write(&self, mbox: Device, msg: *const bindings::apple_mbox_msg) -> c_int {
-        let mut sc = self.claim_softc(mbox).unwrap();
-        let ctrl = &mut sc.rtkit_softc.a2i_ctrl;
-        if (ctrl.read_4(0) & MBOX_A2I_CTRL_FULL) != 0 {
-            return bindings::EBUSY;
+    fn write(&self, mbox: Device, msg: bindings::apple_mbox_msg) -> Result<()> {
+        let mut sc = self.claim_softc(mbox)?;
+        if (sc.a2i_ctrl.read_4(0) & MBOX_A2I_CTRL_FULL) != 0 {
+            return Err(EBUSY);
         }
-        sc.rtkit_softc.a2i_send.write_8(0, unsafe { (*msg).data0 });
-        sc.rtkit_softc.a2i_send.write_8(8, unsafe { (*msg).data1 } as u64);
+        sc.a2i_send.write_8(0, msg.data0);
+        sc.a2i_send.write_8(8, msg.data1 as u64);
         self.release_softc(mbox, sc);
-        0
+        Ok(())
     }
 }
 
