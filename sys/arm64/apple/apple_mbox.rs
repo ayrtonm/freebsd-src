@@ -154,9 +154,8 @@ impl Driver {
     }
 
     pub fn set_rx<T>(&self, mut mbox: Device, func: AppleMboxRx<T>, arg: Ptr<T>) -> Result<()> {
-        let mut sc = self.claim_softc(mbox)?;
-        let mut intr_softc = sc.intr_softc.claim()?;
-        self.release_softc(mbox, sc)?;
+        let mut sc = self.get_softc(mbox)?;
+        let mut intr_softc = get_field!(sc, intr_softc).claim()?;
 
         let func = unsafe { transmute(func) };
         intr_softc.callback = Some((func, arg.as_type_erased_ptr()));
