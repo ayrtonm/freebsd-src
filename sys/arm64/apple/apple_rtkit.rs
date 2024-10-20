@@ -31,13 +31,12 @@
 
 extern crate alloc;
 
-use alloc::boxed::Box;
 use core::ffi::c_int;
 use kpi::bus::{Register, ResourceSpec};
 use kpi::device::{Device, DeviceIf, ProbeRes};
 use kpi::driver;
 use kpi::ofw::XRef;
-use rtkit::RTKit;
+use rtkit::{PwrState, RTKit};
 
 const CPU_CTRL: u64 = 0x44;
 const CPU_CTRL_RUN: u32 = 1 << 4;
@@ -77,7 +76,7 @@ impl DeviceIf for Driver {
 
         dev.register_xref(xref);
 
-        let rtkit = RTKit::new(dev, false);
+        let rtkit = RTKit::new(dev, false)?;
 
         self.init_softc(dev, Softc { mem, rtkit })?;
 
@@ -96,8 +95,7 @@ fn apple_rtkit_boot2(helper: XRef) -> Result<()> {
     sc.mem[0].write_4(CPU_CTRL, ctrl | CPU_CTRL_RUN);
 
     sc.rtkit.boot()?;
-    sc.rtkit
-        .set_ap_pwrstate(bindings::RTKIT_MGMT_PWR_STATE_ON as u16);
+    sc.rtkit.set_ap_pwrstate(PwrState::On);
     Ok(())
 }
 

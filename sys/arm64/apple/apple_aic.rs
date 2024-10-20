@@ -52,8 +52,7 @@ use kpi::device::{Device, DeviceIf, ProbeRes};
 use kpi::intr::{FilterRes, IrqSrc, MapData, Pic, PicIf};
 use kpi::ofw::{CompatData, CompatEntry};
 use kpi::{
-    bindings, curthread, driver, enum_c_macros, isb, pcpu_get, read_reg, write_reg, PointsTo, Ptr,
-    Ref, SubClass,
+    bindings, curthread, driver, enum_c_macros, isb, pcpu_get, read_reg, write_reg, SubClass,
 };
 
 #[derive(Copy, Clone, Debug)]

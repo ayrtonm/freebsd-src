@@ -19,16 +19,15 @@
 #![no_std]
 #![feature(concat_idents)]
 
+use core::mem::transmute;
 use core::ffi::{c_int, c_void};
 use core::ops::DerefMut;
-use core::ptr::{addr_of_mut, null_mut};
+use core::ptr::null_mut;
 use kpi::bindings::{INTR_MPSAFE, INTR_TYPE_MISC};
 use kpi::bus::{Register, Resource};
 use kpi::device::{Device, DeviceIf, ProbeRes};
 use kpi::sync::SpinLock;
-use kpi::{dprintln, driver, get_field, AsCType, AsRustType, Claimable, Ref, RefMut};
-
-type Callback = extern "C" fn(*mut c_void, bindings::apple_mbox_msg) -> c_int;
+use kpi::{dprintln, driver, get_field};
 
 const MBOX_A2I_CTRL: u64 = 0x110;
 const MBOX_A2I_CTRL_FULL: u32 = 1 << 16;
@@ -47,6 +46,20 @@ type A2ISend = Register<MBOX_A2I_SEND0, 0x10>;
 type I2ACtrl = Register<MBOX_I2A_CTRL, 4>;
 type I2ARecv = Register<MBOX_I2A_RECV0, 0x10>;
 
+// This needs repr(C) while it remains shared with C code
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct AppleMboxMsg {
+    pub data0: u64,
+    pub data1: u32,
+}
+
+// This callback type's callsites are in rust so it doesn't need to be extern "C". If it were in C
+// it would need to go through the KPI crate which would enforce the extern "C" to avoid a compiler
+// error.
+pub type AppleMboxRx<T> = fn(Ptr<T>, AppleMboxMsg) -> Result<()>;
+type TypeErasedAppleMboxRx = fn(*mut c_void, AppleMboxMsg) -> Result<()>;
+
 struct Softc {
     intr_softc: Claimable<IntrSoftc>,
     a2i_ctrl: A2ICtrl,
@@ -59,8 +72,8 @@ struct IntrSoftc {
     i2a_ctrl: I2ACtrl,
     i2a_recv: I2ARecv,
     intrhand: *mut c_void,
-    callback: Option<Callback>,
-    arg: *mut c_void,
+    // group callback function and its context since they're either both `None` or both `Some`
+    callback: Option<(TypeErasedAppleMboxRx, *mut c_void)>,
 }
 
 impl DeviceIf for Driver {
@@ -89,7 +102,7 @@ impl DeviceIf for Driver {
 
         let mut mem = dev.bus_alloc_resource(SYS_RES_MEMORY, 0)?;
         // generic parameters on take_register are inferred from the types of the result which are
-        // determined by the definitions of RTKitSoftc and IntrSoftc
+        // determined by the definitions in Softc and IntrSoftc
         let a2i_ctrl = mem.take_register()?;
         let a2i_send = mem.take_register()?;
         let i2a_ctrl = mem.take_register()?;
@@ -103,7 +116,6 @@ impl DeviceIf for Driver {
                 i2a_recv,
                 intrhand: null_mut(),
                 callback: None,
-                arg: null_mut(),
             }),
             a2i_ctrl,
             a2i_send,
@@ -121,78 +133,72 @@ impl DeviceIf for Driver {
 #[no_mangle]
 pub extern "C" fn apple_mbox_write(
     mbox: *mut bindings::_device,
-    msg: *const bindings::apple_mbox_msg,
+    msg: &AppleMboxMsg,
 ) -> c_int {
     let mbox = mbox.as_rust_type();
-    // TODO: I can't impl AsRustType for apple_mbox_msg from here should I should consider per-crate
-    // bindgen invocations
-    let msg = unsafe { core::ptr::read(msg) };
+    // TODO: I can't impl AsRustType for apple_mbox_msg from here since it's defined in bindings.rs.
+    // Maybe I should consider per-crate bindgen invocations
     match apple_mbox_driver.write(mbox, msg) {
         Ok(_) => 0,
         Err(e) => e.as_c_type(),
     }
 }
 
-extern "C" fn apple_mbox_intr(mut sc: RefMut<IntrSoftc>) {
-    // TODO: rust doesn't understand split borrows through a smart pointer deref.
-    // figure out a more ergonomic approach to this
-    let sc: &mut IntrSoftc = sc.deref_mut();
-    let mut ctrl = &mut sc.i2a_ctrl;
-    let mut recv = &mut sc.i2a_recv;
-    while (ctrl.read_4(0) & MBOX_I2A_CTRL_EMPTY) == 0 {
-        let msg = bindings::apple_mbox_msg {
-            data0: recv.read_8(0),
-            data1: recv.read_8(8) as u32,
-        };
-        match sc.callback {
-            Some(callback) => {
-                callback(sc.arg, msg);
-            }
-            None => {
-                dprintln!(sc.dev, "Received RTKit msg w/o callback installed\n");
-            }
-        }
-    }
-}
-
 impl Driver {
-    pub fn get(client: Device) -> Result<Device> {
+    // Get a mailbox device_t from the client's mboxes devicetree property. The mailbox must've
+    // previously registered its devicetree node xref which happens when this driver attaches.
+    pub fn get(&self, client: Device) -> Result<Device> {
         let client_node = client.ofw_bus_get_node();
         let mbox_ref = client_node.get_xref_prop(c"mboxes")?;
         mbox_ref.device_from_xref()
     }
 
-    pub fn set_rx(&self, mut mbox: Device, callback: Callback, arg: *mut c_void) -> Result<()> {
+    pub fn set_rx<T>(&self, mut mbox: Device, func: AppleMboxRx<T>, arg: Ptr<T>) -> Result<()> {
         let mut sc = self.claim_softc(mbox)?;
         let mut intr_softc = sc.intr_softc.claim()?;
-        self.release_softc(mbox, sc);
+        self.release_softc(mbox, sc)?;
 
-        let irq = intr_softc.irq.take().unwrap();
-        intr_softc.callback = Some(callback);
-        intr_softc.arg = arg;
-        let intrhand = addr_of_mut!(intr_softc.intrhand);
+        let func = unsafe { transmute(func) };
+        intr_softc.callback = Some((func, arg.as_type_erased_ptr()));
 
+        let irq = intr_softc.irq.take().ok_or(EDOOFUS)?;
         let flags = INTR_MPSAFE | INTR_TYPE_MISC;
-        mbox.bus_setup_intr(
-            irq,
-            flags,
-            None,
-            Some(apple_mbox_intr),
-            intr_softc,
-            intrhand,
-        )?;
-
+        let intrhand = &raw mut intr_softc.intrhand;
+        mbox.bus_setup_intr(irq, flags, None, Some(Self::intr), intr_softc, intrhand)?;
         Ok(())
     }
 
-    fn write(&self, mbox: Device, msg: bindings::apple_mbox_msg) -> Result<()> {
+    extern "C" fn intr(mut sc: RefMut<IntrSoftc>) {
+        // TODO: rust doesn't understand split borrows through a smart pointer deref.
+        // figure out a more ergonomic approach to this
+        let sc: &mut IntrSoftc = sc.deref_mut();
+        let mut ctrl = &mut sc.i2a_ctrl;
+        let mut recv = &mut sc.i2a_recv;
+        while (ctrl.read_4(0) & MBOX_I2A_CTRL_EMPTY) == 0 {
+            let msg = AppleMboxMsg {
+                data0: recv.read_8(0),
+                data1: recv.read_8(8) as u32,
+            };
+            match sc.callback {
+                Some((func, arg)) => {
+                    func(arg, msg).unwrap();
+                }
+                None => {
+                    dprintln!(sc.dev, "Received RTKit msg w/o callback installed\n");
+                }
+            }
+        }
+    }
+
+
+    pub fn write(&self, mbox: Device, msg: &AppleMboxMsg) -> Result<()> {
         let mut sc = self.claim_softc(mbox)?;
         if (sc.a2i_ctrl.read_4(0) & MBOX_A2I_CTRL_FULL) != 0 {
             return Err(EBUSY);
         }
         sc.a2i_send.write_8(0, msg.data0);
         sc.a2i_send.write_8(8, msg.data1 as u64);
-        self.release_softc(mbox, sc);
+        self.release_softc(mbox, sc)?;
         Ok(())
     }
 }
