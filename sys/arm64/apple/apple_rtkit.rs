@@ -95,7 +95,7 @@ fn apple_rtkit_boot2(helper: XRef) -> Result<()> {
     sc.mem[0].write_4(CPU_CTRL, ctrl | CPU_CTRL_RUN);
 
     sc.rtkit.boot()?;
-    sc.rtkit.set_ap_pwrstate(PwrState::On);
+    sc.rtkit.set_ap_pwr_state(PwrState::On);
     Ok(())
 }
 
