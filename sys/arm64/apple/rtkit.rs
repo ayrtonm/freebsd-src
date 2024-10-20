@@ -64,11 +64,11 @@ struct RTKitTaskFields {
 }
 
 impl RTKit {
-    pub fn new(client: Device, noalloc: bool) -> Result<Box<Self>> {
+    pub fn new(client: Device, noalloc: bool) -> Result<Ptr<Self>> {
         let mbox = apple_mbox_driver.get(client)?;
         let iop_pwr_state = PwrState::Sleep as u16;
         let ap_pwr_state = PwrState::Quiesced as u16;
-        Ok(Box::new_in(
+        let boxed_rtkit = Box::new_in(
             Self {
                 client,
                 mbox,
@@ -83,39 +83,50 @@ impl RTKit {
                 callbacks: [None; 32],
             },
             WAITOK,
-        ))
+        );
+        Ok(unsafe { Ptr::new(Box::into_raw(boxed_rtkit)) })
     }
 
-    pub fn boot(&mut self) -> Result<()> {
-        let rtkit = unsafe { Ptr::new(self as *mut Self) };
-        apple_mbox_driver.set_rx(self.mbox, rx_callback, rtkit)?;
-        self.set_iop_pwr_state(PwrState::On)
+    pub fn boot(rtkit: Ptr<Self>) -> Result<()> {
+        let mbox = get_field!(rtkit, mbox).flatten();
+        apple_mbox_driver.set_rx(mbox, rx_callback, rtkit)?;
+        RTKit::set_iop_pwr_state(rtkit, PwrState::On)
     }
 
-    pub fn set_iop_pwr_state(&mut self, pwr_state: PwrState) -> Result<()> {
+    pub fn set_iop_pwr_state(rtkit: Ptr<Self>, pwr_state: PwrState) -> Result<()> {
         let pwr_state = pwr_state as u16;
-        if self.iop_pwr_state == pwr_state {
+        let iop_pwr_state = get_field!(rtkit, iop_pwr_state);
+
+        if unsafe { iop_pwr_state.read() } == pwr_state {
             return Ok(());
         }
-        mbox_send(self.mbox, EpTxMsg::Mgmt(MgmtTxMsg::IopPwrState { pwr_state }))?;
-        if self.iop_pwr_state != pwr_state {
-            todo!("tsleep");
-            return Err(ETIMEDOUT)
+        mbox_send(
+            get_field!(rtkit, mbox).flatten(),
+            EpTxMsg::Mgmt(MgmtTxMsg::IopPwrState { pwr_state }),
+        )?;
+        if unsafe { iop_pwr_state.read() } != pwr_state {
+            tsleep_in_hz(iop_pwr_state, bindings::PWAIT, c"ioppwr", 1)
+        } else {
+            Ok(())
         }
-        Ok(())
     }
 
-    pub fn set_ap_pwr_state(&mut self, pwr_state: PwrState) -> Result<()> {
+    pub fn set_ap_pwr_state(rtkit: Ptr<Self>, pwr_state: PwrState) -> Result<()> {
         let pwr_state = pwr_state as u16;
-        if self.ap_pwr_state == pwr_state {
+        let ap_pwr_state = get_field!(rtkit, ap_pwr_state);
+
+        if unsafe { ap_pwr_state.read() } == pwr_state {
             return Ok(());
         }
-        mbox_send(self.mbox, EpTxMsg::Mgmt(MgmtTxMsg::ApPwrState { pwr_state }))?;
-        if self.ap_pwr_state != pwr_state {
-            todo!("tsleep");
-            return Err(ETIMEDOUT);
+        mbox_send(
+            get_field!(rtkit, mbox).flatten(),
+            EpTxMsg::Mgmt(MgmtTxMsg::ApPwrState { pwr_state }),
+        )?;
+        if unsafe { ap_pwr_state.read() } != pwr_state {
+            tsleep_in_hz(ap_pwr_state, bindings::PWAIT, c"appwr", 1)
+        } else {
+            Ok(())
         }
-        Ok(())
     }
 }
 
@@ -201,16 +212,16 @@ impl MgmtTxMsg {
             }
             Self::IopPwrState { pwr_state } => {
                 data0 = mgmt::iop_pwr_state(pwr_state);
-            },
+            }
             Self::ApPwrState { pwr_state } => {
                 data0 = mgmt::ap_pwr_state(pwr_state);
-            },
+            }
             Self::EpMap { base, last } => {
                 data0 = mgmt::ep_map_reply(base, last);
             }
             Self::StartEp { ep } => {
                 data0 = mgmt::start_ep(ep);
-            },
+            }
         }
         AppleMboxMsg {
             data0,
@@ -318,16 +329,20 @@ fn handle_mgmt(ctx: &RTKitTask, msg: MgmtRxMsg) -> Result<()> {
             mbox_send_from_task(ctx, EpTxMsg::Mgmt(ack))
         }
         MgmtRxMsg::IopPwrStateAck(pwr_state) => {
+            let mut iop_pwr_state = get_field!(ctx.rtkit, iop_pwr_state);
             unsafe {
-                get_field!(ctx.rtkit, iop_pwr_state).write(pwr_state);
+                iop_pwr_state.write(pwr_state);
             }
-            todo!("wakeup")
+            wakeup(iop_pwr_state);
+            Ok(())
         }
         MgmtRxMsg::ApPwrStateAck(pwr_state) => {
+            let mut ap_pwr_state = get_field!(ctx.rtkit, ap_pwr_state);
             unsafe {
-                get_field!(ctx.rtkit, ap_pwr_state).write(pwr_state);
+                ap_pwr_state.write(pwr_state);
             }
-            todo!("wakeup")
+            wakeup(ap_pwr_state);
+            Ok(())
         }
         MgmtRxMsg::EpMap { base, bitmap, last } => {
             let old_bitmap = unsafe { get_field!(ctx.rtkit, ep_map).read() };
@@ -452,13 +467,12 @@ extern "C" fn rx_task(ctx: Box<RTKitTask>, pending: c_int) {
 }
 
 #[no_mangle]
-extern "C" fn rtkit_init(dev: Device, noalloc: bool) -> *mut bindings::rtkit_state {
-    Box::into_raw(RTKit::new(dev, noalloc).unwrap()).cast()
+extern "C" fn rtkit_init(dev: Device, noalloc: bool) -> Ptr<RTKit> {
+    RTKit::new(dev, noalloc).unwrap()
 }
 
 #[no_mangle]
-unsafe extern "C" fn rtkit_boot(state: *mut bindings::rtkit_state) -> c_int {
-    let rtkit = unsafe { state.cast::<RTKit>().as_mut().unwrap() };
-    rtkit.boot().unwrap();
+unsafe extern "C" fn rtkit_boot(rtkit: Ptr<RTKit>) -> c_int {
+    RTKit::boot(rtkit).unwrap();
     0
 }
