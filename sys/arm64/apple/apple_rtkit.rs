@@ -49,7 +49,7 @@ const SPEC: [ResourceSpec; 2] = [
 
 struct Softc {
     mem: [Register; 2],
-    rtkit: Box<RTKit>,
+    rtkit: Ptr<RTKit>,
 }
 
 impl DeviceIf for Driver {
@@ -94,8 +94,8 @@ fn apple_rtkit_boot2(helper: XRef) -> Result<()> {
     let ctrl = sc.mem[0].read_4(CPU_CTRL);
     sc.mem[0].write_4(CPU_CTRL, ctrl | CPU_CTRL_RUN);
 
-    sc.rtkit.boot()?;
-    sc.rtkit.set_ap_pwr_state(PwrState::On);
+    RTKit::boot(sc.rtkit)?;
+    RTKit::set_ap_pwr_state(sc.rtkit, PwrState::On)?;
     Ok(())
 }
 
