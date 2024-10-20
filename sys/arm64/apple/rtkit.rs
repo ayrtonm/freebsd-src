@@ -30,20 +30,7 @@ use kpi::taskq;
 use kpi::taskq::Task;
 use kpi::{bindings, enum_c_macros, get_field};
 
-use apple_mbox::{apple_mbox_driver, AppleMboxMsg};
-
-// I don't want a real enum here since other values may also be endpoints but CamelCase is not
-// standard style
-#[allow(nonstandard_style)]
-mod Endpoint {
-    pub const MGMT: u32 = 0;
-    pub const CRASHLOG: u32 = 1;
-    pub const SYSLOG: u32 = 2;
-    pub const DEBUG: u32 = 3;
-    pub const IOREPORT: u32 = 4;
-    pub const OSLOG: u32 = 8;
-    pub const TRACEKIT: u32 = 10;
-}
+use apple_mbox::{apple_mbox_driver, AppleMboxMsg, TypeErasedAppleMboxRx};
 
 #[repr(u16)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -59,14 +46,12 @@ pub struct RTKit {
     client: Device,
     mbox: Device,
 
-    iop_pwrstate: PwrState,
-    ap_pwrstate: PwrState,
+    iop_pwr_state: u16,
+    ap_pwr_state: u16,
     verbose: bool,
     noalloc: bool,
-    /*
-    epmap: u64,
-    callbacks: [Callback; 32],
-    */
+    ep_map: u64,
+    callbacks: [Option<(TypeErasedAppleMboxRx, *mut c_void)>; 32],
 }
 
 // RTKitTask is a subclass of `struct task`
@@ -81,19 +66,21 @@ struct RTKitTaskFields {
 impl RTKit {
     pub fn new(client: Device, noalloc: bool) -> Result<Box<Self>> {
         let mbox = apple_mbox_driver.get(client)?;
-        let iop_pwrstate = PwrState::Sleep;
-        let ap_pwrstate = PwrState::Quiesced;
+        let iop_pwr_state = PwrState::Sleep as u16;
+        let ap_pwr_state = PwrState::Quiesced as u16;
         Ok(Box::new_in(
             Self {
                 client,
                 mbox,
 
-                iop_pwrstate,
-                ap_pwrstate,
+                iop_pwr_state,
+                ap_pwr_state,
 
                 verbose: false,
                 // TODO: only used in smc, may be unnecessary
                 noalloc,
+                ep_map: 0,
+                callbacks: [None; 32],
             },
             WAITOK,
         ))
@@ -102,20 +89,33 @@ impl RTKit {
     pub fn boot(&mut self) -> Result<()> {
         let rtkit = unsafe { Ptr::new(self as *mut Self) };
         apple_mbox_driver.set_rx(self.mbox, rx_callback, rtkit)?;
-        let res = self.set_iop_pwrstate(PwrState::On);
-        if res != 0 {
-            Err(ErrCode::from(res))
-        } else {
-            Ok(())
+        self.set_iop_pwr_state(PwrState::On)
+    }
+
+    pub fn set_iop_pwr_state(&mut self, pwr_state: PwrState) -> Result<()> {
+        let pwr_state = pwr_state as u16;
+        if self.iop_pwr_state == pwr_state {
+            return Ok(());
         }
+        mbox_send(self.mbox, EpTxMsg::Mgmt(MgmtTxMsg::IopPwrState { pwr_state }))?;
+        if self.iop_pwr_state != pwr_state {
+            todo!("tsleep");
+            return Err(ETIMEDOUT)
+        }
+        Ok(())
     }
 
-    pub fn set_iop_pwrstate(&mut self, pwrstate: PwrState) -> c_int {
-        0
-    }
-
-    pub fn set_ap_pwrstate(&mut self, pwrstate: PwrState) -> c_int {
-        0
+    pub fn set_ap_pwr_state(&mut self, pwr_state: PwrState) -> Result<()> {
+        let pwr_state = pwr_state as u16;
+        if self.ap_pwr_state == pwr_state {
+            return Ok(());
+        }
+        mbox_send(self.mbox, EpTxMsg::Mgmt(MgmtTxMsg::ApPwrState { pwr_state }))?;
+        if self.ap_pwr_state != pwr_state {
+            todo!("tsleep");
+            return Err(ETIMEDOUT);
+        }
+        Ok(())
     }
 }
 
@@ -134,36 +134,173 @@ fn rx_callback(rtkit: Ptr<RTKit>, msg: AppleMboxMsg) -> Result<()> {
     Ok(())
 }
 
+fn mbox_send_from_task(ctx: &RTKitTask, msg: EpTxMsg) -> Result<()> {
+    let mbox = get_field!(ctx.rtkit, mbox).flatten();
+    mbox_send(mbox, msg)
+}
+fn mbox_send(mbox: Device, msg: EpTxMsg) -> Result<()> {
+    apple_mbox_driver.write(mbox, &msg.as_apple_mbox_msg())
+}
+
+const MSG_TYPE_SHIFT: u64 = 52;
+const OSLOG_TYPE_SHIFT: u64 = 56;
+
+#[derive(Debug, Copy, Clone)]
+pub enum MgmtRxMsg {
+    Hello {
+        minver: u16,
+        maxver: u16,
+    },
+    IopPwrStateAck(u16),
+    ApPwrStateAck(u16),
+    EpMap {
+        base: u8, // only 3 bits
+        bitmap: u32,
+        last: bool,
+    },
+    Unknown(u8),
+}
+
+impl MgmtRxMsg {
+    pub fn new(data0: u64) -> Self {
+        match mgmt::msg_type(data0) {
+            mgmt::HELLO => {
+                let minver = mgmt::hello_minver(data0);
+                let maxver = mgmt::hello_maxver(data0);
+                Self::Hello { minver, maxver }
+            }
+            mgmt::IOP_PWR_STATE_ACK => Self::IopPwrStateAck(mgmt::pwr_state(data0)),
+            // next one is not a typo
+            mgmt::AP_PWR_STATE => Self::ApPwrStateAck(mgmt::pwr_state(data0)),
+            mgmt::EP_MAP => {
+                let base = mgmt::ep_map_base(data0);
+                let bitmap = mgmt::ep_map_bitmap(data0);
+                let last = mgmt::ep_map_last(data0);
+                Self::EpMap { base, bitmap, last }
+            }
+            x => Self::Unknown(x),
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub enum MgmtTxMsg {
+    HelloAck { minver: u16, maxver: u16 },
+    IopPwrState { pwr_state: u16 },
+    ApPwrState { pwr_state: u16 },
+    StartEp { ep: u32 },
+    EpMap { base: u8, last: bool },
+}
+
+impl MgmtTxMsg {
+    pub fn as_apple_mbox_msg(self) -> AppleMboxMsg {
+        let data0;
+        match self {
+            Self::HelloAck { minver, maxver } => {
+                data0 = mgmt::hello_ack(minver, maxver);
+            }
+            Self::IopPwrState { pwr_state } => {
+                data0 = mgmt::iop_pwr_state(pwr_state);
+            },
+            Self::ApPwrState { pwr_state } => {
+                data0 = mgmt::ap_pwr_state(pwr_state);
+            },
+            Self::EpMap { base, last } => {
+                data0 = mgmt::ep_map_reply(base, last);
+            }
+            Self::StartEp { ep } => {
+                data0 = mgmt::start_ep(ep);
+            },
+        }
+        AppleMboxMsg {
+            data0,
+            data1: endpoint::MGMT,
+        }
+    }
+}
+
 mod mgmt {
-    pub const HELLO: u64 = 1;
-    pub const HELLO_ACK: u64 = 2;
-    pub const STARTEP: u64 = 5;
-    pub const IOP_PWR_STATE: u64 = 6;
-    pub const IOP_PWR_STATE_ACK: u64 = 7;
-    pub const EPMAP: u64 = 8;
-    pub const AP_PWR_STATE: u64 = 11;
-    pub fn msg_type(x: u64) -> u64 {
-        (x >> 52) & 0xff
+    use super::MSG_TYPE_SHIFT;
+
+    pub const HELLO: u8 = 1;
+    pub const HELLO_ACK: u8 = 2;
+    pub const START_EP: u8 = 5;
+    pub const IOP_PWR_STATE: u8 = 6;
+    pub const IOP_PWR_STATE_ACK: u8 = 7;
+    pub const EP_MAP: u8 = 8;
+    pub const AP_PWR_STATE: u8 = 11;
+
+    const MAXVER_SHIFT: u64 = 16;
+    const EP_MAP_BASE_SHIFT: u64 = 32;
+    const EP_MAP_LAST_SHIFT: u64 = 51;
+    const EP_MAP_MORE: u64 = 1 << 0;
+    const START_EP_SHIFT: u64 = 32;
+    const START_EP_START: u64 = 1 << 1;
+
+    // All implicit truncations using `as` in the following functions are intentional. I'm
+    // intentionally not including the `& 0xffff...` to avoid accidentally overtruncating the cases
+    // where the number of `f`s is not immediately obvious
+    pub fn msg_type(x: u64) -> u8 {
+        (x >> MSG_TYPE_SHIFT) as u8
     }
-    pub fn hello_minver(x: u64) -> u64 {
-        x & 0xffff
+
+    pub fn hello_minver(x: u64) -> u16 {
+        x as u16
     }
-    pub fn hello_maxver(x: u64) -> u64 {
-        (x >> 16) & 0xffff
+
+    pub fn hello_maxver(x: u64) -> u16 {
+        (x >> MAXVER_SHIFT) as u16
+    }
+
+    pub fn hello_ack(minver: u16, maxver: u16) -> u64 {
+        (minver as u64) | (maxver as u64) << MAXVER_SHIFT | (HELLO_ACK as u64) << MSG_TYPE_SHIFT
+    }
+
+    pub fn pwr_state(x: u64) -> u16 {
+        x as u16
+    }
+
+    pub fn iop_pwr_state(pwr_state: u16) -> u64 {
+        (pwr_state as u64) | (IOP_PWR_STATE as u64) << MSG_TYPE_SHIFT
+    }
+
+    pub fn ap_pwr_state(pwr_state: u16) -> u64 {
+        (pwr_state as u64) | (AP_PWR_STATE as u64) << MSG_TYPE_SHIFT
+    }
+
+    pub fn ep_map_base(x: u64) -> u8 {
+        (x >> EP_MAP_BASE_SHIFT) as u8
+    }
+
+    pub fn ep_map_bitmap(x: u64) -> u32 {
+        x as u32
+    }
+
+    pub fn ep_map_last(x: u64) -> bool {
+        x & (1 << EP_MAP_LAST_SHIFT) != 0
+    }
+
+    pub fn ep_map_reply(base: u8, last: bool) -> u64 {
+        let res = (base as u64) << EP_MAP_BASE_SHIFT | (EP_MAP as u64) << MSG_TYPE_SHIFT;
+        if last {
+            res | (1 << EP_MAP_LAST_SHIFT)
+        } else {
+            res | EP_MAP_MORE
+        }
+    }
+
+    pub fn start_ep(ep: u32) -> u64 {
+        (ep as u64) << START_EP_SHIFT | START_EP_START | (START_EP as u64) << MSG_TYPE_SHIFT
     }
 }
 
 /* versions we support */
-const MINVER: u64 = 11;
-const MAXVER: u64 = 12;
+const MINVER: u16 = 11;
+const MAXVER: u16 = 12;
 
-fn handle_mgmt(ctx: &RTKitTask) -> Result<()> {
-    let data0 = ctx.msg.data0;
-    let ty = mgmt::msg_type(data0);
-    match ty {
-        mgmt::HELLO => {
-            let minver = mgmt::hello_minver(data0);
-            let maxver = mgmt::hello_maxver(data0);
+fn handle_mgmt(ctx: &RTKitTask, msg: MgmtRxMsg) -> Result<()> {
+    match msg {
+        MgmtRxMsg::Hello { minver, maxver } => {
             if minver > MAXVER {
                 return Err(EINVAL);
             }
@@ -174,46 +311,142 @@ fn handle_mgmt(ctx: &RTKitTask) -> Result<()> {
             if MAXVER < ver {
                 ver = MAXVER;
             }
-            apple_mbox_driver.write(get_field!(ctx.rtkit, mbox).flatten(), todo!(""));
-        },
-        mgmt::HELLO_ACK => {
-        },
-        mgmt::STARTEP => {
-        },
-        mgmt::IOP_PWR_STATE => {
-        },
-        mgmt::IOP_PWR_STATE_ACK => {
-        },
-        mgmt::EPMAP => {
-        },
-        mgmt::AP_PWR_STATE => {
-        },
-        _ => {
-        },
+            let ack = MgmtTxMsg::HelloAck {
+                minver: ver,
+                maxver: ver,
+            };
+            mbox_send_from_task(ctx, EpTxMsg::Mgmt(ack))
+        }
+        MgmtRxMsg::IopPwrStateAck(pwr_state) => {
+            unsafe {
+                get_field!(ctx.rtkit, iop_pwr_state).write(pwr_state);
+            }
+            todo!("wakeup")
+        }
+        MgmtRxMsg::ApPwrStateAck(pwr_state) => {
+            unsafe {
+                get_field!(ctx.rtkit, ap_pwr_state).write(pwr_state);
+            }
+            todo!("wakeup")
+        }
+        MgmtRxMsg::EpMap { base, bitmap, last } => {
+            let old_bitmap = unsafe { get_field!(ctx.rtkit, ep_map).read() };
+            let new_bits = (bitmap as u64) << (base * 32);
+            let new_bitmap = old_bitmap | new_bits;
+            unsafe { get_field!(ctx.rtkit, ep_map).write(new_bitmap) }
+            let reply = MgmtTxMsg::EpMap { base, last };
+            mbox_send_from_task(ctx, EpTxMsg::Mgmt(reply))?;
+            if last {
+                let dev = get_field!(ctx.rtkit, client).flatten();
+                // range bounds are not a typo, bit 0 is not an endpoint
+                for ep in 1..32 {
+                    if new_bitmap & (1 << ep) == 0 {
+                        continue;
+                    }
+                    match ep {
+                        endpoint::MGMT => (),
+                        endpoint::CRASHLOG
+                        | endpoint::SYSLOG
+                        | endpoint::DEBUG
+                        | endpoint::IOREPORT
+                        | endpoint::OSLOG
+                        | endpoint::TRACEKIT => {
+                            dprintln!(dev, "starting rtkit endpoint {ep:?}");
+                            let start_ep = MgmtTxMsg::StartEp { ep };
+                            mbox_send_from_task(ctx, EpTxMsg::Mgmt(start_ep))?;
+                        }
+                        _ => {
+                            dprintln!(dev, "skipping endpoint {ep:?}");
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+        MgmtRxMsg::Unknown(_) => todo!(""),
     }
-    Ok(())
+}
+
+#[derive(Debug, Copy, Clone)]
+enum EpRxMsg {
+    Mgmt(MgmtRxMsg),
+    Crashlog,
+    Syslog,
+    Debug,
+    IOReport,
+    OSlog,
+    Tracekit,
+    Custom(u32),
+    Unknown(u32),
+}
+
+#[derive(Debug, Copy, Clone)]
+enum EpTxMsg {
+    Mgmt(MgmtTxMsg),
+}
+
+// matching const in the same module is kinda ugly since the "obvious" way to do it does something
+// unexpected (but will not compile when using #![deny(unreachable_patterns)]) so let's put them in
+// a module
+mod endpoint {
+    pub const MGMT: u32 = 0;
+    pub const CRASHLOG: u32 = 1;
+    pub const SYSLOG: u32 = 2;
+    pub const DEBUG: u32 = 3;
+    pub const IOREPORT: u32 = 4;
+    pub const OSLOG: u32 = 8;
+    pub const TRACEKIT: u32 = 10;
+}
+
+impl EpRxMsg {
+    pub fn new(msg: AppleMboxMsg) -> Self {
+        match msg.data1 {
+            endpoint::MGMT => Self::Mgmt(MgmtRxMsg::new(msg.data0)),
+            endpoint::CRASHLOG => Self::Crashlog,
+            endpoint::SYSLOG => Self::Syslog,
+            endpoint::DEBUG => Self::Debug,
+            endpoint::IOREPORT => Self::IOReport,
+            endpoint::OSLOG => Self::OSlog,
+            endpoint::TRACEKIT => Self::Tracekit,
+            x => {
+                if x >= 32 && x < 64 {
+                    EpRxMsg::Custom(x)
+                } else {
+                    EpRxMsg::Unknown(x)
+                }
+            }
+        }
+    }
+}
+
+impl EpTxMsg {
+    pub fn as_apple_mbox_msg(self) -> AppleMboxMsg {
+        match self {
+            Self::Mgmt(msg) => msg.as_apple_mbox_msg(),
+        }
+    }
 }
 
 extern "C" fn rx_task(ctx: Box<RTKitTask>, pending: c_int) {
-    let endpoint = ctx.msg.data1;
-    let res = match endpoint {
-        Endpoint::MGMT => handle_mgmt(&ctx),
-    //    Endpoint::CRASHLOG => {}
-    //    Endpoint::SYSLOG => {}
-    //    Endpoint::DEBUG => {}
-    //    Endpoint::IOREPORT => {}
-    //    Endpoint::OSLOG => {}
-    //    Endpoint::TRACEKIT => {}
-        _ => {
-            todo!("")
-        }
+    let ep = EpRxMsg::new(ctx.msg);
+    let res = match ep {
+        EpRxMsg::Mgmt(msg) => handle_mgmt(&ctx, msg),
+        EpRxMsg::Crashlog => todo!(""),
+        EpRxMsg::Syslog => todo!(""),
+        EpRxMsg::Debug => todo!(""),
+        EpRxMsg::IOReport => todo!(""),
+        EpRxMsg::OSlog => todo!(""),
+        EpRxMsg::Tracekit => todo!(""),
+        EpRxMsg::Custom(ep) => todo!(""),
+        EpRxMsg::Unknown(ep) => todo!(""),
     };
     if let Err(err) = res {
         // We have one extra level of indirection (i.e. `device_t *` or equivalently
         // `struct _device **` so we need to flatten the `Ptr<Ptr<_device>>` into `Ptr<_device>`.
         let client_dev: Ptr<Device> = get_field!(ctx.rtkit, client);
-        dprintln!(client_dev.flatten(),
-            "Error ({err:?}) while handling RTKit message from endpoint {endpoint:?}"
+        dprintln!(
+            client_dev.flatten(),
+            "Error ({err:?}) while handling RTKit message from endpoint {ep:?}"
         );
     }
 }

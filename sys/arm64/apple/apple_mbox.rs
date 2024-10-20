@@ -26,7 +26,6 @@ use core::ptr::null_mut;
 use kpi::bindings::{INTR_MPSAFE, INTR_TYPE_MISC};
 use kpi::bus::{Register, Resource};
 use kpi::device::{Device, DeviceIf, ProbeRes};
-use kpi::sync::SpinLock;
 use kpi::{dprintln, driver, get_field};
 
 const MBOX_A2I_CTRL: u64 = 0x110;
@@ -58,7 +57,7 @@ pub struct AppleMboxMsg {
 // it would need to go through the KPI crate which would enforce the extern "C" to avoid a compiler
 // error.
 pub type AppleMboxRx<T> = fn(Ptr<T>, AppleMboxMsg) -> Result<()>;
-type TypeErasedAppleMboxRx = fn(*mut c_void, AppleMboxMsg) -> Result<()>;
+pub type TypeErasedAppleMboxRx = fn(*mut c_void, AppleMboxMsg) -> Result<()>;
 
 struct Softc {
     intr_softc: Claimable<IntrSoftc>,
@@ -154,7 +153,7 @@ impl Driver {
     }
 
     pub fn set_rx<T>(&self, mut mbox: Device, func: AppleMboxRx<T>, arg: Ptr<T>) -> Result<()> {
-        let mut sc = self.get_softc(mbox)?;
+        let mut sc = self.get_softc(mbox);
         let mut intr_softc = get_field!(sc, intr_softc).claim()?;
 
         let func = unsafe { transmute(func) };
