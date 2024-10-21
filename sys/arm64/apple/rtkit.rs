@@ -65,7 +65,7 @@ struct RTKitTaskFields {
 
 impl RTKit {
     pub fn new(client: Device, noalloc: bool) -> Result<Ptr<Self>> {
-        let mbox = apple_mbox_driver.get(client)?;
+        let mbox = apple_mbox_driver.get_mbox(client)?;
         let iop_pwr_state = PwrState::Sleep as u16;
         let ap_pwr_state = PwrState::Quiesced as u16;
         let boxed_rtkit = Box::new_in(
@@ -150,7 +150,7 @@ fn mbox_send_from_task(ctx: &RTKitTask, msg: EpTxMsg) -> Result<()> {
     mbox_send(mbox, msg)
 }
 fn mbox_send(mbox: Device, msg: EpTxMsg) -> Result<()> {
-    apple_mbox_driver.write(mbox, &msg.as_apple_mbox_msg())
+    apple_mbox_driver.write_msg(mbox, &msg.as_apple_mbox_msg())
 }
 
 const MSG_TYPE_SHIFT: u64 = 52;

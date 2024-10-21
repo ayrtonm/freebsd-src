@@ -59,8 +59,8 @@ pub struct AppleMboxMsg {
 pub type AppleMboxRx<T> = fn(Ptr<T>, AppleMboxMsg) -> Result<()>;
 pub type TypeErasedAppleMboxRx = fn(*mut c_void, AppleMboxMsg) -> Result<()>;
 
-struct Softc {
-    intr_softc: Claimable<IntrSoftc>,
+pub struct Softc {
+    intr_softc: BorrowCk<IntrSoftc>,
     a2i_ctrl: A2ICtrl,
     a2i_send: A2ISend,
 }
@@ -71,7 +71,7 @@ struct IntrSoftc {
     i2a_ctrl: I2ACtrl,
     i2a_recv: I2ARecv,
     intrhand: *mut c_void,
-    // group callback function and its context since they're either both `None` or both `Some`
+    // group callback function and its context together since they're either both `None` or both `Some`
     callback: Option<(TypeErasedAppleMboxRx, *mut c_void)>,
 }
 
@@ -108,7 +108,7 @@ impl DeviceIf for Driver {
         let i2a_recv = mem.take_register()?;
 
         let sc = Softc {
-            intr_softc: Claimable::new(IntrSoftc {
+            intr_softc: BorrowCk::new(IntrSoftc {
                 dev,
                 irq,
                 i2a_ctrl,
@@ -124,29 +124,15 @@ impl DeviceIf for Driver {
         Ok(())
     }
 
-    fn device_detach(&self, _dev: Device) -> Result<()> {
-        panic!("not yet")
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn apple_mbox_write(
-    mbox: *mut bindings::_device,
-    msg: &AppleMboxMsg,
-) -> c_int {
-    let mbox = mbox.as_rust_type();
-    // TODO: I can't impl AsRustType for apple_mbox_msg from here since it's defined in bindings.rs.
-    // Maybe I should consider per-crate bindgen invocations
-    match apple_mbox_driver.write(mbox, msg) {
-        Ok(_) => 0,
-        Err(e) => e.as_c_type(),
+    fn device_detach(&self, dev: Device) -> Result<DetachRes<Softc>> {
+        unreachable!("device cannot be detached")
     }
 }
 
 impl Driver {
     // Get a mailbox device_t from the client's mboxes devicetree property. The mailbox must've
     // previously registered its devicetree node xref which happens when this driver attaches.
-    pub fn get(&self, client: Device) -> Result<Device> {
+    pub fn get_mbox(&self, client: Device) -> Result<Device> {
         let client_node = client.ofw_bus_get_node();
         let mbox_ref = client_node.get_xref_prop(c"mboxes")?;
         mbox_ref.device_from_xref()
@@ -189,7 +175,7 @@ impl Driver {
     }
 
 
-    pub fn write(&self, mbox: Device, msg: &AppleMboxMsg) -> Result<()> {
+    pub fn write_msg(&self, mbox: Device, msg: &AppleMboxMsg) -> Result<()> {
         let mut sc = self.claim_softc(mbox)?;
         if (sc.a2i_ctrl.read_4(0) & MBOX_A2I_CTRL_FULL) != 0 {
             return Err(EBUSY);
