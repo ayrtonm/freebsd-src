@@ -47,7 +47,7 @@ const SPEC: [ResourceSpec; 2] = [
     ResourceSpec::new(SYS_RES_MEMORY, 1), /* sram */
 ];
 
-struct Softc {
+pub struct Softc {
     mem: [Register; 2],
     rtkit: Ptr<RTKit>,
 }
@@ -83,26 +83,34 @@ impl DeviceIf for Driver {
         Ok(())
     }
 
-    fn device_detach(&self, _dev: Device) -> Result<()> {
-        panic!("not yet")
+    fn device_detach(&self, dev: Device) -> Result<DetachRes<Softc>> {
+        // This device is not detached so this won't be reached but if it were to be detached,
+        // there are no Ref or RefMut's to the softc so borrow checking should succeed without
+        // panicking.
+        Ok(self.borrowck_softc(dev))
     }
 }
 
-fn apple_rtkit_boot2(helper: XRef) -> Result<()> {
-    let dev = helper.device_from_xref()?;
-    let mut sc = apple_rtkit_driver.claim_softc(dev)?;
-    let ctrl = sc.mem[0].read_4(CPU_CTRL);
-    sc.mem[0].write_4(CPU_CTRL, ctrl | CPU_CTRL_RUN);
+impl Driver {
+    fn boot(&self, helper: XRef) -> Result<()> {
+        let dev = helper.device_from_xref()?;
+        let mut sc = self.claim_softc(dev)?;
+        let ctrl = sc.mem[0].read_4(CPU_CTRL);
+        sc.mem[0].write_4(CPU_CTRL, ctrl | CPU_CTRL_RUN);
 
-    RTKit::boot(sc.rtkit)?;
-    RTKit::set_ap_pwr_state(sc.rtkit, PwrState::On)?;
-    Ok(())
+        RTKit::boot(sc.rtkit)?;
+        RTKit::set_ap_pwr_state(sc.rtkit, PwrState::On)?;
+        self.release_softc(dev, sc)?;
+        Ok(())
+    }
 }
 
 #[no_mangle]
 unsafe extern "C" fn apple_rtkit_boot(helper: XRef) -> c_int {
-    apple_rtkit_boot2(helper).unwrap();
-    0
+    match apple_rtkit_driver.boot(helper) {
+        Ok(_) => 0,
+        Err(e) => e.as_c_type(),
+    }
 }
 
 driver!(apple_rtkit_driver, c"apple_rtkit", apple_rtkit_methods, Softc,

@@ -139,7 +139,8 @@ rtkit_send(struct apple_mbox *mbox, uint32_t endpoint, uint8_t type,
 	msg.data0 |= data;
 	msg.data1 = endpoint;
 
-	return apple_mbox_write(mbox->dev, &msg);
+	//return apple_mbox_write(mbox->dev, &msg);
+    return -1;
 }
 
 int
