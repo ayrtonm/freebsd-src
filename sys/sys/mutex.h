@@ -88,7 +88,7 @@
  * [See below for descriptions]
  *
  */
-void	_mtx_init(volatile uintptr_t *c, const char *name, const char *type,
+void	_mtx_init(volatile __uintptr_t *c, const char *name, const char *type,
 	    int opts);
 void	_mtx_destroy(volatile uintptr_t *c);
 void	mtx_sysinit(void *arg);
@@ -115,15 +115,15 @@ void	_mtx_lock_spin_cookie(volatile uintptr_t *c, uintptr_t v, int opts,
 void	_mtx_lock_spin_cookie(volatile uintptr_t *c, uintptr_t v);
 #endif
 #endif
-void	__mtx_lock_flags(volatile uintptr_t *c, int opts, const char *file,
+void	__mtx_lock_flags(volatile __uintptr_t *c, int opts, const char *file,
 	    int line);
-void	__mtx_unlock_flags(volatile uintptr_t *c, int opts, const char *file,
+void	__mtx_unlock_flags(volatile __uintptr_t *c, int opts, const char *file,
 	    int line);
-void	__mtx_lock_spin_flags(volatile uintptr_t *c, int opts, const char *file,
+void	__mtx_lock_spin_flags(volatile __uintptr_t *c, int opts, const char *file,
 	     int line);
 int	__mtx_trylock_spin_flags(volatile uintptr_t *c, int opts,
 	     const char *file, int line);
-void	__mtx_unlock_spin_flags(volatile uintptr_t *c, int opts,
+void	__mtx_unlock_spin_flags(volatile __uintptr_t *c, int opts,
 	    const char *file, int line);
 void	mtx_spin_wait_unlocked(struct mtx *m);
 
