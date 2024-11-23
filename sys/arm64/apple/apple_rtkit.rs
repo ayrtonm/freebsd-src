@@ -47,9 +47,20 @@ const SPEC: [ResourceSpec; 2] = [
     ResourceSpec::new(SYS_RES_MEMORY, 1), /* sram */
 ];
 
-pub struct Softc {
+pub struct AppleRTKitSoftc {
     mem: [Register; 2],
     rtkit: Ptr<RTKit>,
+}
+
+impl Softc for Driver {
+    type BASE = AppleRTKitSoftc;
+
+    fn init_softc(&self, mut dev: Device) -> Result<Self::BASE> {
+        let resources = dev.bus_alloc_resources(SPEC)?;
+        let mem = resources.map(|r| r.whole_register());
+        let rtkit = RTKit::new(dev, false)?;
+        Ok(AppleRTKitSoftc { mem, rtkit })
+    }
 }
 
 impl DeviceIf for Driver {
@@ -68,31 +79,26 @@ impl DeviceIf for Driver {
     }
 
     fn device_attach(&self, mut dev: Device) -> Result<()> {
-        let mem = dev.bus_alloc_resources(SPEC)?;
-        let mem = mem.map(|r| r.whole_register());
-
         let node = dev.ofw_bus_get_node();
         let xref = node.xref_from_node();
 
         dev.register_xref(xref);
 
-        let rtkit = RTKit::new(dev, false)?;
-
-        self.init_softc(dev, Softc { mem, rtkit })?;
-
         Ok(())
     }
 
-    fn device_detach(&self, dev: Device) -> Result<DetachRes<Softc>> {
+    fn device_detach(&self, dev: Device) -> Result<()> {
         // This device is not detached so this won't be reached but if it were to be detached,
         // there are no Ref or RefMut's to the softc so borrow checking should succeed without
         // panicking.
-        Ok(self.borrowck_softc(dev))
+        //Ok(self.borrowck_softc(dev))
+        todo!("")
     }
 }
 
 impl Driver {
     fn boot(&self, helper: XRef) -> Result<()> {
+        /*
         let dev = helper.device_from_xref()?;
         let mut sc = self.claim_softc(dev)?;
         let ctrl = sc.mem[0].read_4(CPU_CTRL);
@@ -101,6 +107,7 @@ impl Driver {
         RTKit::boot(sc.rtkit)?;
         RTKit::set_ap_pwr_state(sc.rtkit, PwrState::On)?;
         self.release_softc(dev, sc)?;
+        */
         Ok(())
     }
 }
@@ -113,7 +120,7 @@ unsafe extern "C" fn apple_rtkit_boot(helper: XRef) -> c_int {
     }
 }
 
-driver!(apple_rtkit_driver, c"apple_rtkit", apple_rtkit_methods, Softc,
+driver!(apple_rtkit_driver, c"apple_rtkit", apple_rtkit_methods, AppleRTKitSoftc,
     device_probe apple_rtkit_probe,
     device_attach apple_rtkit_attach,
     device_detach apple_rtkit_detach

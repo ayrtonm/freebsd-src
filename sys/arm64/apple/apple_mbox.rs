@@ -59,13 +59,13 @@ pub struct AppleMboxMsg {
 pub type AppleMboxRx<T> = fn(Ptr<T>, AppleMboxMsg) -> Result<()>;
 pub type TypeErasedAppleMboxRx = fn(*mut c_void, AppleMboxMsg) -> Result<()>;
 
-pub struct Softc {
-    intr_softc: BorrowCk<IntrSoftc>,
+pub struct AppleMboxSoftc {
+    intr_softc: BorrowCk<IntrAppleMboxSoftc>,
     a2i_ctrl: A2ICtrl,
     a2i_send: A2ISend,
 }
 
-struct IntrSoftc {
+struct IntrAppleMboxSoftc {
     dev: Device,
     irq: Option<Resource>,
     i2a_ctrl: I2ACtrl,
@@ -73,6 +73,37 @@ struct IntrSoftc {
     intrhand: *mut c_void,
     // group callback function and its context together since they're either both `None` or both `Some`
     callback: Option<(TypeErasedAppleMboxRx, *mut c_void)>,
+}
+
+impl Softc for Driver {
+    type BASE = AppleMboxSoftc;
+
+    fn init_softc(&self, mut dev: Device) -> Result<Self::BASE> {
+        let node = dev.ofw_bus_get_node();
+
+        let rid = node.ofw_bus_find_string_index(c"interrupt-names", c"recv-not-empty")?;
+        let irq = Some(dev.bus_alloc_resource(SYS_RES_IRQ, rid)?);
+        let mut mem = dev.bus_alloc_resource(SYS_RES_MEMORY, 0)?;
+        // generic parameters on take_register are inferred from the types of the result which are
+        // determined by the definitions in AppleMboxSoftc and IntrAppleMboxSoftc
+        let a2i_ctrl = mem.take_register()?;
+        let a2i_send = mem.take_register()?;
+        let i2a_ctrl = mem.take_register()?;
+        let i2a_recv = mem.take_register()?;
+
+        Ok(AppleMboxSoftc {
+            intr_softc: BorrowCk::new(IntrAppleMboxSoftc {
+                dev,
+                irq,
+                i2a_ctrl,
+                i2a_recv,
+                intrhand: null_mut(),
+                callback: None,
+            }),
+            a2i_ctrl,
+            a2i_send,
+        })
+    }
 }
 
 impl DeviceIf for Driver {
@@ -93,38 +124,13 @@ impl DeviceIf for Driver {
     fn device_attach(&self, mut dev: Device) -> Result<()> {
         let node = dev.ofw_bus_get_node();
         let xref = node.xref_from_node();
+
         dev.register_xref(xref);
-
-        let rid = node.ofw_bus_find_string_index(c"interrupt-names", c"recv-not-empty")?;
-
-        let irq = Some(dev.bus_alloc_resource(SYS_RES_IRQ, rid)?);
-
-        let mut mem = dev.bus_alloc_resource(SYS_RES_MEMORY, 0)?;
-        // generic parameters on take_register are inferred from the types of the result which are
-        // determined by the definitions in Softc and IntrSoftc
-        let a2i_ctrl = mem.take_register()?;
-        let a2i_send = mem.take_register()?;
-        let i2a_ctrl = mem.take_register()?;
-        let i2a_recv = mem.take_register()?;
-
-        let sc = Softc {
-            intr_softc: BorrowCk::new(IntrSoftc {
-                dev,
-                irq,
-                i2a_ctrl,
-                i2a_recv,
-                intrhand: null_mut(),
-                callback: None,
-            }),
-            a2i_ctrl,
-            a2i_send,
-        };
-        self.init_softc(dev, sc)?;
 
         Ok(())
     }
 
-    fn device_detach(&self, dev: Device) -> Result<DetachRes<Softc>> {
+    fn device_detach(&self, dev: Device) -> Result<()> {
         unreachable!("device cannot be detached")
     }
 }
@@ -139,6 +145,7 @@ impl Driver {
     }
 
     pub fn set_rx<T>(&self, mut mbox: Device, func: AppleMboxRx<T>, arg: Ptr<T>) -> Result<()> {
+        /*
         let mut sc = self.get_softc(mbox);
         let mut intr_softc = get_field!(sc, intr_softc).claim()?;
 
@@ -149,13 +156,14 @@ impl Driver {
         let flags = INTR_MPSAFE | INTR_TYPE_MISC;
         let intrhand = &raw mut intr_softc.intrhand;
         mbox.bus_setup_intr(irq, flags, None, Some(Self::intr), intr_softc, intrhand)?;
+        */
         Ok(())
     }
 
-    extern "C" fn intr(mut sc: RefMut<IntrSoftc>) {
+    extern "C" fn intr(mut sc: RefMut<IntrAppleMboxSoftc>) {
         // TODO: rust doesn't understand split borrows through a smart pointer deref.
         // figure out a more ergonomic approach to this
-        let sc: &mut IntrSoftc = sc.deref_mut();
+        let sc: &mut IntrAppleMboxSoftc = sc.deref_mut();
         let mut ctrl = &mut sc.i2a_ctrl;
         let mut recv = &mut sc.i2a_recv;
         while (ctrl.read_4(0) & MBOX_I2A_CTRL_EMPTY) == 0 {
@@ -176,6 +184,7 @@ impl Driver {
 
 
     pub fn write_msg(&self, mbox: Device, msg: &AppleMboxMsg) -> Result<()> {
+        /*
         let mut sc = self.claim_softc(mbox)?;
         if (sc.a2i_ctrl.read_4(0) & MBOX_A2I_CTRL_FULL) != 0 {
             return Err(EBUSY);
@@ -183,11 +192,12 @@ impl Driver {
         sc.a2i_send.write_8(0, msg.data0);
         sc.a2i_send.write_8(8, msg.data1 as u64);
         self.release_softc(mbox, sc)?;
+        */
         Ok(())
     }
 }
 
-driver!(apple_mbox_driver, c"mbox", apple_mbox_methods, Softc,
+driver!(apple_mbox_driver, c"mbox", apple_mbox_methods, AppleMboxSoftc,
     device_probe apple_mbox_probe,
     device_attach apple_mbox_attach,
     device_detach apple_mbox_detach
