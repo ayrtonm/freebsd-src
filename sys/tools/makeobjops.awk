@@ -343,7 +343,7 @@ function handle_method (static, doc)
 		printrs("        extern \"C\" fn $impl(" rustarg_list ") {");
 	if (ret != "void")
 		printrs("            use core::ffi::c_int;");
-	printrs("            use kpi::ffi::{AsCType, AsRustType};\n");
+	printrs("            use kpi::{AsCType, AsRustType};\n");
 	printrs(rustvar_list);
 	if (precond != "")
 		printrs("            " precond);

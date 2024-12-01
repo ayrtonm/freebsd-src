@@ -22,15 +22,18 @@ extern crate alloc;
 
 use core::ffi::{c_int, c_void};
 use core::mem::MaybeUninit;
+use core::marker::PhantomData;
 use core::ptr::{addr_of_mut, null_mut};
+use core::convert::From;
+use core::sync::atomic::{AtomicU16, Ordering};
 use kpi::allocator::NOWAIT;
 use kpi::device::Device;
 use kpi::prelude::*;
 use kpi::taskq;
 use kpi::taskq::Task;
-use kpi::{bindings, enum_c_macros, get_field};
+use kpi::{bindings, enum_c_macros};
 
-use apple_mbox::{apple_mbox_driver, AppleMboxMsg, TypeErasedAppleMboxRx};
+use apple_mbox::{AppleMboxMsg, AppleMboxRx, Boot, Intr};
 
 #[repr(u16)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -40,18 +43,24 @@ pub enum PwrState {
     On = 0x0020,
 }
 
+impl Into<u16> for PwrState {
+    fn into(self) -> u16 {
+        self as u16
+    }
+}
+
 #[repr(C)]
 #[derive(Debug)]
-pub struct RTKit {
+pub struct RTKit<S = ()> {
     client: Device,
-    mbox: Device,
+    mbox: Device<S>,
 
-    iop_pwr_state: u16,
-    ap_pwr_state: u16,
+    iop_pwr_state: Sleepable<AtomicU16>,
+    ap_pwr_state: Sleepable<AtomicU16>,
     verbose: bool,
     noalloc: bool,
     ep_map: u64,
-    callbacks: [Option<(TypeErasedAppleMboxRx, *mut c_void)>; 32],
+    callbacks: [Option<(AppleMboxRx, *mut c_void)>; 32],
 }
 
 // RTKitTask is a subclass of `struct task`
@@ -59,98 +68,99 @@ type RTKitTask = SubClass<Task, RTKitTaskFields>;
 
 #[derive(Debug)]
 struct RTKitTaskFields {
-    rtkit: Ptr<RTKit>,
+    rtkit: *mut RTKit,
     msg: AppleMboxMsg,
 }
 
 impl RTKit {
-    pub fn new(client: Device, noalloc: bool) -> Result<Ptr<Self>> {
-        let mbox = apple_mbox_driver.get_mbox(client)?;
-        let iop_pwr_state = PwrState::Sleep as u16;
-        let ap_pwr_state = PwrState::Quiesced as u16;
-        let boxed_rtkit = Box::new_in(
-            Self {
-                client,
-                mbox,
+    pub fn new(client: Device) -> Result<Self> {
+        let mbox = apple_mbox::Driver::get_mbox(&client)?;
+        let iop_pwr_state = Sleepable::new(AtomicU16::new(PwrState::Sleep.into()));
+        let ap_pwr_state = Sleepable::new(AtomicU16::new(PwrState::Quiesced.into()));
+        Ok(Self {
+            client,
+            mbox,
+            iop_pwr_state,
+            ap_pwr_state,
+            verbose: false,
+            noalloc: false,
+            ep_map: 0,
+            callbacks: [None; 32],
+        })
+    }
+    fn rx_callback(client: Device, msg: AppleMboxMsg) -> Result<()> {
+        Ok(())
+    }
+}
 
-                iop_pwr_state,
-                ap_pwr_state,
-
-                verbose: false,
-                // TODO: only used in smc, may be unnecessary
-                noalloc,
-                ep_map: 0,
-                callbacks: [None; 32],
-            },
-            WAITOK,
-        );
-        Ok(unsafe { Ptr::new(Box::into_raw(boxed_rtkit)) })
+impl RTKit<Boot> {
+    pub fn boot(&mut self) -> Result<()> {
+        let arg = self.client.copy_ptr();
+        apple_mbox::Driver::set_rx(&mut self.mbox, RTKit::rx_callback, arg)
     }
 
-    pub fn boot(rtkit: Ptr<Self>) -> Result<()> {
-        let mbox = get_field!(rtkit, mbox).flatten();
-        apple_mbox_driver.set_rx(mbox, rx_callback, rtkit)?;
-        RTKit::set_iop_pwr_state(rtkit, PwrState::On)
-    }
-
-    pub fn set_iop_pwr_state(rtkit: Ptr<Self>, pwr_state: PwrState) -> Result<()> {
-        let pwr_state = pwr_state as u16;
-        let iop_pwr_state = get_field!(rtkit, iop_pwr_state);
-
-        if unsafe { iop_pwr_state.read() } == pwr_state {
+    pub fn set_iop_pwr_state(&self, pwr_state: PwrState) -> Result<()> {
+        let pwr_state = pwr_state.into();
+        // If already in the correct power state do nothing
+        if self.iop_pwr_state.load(Ordering::Relaxed) == pwr_state {
             return Ok(());
         }
-        mbox_send(
-            get_field!(rtkit, mbox).flatten(),
-            EpTxMsg::Mgmt(MgmtTxMsg::IopPwrState { pwr_state }),
-        )?;
-        if unsafe { iop_pwr_state.read() } != pwr_state {
-            tsleep_in_hz(iop_pwr_state, bindings::PWAIT, c"ioppwr", 1)
+
+        // Try setting the power state
+        let msg = EpTxMsg::Mgmt(MgmtTxMsg::IopPwrState { pwr_state });
+        apple_mbox::Driver::write_msg(&self.mbox, &msg.as_apple_mbox_msg())?; 
+
+        // If the power state hasn't changed sleep
+        if self.iop_pwr_state.load(Ordering::Relaxed) != pwr_state {
+            self.iop_pwr_state.tsleep_in_hz(bindings::PWAIT, c"ioppwr", 1)
         } else {
             Ok(())
         }
     }
 
-    pub fn set_ap_pwr_state(rtkit: Ptr<Self>, pwr_state: PwrState) -> Result<()> {
-        let pwr_state = pwr_state as u16;
-        let ap_pwr_state = get_field!(rtkit, ap_pwr_state);
-
-        if unsafe { ap_pwr_state.read() } == pwr_state {
+    pub fn set_ap_pwr_state(&self, pwr_state: PwrState) -> Result<()> {
+        let pwr_state = pwr_state.into();
+        if self.ap_pwr_state.load(Ordering::Relaxed) == pwr_state {
             return Ok(());
         }
-        mbox_send(
-            get_field!(rtkit, mbox).flatten(),
-            EpTxMsg::Mgmt(MgmtTxMsg::ApPwrState { pwr_state }),
-        )?;
-        if unsafe { ap_pwr_state.read() } != pwr_state {
-            tsleep_in_hz(ap_pwr_state, bindings::PWAIT, c"appwr", 1)
+
+        let msg = EpTxMsg::Mgmt(MgmtTxMsg::ApPwrState { pwr_state });
+        apple_mbox::Driver::write_msg(&self.mbox, &msg.as_apple_mbox_msg())?;
+
+        if self.ap_pwr_state.load(Ordering::Relaxed) != pwr_state {
+            self.ap_pwr_state.tsleep_in_hz(bindings::PWAIT, c"appwr", 1)
         } else {
             Ok(())
         }
     }
 }
 
-fn rx_callback(rtkit: Ptr<RTKit>, msg: AppleMboxMsg) -> Result<()> {
-    let ctx = RTKitTaskFields { rtkit, msg };
-    // Put the task and its context in a `Box` (i.e. on the heap). The `struct task` is
-    // zero-initialized while the other context fields are initialized with the arguments
-    let mut task = Box::new_in(RTKitTask::new(ctx), NOWAIT);
-    // Set the task's own address as the context and enqueue on taskqueue_thread with the
-    // callback rx_task. `enqueue_with_self` consumes `task` so it can't be used again in this
-    // function and internally `enqueue_with_self` calls `Box::into_raw` to avoid freeing `task`
-    // itself. When the callback is invoked it's passed the boxed task as an argument so it
-    // either explicitly passes ownership of the Box to something else or implicitly drops it at
-    // the end of the function (i.e. frees the allocated task and context)
-    task.enqueue_with_self(rx_task, taskq::thread())?;
-    Ok(())
-}
+//fn rx_callback(/*rtkit: *mut RTKit<Intr>*/mut dev: Device, msg: AppleMboxMsg) -> Result<()> {
+//    /*
+//    let ctx = RTKitTaskFields { rtkit, msg };
+//    // Put the task and its context in a `Box` (i.e. on the heap). The `struct task` is
+//    // zero-initialized while the other context fields are initialized with the arguments
+//    let mut task = Box::new_in(RTKitTask::new(ctx), NOWAIT);
+//    // Set the task's own address as the context and enqueue on taskqueue_thread with the
+//    // callback rx_task. `enqueue_with_self` consumes `task` so it can't be used again in this
+//    // function and internally `enqueue_with_self` calls `Box::into_raw` to avoid freeing `task`
+//    // itself. When the callback is invoked it's passed the boxed task as an argument so it
+//    // either explicitly passes ownership of the Box to something else or implicitly drops it at
+//    // the end of the function (i.e. frees the allocated task and context)
+//    task.enqueue_with_self(rx_task, taskq::thread())?;
+//    */
+//    Ok(())
+//}
 
 fn mbox_send_from_task(ctx: &RTKitTask, msg: EpTxMsg) -> Result<()> {
+    /*
     let mbox = get_field!(ctx.rtkit, mbox).flatten();
     mbox_send(mbox, msg)
+    */
+    todo!("")
 }
-fn mbox_send(mbox: Device, msg: EpTxMsg) -> Result<()> {
-    apple_mbox_driver.write_msg(mbox, &msg.as_apple_mbox_msg())
+fn mbox_send(mut mbox: Device<Boot>, msg: EpTxMsg) -> Result<()> {
+    apple_mbox::Driver::write_msg(&mut mbox, &msg.as_apple_mbox_msg())
 }
 
 const MSG_TYPE_SHIFT: u64 = 52;
@@ -310,6 +320,7 @@ const MINVER: u16 = 11;
 const MAXVER: u16 = 12;
 
 fn handle_mgmt(ctx: &RTKitTask, msg: MgmtRxMsg) -> Result<()> {
+    /*
     match msg {
         MgmtRxMsg::Hello { minver, maxver } => {
             if minver > MAXVER {
@@ -380,6 +391,8 @@ fn handle_mgmt(ctx: &RTKitTask, msg: MgmtRxMsg) -> Result<()> {
         }
         MgmtRxMsg::Unknown(_) => todo!(""),
     }
+    */
+    todo!("")
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -455,24 +468,27 @@ extern "C" fn rx_task(ctx: Box<RTKitTask>, pending: c_int) {
         EpRxMsg::Custom(ep) => todo!(""),
         EpRxMsg::Unknown(ep) => todo!(""),
     };
+    /*
     if let Err(err) = res {
         // We have one extra level of indirection (i.e. `device_t *` or equivalently
         // `struct _device **` so we need to flatten the `Ptr<Ptr<_device>>` into `Ptr<_device>`.
-        let client_dev: Ptr<Device> = get_field!(ctx.rtkit, client);
+        let client_dev: *mut Device = get_field!(ctx.rtkit, client);
         dprintln!(
             client_dev.flatten(),
             "Error ({err:?}) while handling RTKit message from endpoint {ep:?}"
         );
     }
+    */
 }
 
 #[no_mangle]
-extern "C" fn rtkit_init(dev: Device, noalloc: bool) -> Ptr<RTKit> {
-    RTKit::new(dev, noalloc).unwrap()
+extern "C" fn rtkit_init(dev: Device, noalloc: bool) -> *mut RTKit {
+    //RTKit::new(dev/*, noalloc*/).unwrap();
+    todo!("")
 }
 
 #[no_mangle]
-unsafe extern "C" fn rtkit_boot(rtkit: Ptr<RTKit>) -> c_int {
-    RTKit::boot(rtkit).unwrap();
-    0
+unsafe extern "C" fn rtkit_boot(rtkit: *mut RTKit) -> c_int {
+    //RTKit::boot(rtkit).unwrap();
+    todo!("")
 }

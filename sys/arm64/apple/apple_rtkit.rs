@@ -37,6 +37,7 @@ use kpi::device::{Device, DeviceIf, ProbeRes};
 use kpi::driver;
 use kpi::ofw::XRef;
 use rtkit::{PwrState, RTKit};
+use apple_mbox::Boot;
 
 const CPU_CTRL: u64 = 0x44;
 const CPU_CTRL_RUN: u32 = 1 << 4;
@@ -47,24 +48,15 @@ const SPEC: [ResourceSpec; 2] = [
     ResourceSpec::new(SYS_RES_MEMORY, 1), /* sram */
 ];
 
-pub struct AppleRTKitSoftc {
+#[derive(Debug)]
+pub struct AppleRTKitSoftc<S> {
     mem: [Register; 2],
-    rtkit: Ptr<RTKit>,
-}
-
-impl Softc for Driver {
-    type BASE = AppleRTKitSoftc;
-
-    fn init_softc(&self, mut dev: Device) -> Result<Self::BASE> {
-        let resources = dev.bus_alloc_resources(SPEC)?;
-        let mem = resources.map(|r| r.whole_register());
-        let rtkit = RTKit::new(dev, false)?;
-        Ok(AppleRTKitSoftc { mem, rtkit })
-    }
+    rtkit: RTKit<S>,
 }
 
 impl DeviceIf for Driver {
-    fn device_probe(&self, dev: Device) -> Result<ProbeRes> {
+    type Softc<S> = UniqueCell<AppleRTKitSoftc<S>, Boot, S>;
+    fn device_probe(dev: &Device) -> Result<ProbeRes> {
         if !dev.ofw_bus_status_okay() {
             return Err(ENXIO);
         }
@@ -78,43 +70,47 @@ impl DeviceIf for Driver {
         Ok(BUS_PROBE_SPECIFIC)
     }
 
-    fn device_attach(&self, mut dev: Device) -> Result<()> {
+    fn device_attach(dev: &mut Device) -> Result<AttachRes> {
+        let resources = dev.bus_alloc_resources(SPEC)?;
+        let mem = resources.map(|r| r.whole_register());
+        let rtkit = RTKit::new(dev.copy_ptr())?;
+
         let node = dev.ofw_bus_get_node();
         let xref = node.xref_from_node();
 
         dev.register_xref(xref);
 
-        Ok(())
+        let sc = UniqueCell::new(AppleRTKitSoftc { mem, rtkit });
+        let res = Driver::init_softc(dev, sc);
+
+        Ok(res)
     }
 
-    fn device_detach(&self, dev: Device) -> Result<()> {
-        // This device is not detached so this won't be reached but if it were to be detached,
-        // there are no Ref or RefMut's to the softc so borrow checking should succeed without
-        // panicking.
-        //Ok(self.borrowck_softc(dev))
-        todo!("")
+    fn device_detach(dev: &mut Device) -> Result<()> {
+        unreachable!("device cannot be detached")
     }
 }
 
 impl Driver {
-    fn boot(&self, helper: XRef) -> Result<()> {
-        /*
-        let dev = helper.device_from_xref()?;
-        let mut sc = self.claim_softc(dev)?;
+    fn boot(&self, dev: &mut Device<Boot>) -> Result<()> {
+        let sc = Driver::get_softc_mut(dev).get_mut();
         let ctrl = sc.mem[0].read_4(CPU_CTRL);
         sc.mem[0].write_4(CPU_CTRL, ctrl | CPU_CTRL_RUN);
 
-        RTKit::boot(sc.rtkit)?;
-        RTKit::set_ap_pwr_state(sc.rtkit, PwrState::On)?;
-        self.release_softc(dev, sc)?;
-        */
+        sc.rtkit.boot()?;
+
+        let sc = Driver::get_softc_mut(dev).get();
+
+        sc.rtkit.set_iop_pwr_state(PwrState::On)?;
+        sc.rtkit.set_ap_pwr_state(PwrState::On)?;
         Ok(())
     }
 }
 
 #[no_mangle]
 unsafe extern "C" fn apple_rtkit_boot(helper: XRef) -> c_int {
-    match apple_rtkit_driver.boot(helper) {
+    let mut dev = unsafe { helper.device_from_xref().unwrap().assume_state() };
+    match apple_rtkit_driver.boot(&mut dev) {
         Ok(_) => 0,
         Err(e) => e.as_c_type(),
     }
