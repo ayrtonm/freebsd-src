@@ -72,6 +72,10 @@ struct RTKitTaskFields {
     msg: AppleMboxMsg,
 }
 
+pub trait ManagesRTKit<S>: ManagesSoftc {
+    fn get_rtkit(sc: &Self::Softc<S>) -> &RTKit<S>;
+}
+
 impl RTKit {
     pub fn new(client: Device) -> Result<Self> {
         let mbox = apple_mbox::Driver::get_mbox(&client)?;

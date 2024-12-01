@@ -26,7 +26,7 @@ use core::ptr::null_mut;
 use core::sync::atomic::{AtomicPtr, Ordering};
 use kpi::bindings::{INTR_MPSAFE, INTR_TYPE_MISC};
 use kpi::bus::{Register, Resource};
-use kpi::device::{Device, DeviceIf, ProbeRes};
+use kpi::device::{Device, ProbeRes};
 use kpi::sync::SpinLock;
 use kpi::{dprintln, driver};
 
@@ -95,9 +95,11 @@ struct WriteMsgSoftc {
     a2i_send: A2ISend,
 }
 
-impl DeviceIf for Driver {
+impl ManagesSoftc for Driver {
     type Softc<S> = AppleMboxSoftc<S>;
+}
 
+impl DeviceIf for Driver {
     fn device_probe(dev: &Device) -> Result<ProbeRes> {
         if !dev.ofw_bus_status_okay() {
             return Err(ENXIO);
@@ -162,19 +164,22 @@ impl Driver {
     }
 
     pub fn set_rx(mbox: &mut Device<Boot>, func: AppleMboxRx, client: Device) -> Result<()> {
-        let func = unsafe { transmute(func) };
         let sc = Driver::get_softc_mut(mbox);
+
+        let func = unsafe { transmute(func) };
         sc.callback.store(func, Ordering::Relaxed);
+
         sc.arg.store(client.as_ptr(), Ordering::Relaxed);
+
         let irq = sc.irq.get_mut().take().ok_or(EDOOFUS)?;
         let flags = INTR_MPSAFE | INTR_TYPE_MISC;
         let intrhand = sc.intrhand.as_ptr();
-        mbox.bus_setup_intr(irq, flags, None, Some(Self::intr), intrhand)?;
+
+        Driver::bus_setup_intr(mbox, irq, flags, None, Some(Self::intr), intrhand)?;
         Ok(())
     }
 
-    extern "C" fn intr(mut dev: Device<Intr>) {
-        let sc = Driver::get_softc_mut(&mut dev);
+    extern "C" fn intr(sc: &AppleMboxSoftc<Intr>) {
         let intr_sc = sc.intr_softc.get_mut();
 
         let mut ctrl = &mut intr_sc.i2a_ctrl;
@@ -210,7 +215,7 @@ impl Driver {
     }
 }
 
-driver!(apple_mbox_driver, c"mbox", apple_mbox_methods, AppleMboxSoftc,
+driver!(apple_mbox_driver, c"mbox", apple_mbox_methods,
     device_probe apple_mbox_probe,
     device_attach apple_mbox_attach,
     device_detach apple_mbox_detach

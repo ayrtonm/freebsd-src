@@ -33,10 +33,10 @@ extern crate alloc;
 
 use core::ffi::c_int;
 use kpi::bus::{Register, ResourceSpec};
-use kpi::device::{Device, DeviceIf, ProbeRes};
+use kpi::device::{Device, ProbeRes};
 use kpi::driver;
 use kpi::ofw::XRef;
-use rtkit::{PwrState, RTKit};
+use rtkit::{PwrState, RTKit, ManagesRTKit};
 use apple_mbox::Boot;
 
 const CPU_CTRL: u64 = 0x44;
@@ -48,14 +48,24 @@ const SPEC: [ResourceSpec; 2] = [
     ResourceSpec::new(SYS_RES_MEMORY, 1), /* sram */
 ];
 
+
 #[derive(Debug)]
 pub struct AppleRTKitSoftc<S> {
-    mem: [Register; 2],
+    mem: UniqueCell<[Register; 2], Boot, S>,
     rtkit: RTKit<S>,
 }
 
+impl ManagesSoftc for Driver {
+    type Softc<S> = AppleRTKitSoftc<S>;
+}
+
+impl<S> ManagesRTKit<S> for Driver {
+    fn get_rtkit(sc: &Self::Softc<S>) -> &RTKit<S> {
+        &sc.rtkit
+    }
+}
+
 impl DeviceIf for Driver {
-    type Softc<S> = UniqueCell<AppleRTKitSoftc<S>, Boot, S>;
     fn device_probe(dev: &Device) -> Result<ProbeRes> {
         if !dev.ofw_bus_status_okay() {
             return Err(ENXIO);
@@ -72,7 +82,7 @@ impl DeviceIf for Driver {
 
     fn device_attach(dev: &mut Device) -> Result<AttachRes> {
         let resources = dev.bus_alloc_resources(SPEC)?;
-        let mem = resources.map(|r| r.whole_register());
+        let mem = UniqueCell::new(resources.map(|r| r.whole_register()));
         let rtkit = RTKit::new(dev.copy_ptr())?;
 
         let node = dev.ofw_bus_get_node();
@@ -80,7 +90,7 @@ impl DeviceIf for Driver {
 
         dev.register_xref(xref);
 
-        let sc = UniqueCell::new(AppleRTKitSoftc { mem, rtkit });
+        let sc = AppleRTKitSoftc { mem, rtkit };
         let res = Driver::init_softc(dev, sc);
 
         Ok(res)
@@ -93,16 +103,16 @@ impl DeviceIf for Driver {
 
 impl Driver {
     fn boot(&self, dev: &mut Device<Boot>) -> Result<()> {
-        let sc = Driver::get_softc_mut(dev).get_mut();
-        let ctrl = sc.mem[0].read_4(CPU_CTRL);
-        sc.mem[0].write_4(CPU_CTRL, ctrl | CPU_CTRL_RUN);
+        let mem = Driver::get_softc_mut(dev).mem.get_mut();
+        let ctrl = mem[0].read_4(CPU_CTRL);
+        mem[0].write_4(CPU_CTRL, ctrl | CPU_CTRL_RUN);
 
-        sc.rtkit.boot()?;
+        //sc.rtkit.boot()?;
 
-        let sc = Driver::get_softc_mut(dev).get();
+        //let sc = Driver::get_softc_mut(dev).get();
 
-        sc.rtkit.set_iop_pwr_state(PwrState::On)?;
-        sc.rtkit.set_ap_pwr_state(PwrState::On)?;
+        //sc.rtkit.set_iop_pwr_state(PwrState::On)?;
+        //sc.rtkit.set_ap_pwr_state(PwrState::On)?;
         Ok(())
     }
 }
@@ -116,7 +126,7 @@ unsafe extern "C" fn apple_rtkit_boot(helper: XRef) -> c_int {
     }
 }
 
-driver!(apple_rtkit_driver, c"apple_rtkit", apple_rtkit_methods, AppleRTKitSoftc,
+driver!(apple_rtkit_driver, c"apple_rtkit", apple_rtkit_methods,
     device_probe apple_rtkit_probe,
     device_attach apple_rtkit_attach,
     device_detach apple_rtkit_detach
