@@ -70,7 +70,7 @@ pub struct AppleMboxMsg {
 // This callback type's callsites are in rust so it doesn't need to be extern "C". If it were in C
 // it would need to go through the KPI crate which would enforce the extern "C" to avoid a compiler
 // error.
-pub type AppleMboxRx<T> = fn(T, AppleMboxMsg) -> Result<()>;
+pub type AppleMboxRx<T> = fn(&T, AppleMboxMsg) -> Result<()>;
 pub type TypeErasedAppleMboxRx = fn(*mut c_void, AppleMboxMsg) -> Result<()>;
 
 #[derive(Debug)]
@@ -96,7 +96,7 @@ struct WriteMsgSoftc {
     a2i_send: A2ISend,
 }
 
-impl DeviceIf for Driver {
+impl DeviceIf for AppleMboxDriver {
     type Softc<S> = AppleMboxSoftc<S>;
 
     fn device_probe(&self, dev: &Device) -> Result<ProbeRes> {
@@ -155,7 +155,7 @@ impl DeviceIf for Driver {
     }
 }
 
-impl Driver {
+impl AppleMboxDriver {
     // Get a mailbox device_t from the client's mboxes devicetree property. The mailbox must've
     // previously registered its devicetree node xref which happens when this driver attaches.
     pub fn get_mbox(&self, client: &Device) -> Result<Device> {
@@ -164,13 +164,13 @@ impl Driver {
         OF_device_from_xref(mbox_xref)
     }
 
-    pub fn set_rx<T>(&self, mbox: &mut Device<Boot>, func: AppleMboxRx<T>, arg: &T) -> Result<()> {
+    pub fn set_rx<D: DeviceIf>(&self, mbox: &mut Device<Boot>, func: AppleMboxRx<D::Softc<Intr>>, client: Driver<D>) -> Result<()> {
         let sc = self.device_get_softc_with_state(mbox);
 
         let func = unsafe { transmute(func) };
         sc.callback.store(func, Ordering::Relaxed);
 
-        let arg = arg as *const T as *const c_void as *mut c_void;
+        let arg = client.driver.get_softc(client.dev) as *const D::Softc<Intr> as *const c_void as *mut c_void;
         sc.arg.store(arg, Ordering::Relaxed);
 
         let irq = sc.irq.get_mut();
@@ -216,7 +216,7 @@ impl Driver {
     }
 }
 
-driver!(apple_mbox_driver, c"mbox", apple_mbox_methods,
+driver!(apple_mbox_driver, c"mbox", AppleMboxDriver, apple_mbox_methods,
     device_probe apple_mbox_probe,
     device_attach apple_mbox_attach,
     device_detach apple_mbox_detach

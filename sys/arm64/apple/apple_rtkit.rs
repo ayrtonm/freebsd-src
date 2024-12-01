@@ -54,13 +54,13 @@ pub struct AppleRTKitSoftc<S> {
     rtkit: RTKit<S>,
 }
 
-impl ManagesRTKit for Driver {
-    fn rtkit_for_device<S: SoftcInit>(&self, dev: &mut Device<S>) -> &RTKit<()> {
-        &self.device_get_softc(dev).rtkit
-    }
+impl ManagesRTKit for AppleRTKitDriver {
+    //fn rtkit_for_device<S: SoftcInit>(&self, dev: &mut Device<S>) -> &RTKit<()> {
+    //    &self.device_get_softc(dev).rtkit
+    //}
 }
 
-impl DeviceIf for Driver {
+impl DeviceIf for AppleRTKitDriver {
     type Softc<S> = AppleRTKitSoftc<S>;
 
     fn device_probe(&self, dev: &Device) -> Result<ProbeRes> {
@@ -101,7 +101,7 @@ impl DeviceIf for Driver {
     }
 }
 
-impl Driver {
+impl AppleRTKitDriver {
     fn boot(&self, dev: &mut Device<Boot>) -> Result<()> {
         let mem = self.device_get_softc_with_state(dev).mem.get_mut();
         let ctrl = mem[0].read_4(CPU_CTRL);
@@ -126,7 +126,7 @@ unsafe extern "C" fn apple_rtkit_boot(helper: XRef) -> c_int {
     }
 }
 
-driver!(apple_rtkit_driver, c"apple_rtkit", apple_rtkit_methods,
+driver!(apple_rtkit_driver, c"apple_rtkit", AppleRTKitDriver, apple_rtkit_methods,
     device_probe apple_rtkit_probe,
     device_attach apple_rtkit_attach,
     device_detach apple_rtkit_detach

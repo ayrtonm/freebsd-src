@@ -73,16 +73,20 @@ struct RTKitTaskFields {
 }
 
 pub trait ManagesRTKit: DeviceIf {
-    fn rtkit_for_device<S: SoftcInit>(&self, dev: &mut Device<S>) -> &RTKit<()>;
+    //fn rtkit_for_device<S: SoftcInit>(&self, dev: &mut Device<S>) -> &RTKit<()>;
 
     fn rtkit_init(client: Device) -> Result<RTKit> {
         RTKit::new(client)
     }
 
     fn rtkit_boot(rtkit: &mut RTKit<Boot>) -> Result<()> {
+        apple_mbox_driver.set_rx(&mut rtkit.mbox, Self::rx_callback, self.device_get_driver(self.client))
         //apple_mbox_driver.set_rx(&mut rtkit.mbox, RTKit::rx_callback, &rtkit.client, Self::rtkit_for_device)
         todo!("")
     }
+    //fn rx_callback(&self, msg: AppleMboxMsg) -> Result<()> {
+    //    Ok(())
+    //}
 }
 
 impl RTKit {
@@ -100,9 +104,6 @@ impl RTKit {
             ep_map: 0,
             callbacks: [const { None }; 32],
         })
-    }
-    fn rx_callback(&self, msg: AppleMboxMsg) -> Result<()> {
-        Ok(())
     }
 }
 
