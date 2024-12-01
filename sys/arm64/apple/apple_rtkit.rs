@@ -39,29 +39,6 @@ use kpi::ofw::XRef;
 use rtkit::{ManagesRTKit, PwrState, RTKit};
 use apple_mbox::Boot;
 
-/*
-for testing new features in rust 1.83
-use kpi::ofw::{CompatData, CompatEntry};
-struct Cfg {
-    version: u32
-}
-static AIC1: Cfg = Cfg {
-    version: 1,
-};
-
-static AIC2: Cfg = Cfg {
-    version: 2,
-};
-
-static COMPAT: CompatData<Cfg, 3> = CompatData::new(|| {
-    [
-        CompatEntry::new(c"apple,aic", &AIC1),
-        CompatEntry::new(c"apple,aic2", &AIC2),
-        CompatEntry::null(),
-    ]
-});
-*/
-
 const CPU_CTRL: u64 = 0x44;
 const CPU_CTRL_RUN: u32 = 1 << 4;
 

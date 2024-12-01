@@ -83,13 +83,10 @@ static AIC2: Cfg = Cfg {
     die_stride: 0x4a00,
 };
 
-static COMPAT: CompatData<Cfg, 3> = CompatData::new(|| {
-    [
-        CompatEntry::new(c"apple,aic", &AIC1),
-        CompatEntry::new(c"apple,aic2", &AIC2),
-        CompatEntry::null(),
-    ]
-});
+static COMPAT: OfwCompatData<Cfg, 2> = OfwCompatData::new([
+    (c"apple,aic", &AIC1),
+    (c"apple,aic2", &AIC2),
+]);
 
 macro_rules! aic_reg {
     (AIC_IPI_SR_EL1) => {
