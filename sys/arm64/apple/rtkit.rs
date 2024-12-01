@@ -20,12 +20,12 @@
 
 extern crate alloc;
 
-use core::ffi::{c_int, c_void};
-use core::mem::MaybeUninit;
-use core::marker::PhantomData;
-use core::ptr::{addr_of_mut, null_mut};
 use core::convert::From;
-use core::sync::atomic::{AtomicU16, Ordering};
+use core::ffi::{c_int, c_void};
+use core::marker::PhantomData;
+use core::mem::MaybeUninit;
+use core::ptr::{addr_of_mut, null_mut};
+use core::sync::atomic::{AtomicPtr, AtomicU16, Ordering};
 use kpi::allocator::NOWAIT;
 use kpi::device::Device;
 use kpi::prelude::*;
@@ -33,7 +33,7 @@ use kpi::taskq;
 use kpi::taskq::Task;
 use kpi::{bindings, enum_c_macros};
 
-use apple_mbox::{AppleMboxMsg, AppleMboxRx, Boot, Intr};
+use apple_mbox::{apple_mbox_driver, AppleMboxMsg, AppleMboxRx, Boot, Intr};
 
 #[repr(u16)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -60,7 +60,7 @@ pub struct RTKit<S = ()> {
     verbose: bool,
     noalloc: bool,
     ep_map: u64,
-    callbacks: [Option<(AppleMboxRx<RTKit>, *mut c_void)>; 32],
+    callbacks: [Option<(AppleMboxRx<RTKit>, AtomicPtr<c_void>)>; 32],
 }
 
 // RTKitTask is a subclass of `struct task`
@@ -72,22 +72,22 @@ struct RTKitTaskFields {
     msg: AppleMboxMsg,
 }
 
-pub trait ManagesRTKit: ManagesSoftc {
-    fn rtkit_for_device<S: SoftcInit>(dev: &mut Device<S>) -> &RTKit<()>;
+pub trait ManagesRTKit: DeviceIf {
+    fn rtkit_for_device<S: SoftcInit>(&self, dev: &mut Device<S>) -> &RTKit<()>;
 
     fn rtkit_init(client: Device) -> Result<RTKit> {
         RTKit::new(client)
     }
 
     fn rtkit_boot(rtkit: &mut RTKit<Boot>) -> Result<()> {
-        //apple_mbox::Driver::set_rx(&mut rtkit.mbox, RTKit::rx_callback, &rtkit.client, Self::rtkit_for_device)
+        //apple_mbox_driver.set_rx(&mut rtkit.mbox, RTKit::rx_callback, &rtkit.client, Self::rtkit_for_device)
         todo!("")
     }
 }
 
 impl RTKit {
     pub fn new(client: Device) -> Result<Self> {
-        let mbox = apple_mbox::Driver::get_mbox(&client)?;
+        let mbox = apple_mbox_driver.get_mbox(&client)?;
         let iop_pwr_state = Sleepable::new(AtomicU16::new(PwrState::Sleep.into()));
         let ap_pwr_state = Sleepable::new(AtomicU16::new(PwrState::Quiesced.into()));
         Ok(Self {
@@ -98,7 +98,7 @@ impl RTKit {
             verbose: false,
             noalloc: false,
             ep_map: 0,
-            callbacks: [None; 32],
+            callbacks: [const { None }; 32],
         })
     }
     fn rx_callback(&self, msg: AppleMboxMsg) -> Result<()> {
@@ -109,7 +109,7 @@ impl RTKit {
 impl RTKit<Boot> {
     pub fn boot(&mut self) -> Result<()> {
         todo!("")
-        //apple_mbox::Driver::set_rx(&mut self.mbox, RTKit::rx_callback, arg)
+        //apple_mbox_driver.set_rx(&mut self.mbox, RTKit::rx_callback, arg)
     }
 
     pub fn set_iop_pwr_state(&self, pwr_state: PwrState) -> Result<()> {
@@ -121,11 +121,12 @@ impl RTKit<Boot> {
 
         // Try setting the power state
         let msg = EpTxMsg::Mgmt(MgmtTxMsg::IopPwrState { pwr_state });
-        apple_mbox::Driver::write_msg(&self.mbox, &msg.as_apple_mbox_msg())?; 
+        apple_mbox_driver.write_msg(&self.mbox, &msg.as_apple_mbox_msg())?;
 
         // If the power state hasn't changed sleep
         if self.iop_pwr_state.load(Ordering::Relaxed) != pwr_state {
-            self.iop_pwr_state.tsleep_in_hz(bindings::PWAIT, c"ioppwr", 1)
+            self.iop_pwr_state
+                .tsleep_in_hz(bindings::PWAIT, c"ioppwr", 1)
         } else {
             Ok(())
         }
@@ -138,7 +139,7 @@ impl RTKit<Boot> {
         }
 
         let msg = EpTxMsg::Mgmt(MgmtTxMsg::ApPwrState { pwr_state });
-        apple_mbox::Driver::write_msg(&self.mbox, &msg.as_apple_mbox_msg())?;
+        apple_mbox_driver.write_msg(&self.mbox, &msg.as_apple_mbox_msg())?;
 
         if self.ap_pwr_state.load(Ordering::Relaxed) != pwr_state {
             self.ap_pwr_state.tsleep_in_hz(bindings::PWAIT, c"appwr", 1)
@@ -174,7 +175,7 @@ fn mbox_send_from_task(ctx: &RTKitTask, msg: EpTxMsg) -> Result<()> {
 }
 
 fn mbox_send(mut mbox: Device<Boot>, msg: EpTxMsg) -> Result<()> {
-    apple_mbox::Driver::write_msg(&mut mbox, &msg.as_apple_mbox_msg())
+    apple_mbox_driver.write_msg(&mut mbox, &msg.as_apple_mbox_msg())
 }
 
 const MSG_TYPE_SHIFT: u64 = 52;

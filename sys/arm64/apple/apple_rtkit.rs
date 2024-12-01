@@ -36,8 +36,31 @@ use kpi::bus::{Register, ResourceSpec};
 use kpi::device::{Device, ProbeRes};
 use kpi::driver;
 use kpi::ofw::XRef;
-use rtkit::{PwrState, RTKit, ManagesRTKit};
+use rtkit::{ManagesRTKit, PwrState, RTKit};
 use apple_mbox::Boot;
+
+/*
+for testing new features in rust 1.83
+use kpi::ofw::{CompatData, CompatEntry};
+struct Cfg {
+    version: u32
+}
+static AIC1: Cfg = Cfg {
+    version: 1,
+};
+
+static AIC2: Cfg = Cfg {
+    version: 2,
+};
+
+static COMPAT: CompatData<Cfg, 3> = CompatData::new(|| {
+    [
+        CompatEntry::new(c"apple,aic", &AIC1),
+        CompatEntry::new(c"apple,aic2", &AIC2),
+        CompatEntry::null(),
+    ]
+});
+*/
 
 const CPU_CTRL: u64 = 0x44;
 const CPU_CTRL_RUN: u32 = 1 << 4;
@@ -48,62 +71,62 @@ const SPEC: [ResourceSpec; 2] = [
     ResourceSpec::new(SYS_RES_MEMORY, 1), /* sram */
 ];
 
-
 #[derive(Debug)]
 pub struct AppleRTKitSoftc<S> {
     mem: UniqueCell<[Register; 2], Boot, S>,
     rtkit: RTKit<S>,
 }
 
-impl ManagesSoftc for Driver {
-    type Softc<S> = AppleRTKitSoftc<S>;
-}
-
 impl ManagesRTKit for Driver {
-    fn rtkit_for_device<S: SoftcInit>(dev: &mut Device<S>) -> &RTKit<()> {
-        &Driver::get_softc(dev).rtkit
+    fn rtkit_for_device<S: SoftcInit>(&self, dev: &mut Device<S>) -> &RTKit<()> {
+        &self.device_get_softc(dev).rtkit
     }
 }
 
 impl DeviceIf for Driver {
-    fn device_probe(dev: &Device) -> Result<ProbeRes> {
-        if !dev.ofw_bus_status_okay() {
+    type Softc<S> = AppleRTKitSoftc<S>;
+
+    fn device_probe(&self, dev: &Device) -> Result<ProbeRes> {
+        if !ofw_bus_status_okay(dev) {
             return Err(ENXIO);
         }
 
-        if !dev.ofw_bus_is_compatible(c"apple,rtk-helper-asc4") {
+        if !ofw_bus_is_compatible(dev, c"apple,rtk-helper-asc4") {
             return Err(ENXIO);
         }
 
-        dev.set_desc(c"Apple RTKit helper");
+        device_set_desc(dev, c"Apple RTKit helper");
 
         Ok(BUS_PROBE_SPECIFIC)
     }
 
-    fn device_attach(dev: &mut Device) -> Result<AttachRes> {
-        let resources = dev.bus_alloc_resources(SPEC)?;
-        let mem = UniqueCell::new(resources.map(|r| r.whole_register()));
+    fn device_attach(&self, dev: &mut Device) -> Result<AttachRes> {
+        let resources = bus_alloc_resources(dev, SPEC)?;
+        let mem = resources.map(|r| r.whole_register());
         let rtkit = RTKit::new(dev.copy_ptr())?;
 
-        let node = dev.ofw_bus_get_node();
-        let xref = node.xref_from_node();
+        let node = ofw_bus_get_node(dev);
+        let xref = OF_xref_from_node(node);
 
-        dev.register_xref(xref);
+        OF_device_register_xref(dev, xref);
 
-        let sc = AppleRTKitSoftc { mem, rtkit };
-        let res = Driver::init_softc(dev, sc);
+        let sc = AppleRTKitSoftc {
+            mem: UniqueCell::new(mem),
+            rtkit,
+        };
+        let res = self.device_init_softc(dev, sc);
 
         Ok(res)
     }
 
-    fn device_detach(dev: &mut Device) -> Result<()> {
+    fn device_detach(&self, dev: &mut Device) -> Result<()> {
         unreachable!("device cannot be detached")
     }
 }
 
 impl Driver {
     fn boot(&self, dev: &mut Device<Boot>) -> Result<()> {
-        let mem = Driver::get_softc_with_state(dev).mem.get_mut();
+        let mem = self.device_get_softc_with_state(dev).mem.get_mut();
         let ctrl = mem[0].read_4(CPU_CTRL);
         mem[0].write_4(CPU_CTRL, ctrl | CPU_CTRL_RUN);
 
@@ -119,7 +142,7 @@ impl Driver {
 
 #[no_mangle]
 unsafe extern "C" fn apple_rtkit_boot(helper: XRef) -> c_int {
-    let mut dev = unsafe { helper.device_from_xref().unwrap().assume_state() };
+    let mut dev = unsafe { OF_device_from_xref(helper).unwrap().assume_state() };
     match apple_rtkit_driver.boot(&mut dev) {
         Ok(_) => 0,
         Err(e) => e.as_c_type(),

@@ -19,8 +19,8 @@
 #![no_std]
 #![feature(concat_idents)]
 
-use core::mem::transmute;
 use core::ffi::c_void;
+use core::mem::transmute;
 use core::ops::DerefMut;
 use core::ptr::null_mut;
 use core::sync::atomic::{AtomicPtr, Ordering};
@@ -53,7 +53,7 @@ macro_rules! device_state {
         pub struct $state(());
         unsafe impl UniqueOwner for $state {}
         impl SoftcInit for $state {}
-    }
+    };
 }
 
 device_state!(Boot);
@@ -76,7 +76,7 @@ pub type TypeErasedAppleMboxRx = fn(*mut c_void, AppleMboxMsg) -> Result<()>;
 #[derive(Debug)]
 pub struct AppleMboxSoftc<S = ()> {
     dev: Device,
-    irq: UniqueCell<Option<Resource>, Boot, S>,
+    irq: UniqueCell<Resource, Boot, S>,
     intr_softc: UniqueCell<IntrSoftc, Intr, S>,
     write_msg_softc: SpinLock<WriteMsgSoftc>,
     callback: AtomicPtr<TypeErasedAppleMboxRx>,
@@ -96,31 +96,29 @@ struct WriteMsgSoftc {
     a2i_send: A2ISend,
 }
 
-impl ManagesSoftc for Driver {
-    type Softc<S> = AppleMboxSoftc<S>;
-}
-
 impl DeviceIf for Driver {
-    fn device_probe(dev: &Device) -> Result<ProbeRes> {
-        if !dev.ofw_bus_status_okay() {
+    type Softc<S> = AppleMboxSoftc<S>;
+
+    fn device_probe(&self, dev: &Device) -> Result<ProbeRes> {
+        if !ofw_bus_status_okay(dev) {
             return Err(ENXIO);
         }
 
-        if !dev.ofw_bus_is_compatible(c"apple,asc-mailbox-v4") {
+        if !ofw_bus_is_compatible(dev, c"apple,asc-mailbox-v4") {
             return Err(ENXIO);
         }
 
-        dev.set_desc(c"Apple Mailbox");
+        device_set_desc(dev, c"Apple Mailbox");
 
         Ok(BUS_PROBE_SPECIFIC)
     }
 
-    fn device_attach(dev: &mut Device) -> Result<AttachRes> {
-        let node = dev.ofw_bus_get_node();
+    fn device_attach(&self, dev: &mut Device) -> Result<AttachRes> {
+        let node = ofw_bus_get_node(dev);
 
-        let rid = node.ofw_bus_find_string_index(c"interrupt-names", c"recv-not-empty")?;
-        let irq = UniqueCell::new(Some(dev.bus_alloc_resource(SYS_RES_IRQ, rid)?));
-        let mut mem = dev.bus_alloc_resource(SYS_RES_MEMORY, 0)?;
+        let rid = ofw_bus_find_string_index(node, c"interrupt-names", c"recv-not-empty")?;
+        let irq = bus_alloc_resource(dev, SYS_RES_IRQ, rid)?;
+        let mut mem = bus_alloc_resource(dev, SYS_RES_MEMORY, 0)?;
         // generic parameters on take_register are inferred from the types of the result which are
         // determined by the definitions in AppleMboxSoftc
         let a2i_ctrl = mem.take_register()?;
@@ -128,29 +126,31 @@ impl DeviceIf for Driver {
         let i2a_ctrl = mem.take_register()?;
         let i2a_recv = mem.take_register()?;
 
-        let xref = node.xref_from_node();
-        dev.register_xref(xref);
+        let xref = OF_xref_from_node(node);
+        OF_device_register_xref(dev, xref);
 
-        let res = Driver::init_softc(dev, AppleMboxSoftc {
-            dev: dev.copy_ptr(),
-            irq,
-            intr_softc: UniqueCell::new(IntrSoftc {
-                i2a_ctrl,
-                i2a_recv,
-            }),
-            write_msg_softc: SpinLock::new(WriteMsgSoftc {
-                a2i_ctrl,
-                a2i_send,
-            }, c"", None, NOWAIT),
-            callback: AtomicPtr::new(core::ptr::null_mut()),
-            arg: AtomicPtr::new(core::ptr::null_mut()),
-            intrhand: FFICell::zeroed(),
-        });
+        let res = self.device_init_softc(
+            dev,
+            AppleMboxSoftc {
+                dev: dev.copy_ptr(),
+                irq: UniqueCell::new(irq),
+                intr_softc: UniqueCell::new(IntrSoftc { i2a_ctrl, i2a_recv }),
+                write_msg_softc: SpinLock::new(
+                    WriteMsgSoftc { a2i_ctrl, a2i_send },
+                    c"",
+                    None,
+                    NOWAIT,
+                ),
+                callback: AtomicPtr::new(core::ptr::null_mut()),
+                arg: AtomicPtr::new(core::ptr::null_mut()),
+                intrhand: FFICell::zeroed(),
+            },
+        );
 
         Ok(res)
     }
 
-    fn device_detach(dev: &mut Device) -> Result<()> {
+    fn device_detach(&self, dev: &mut Device) -> Result<()> {
         unreachable!("device cannot be detached")
     }
 }
@@ -158,14 +158,14 @@ impl DeviceIf for Driver {
 impl Driver {
     // Get a mailbox device_t from the client's mboxes devicetree property. The mailbox must've
     // previously registered its devicetree node xref which happens when this driver attaches.
-    pub fn get_mbox(client: &Device) -> Result<Device> {
-        let client_node = client.ofw_bus_get_node();
-        let mbox_ref = client_node.get_xref_prop(c"mboxes")?;
-        mbox_ref.device_from_xref()
+    pub fn get_mbox(&self, client: &Device) -> Result<Device> {
+        let client_node = ofw_bus_get_node(client);
+        let mbox_xref = OF_getencprop_as_xref(client_node, c"mboxes")?;
+        OF_device_from_xref(mbox_xref)
     }
 
-    pub fn set_rx<T>(mbox: &mut Device<Boot>, func: AppleMboxRx<T>, arg: &T) -> Result<()> {
-        let sc = Driver::get_softc_with_state(mbox);
+    pub fn set_rx<T>(&self, mbox: &mut Device<Boot>, func: AppleMboxRx<T>, arg: &T) -> Result<()> {
+        let sc = self.device_get_softc_with_state(mbox);
 
         let func = unsafe { transmute(func) };
         sc.callback.store(func, Ordering::Relaxed);
@@ -173,11 +173,11 @@ impl Driver {
         let arg = arg as *const T as *const c_void as *mut c_void;
         sc.arg.store(arg, Ordering::Relaxed);
 
-        let irq = sc.irq.get_mut().take().ok_or(EDOOFUS)?;
+        let irq = sc.irq.get_mut();
         let flags = INTR_MPSAFE | INTR_TYPE_MISC;
         let intrhand = sc.intrhand.as_ptr();
 
-        Driver::bus_setup_intr(mbox, irq, flags, None, Some(Self::intr), intrhand)?;
+        self.bus_setup_intr(mbox, irq, flags, None, Some(Self::intr), intrhand)?;
         Ok(())
     }
 
@@ -203,9 +203,8 @@ impl Driver {
         }
     }
 
-
-    pub fn write_msg(mbox: &Device<Boot>, msg: &AppleMboxMsg) -> Result<()> {
-        let mut write_msg_sc = Driver::get_softc(mbox).write_msg_softc.lock();
+    pub fn write_msg(&self, mbox: &Device<Boot>, msg: &AppleMboxMsg) -> Result<()> {
+        let mut write_msg_sc = self.device_get_softc(mbox).write_msg_softc.lock();
         let mut ctrl = &mut write_msg_sc.a2i_ctrl;
         if (ctrl.read_4(0) & MBOX_A2I_CTRL_FULL) != 0 {
             return Err(EBUSY);
