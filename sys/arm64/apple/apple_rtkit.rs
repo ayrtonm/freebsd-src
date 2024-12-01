@@ -59,9 +59,9 @@ impl ManagesSoftc for Driver {
     type Softc<S> = AppleRTKitSoftc<S>;
 }
 
-impl<S> ManagesRTKit<S> for Driver {
-    fn get_rtkit(sc: &Self::Softc<S>) -> &RTKit<S> {
-        &sc.rtkit
+impl ManagesRTKit for Driver {
+    fn rtkit_for_device<S: SoftcInit>(dev: &mut Device<S>) -> &RTKit<()> {
+        &Driver::get_softc(dev).rtkit
     }
 }
 
@@ -103,7 +103,7 @@ impl DeviceIf for Driver {
 
 impl Driver {
     fn boot(&self, dev: &mut Device<Boot>) -> Result<()> {
-        let mem = Driver::get_softc_mut(dev).mem.get_mut();
+        let mem = Driver::get_softc_with_state(dev).mem.get_mut();
         let ctrl = mem[0].read_4(CPU_CTRL);
         mem[0].write_4(CPU_CTRL, ctrl | CPU_CTRL_RUN);
 

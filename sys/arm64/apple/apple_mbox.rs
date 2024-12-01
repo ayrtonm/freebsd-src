@@ -70,7 +70,8 @@ pub struct AppleMboxMsg {
 // This callback type's callsites are in rust so it doesn't need to be extern "C". If it were in C
 // it would need to go through the KPI crate which would enforce the extern "C" to avoid a compiler
 // error.
-pub type AppleMboxRx = fn(Device, AppleMboxMsg) -> Result<()>;
+pub type AppleMboxRx<T> = fn(T, AppleMboxMsg) -> Result<()>;
+pub type TypeErasedAppleMboxRx = fn(*mut c_void, AppleMboxMsg) -> Result<()>;
 
 #[derive(Debug)]
 pub struct AppleMboxSoftc<S = ()> {
@@ -78,8 +79,8 @@ pub struct AppleMboxSoftc<S = ()> {
     irq: UniqueCell<Option<Resource>, Boot, S>,
     intr_softc: UniqueCell<IntrSoftc, Intr, S>,
     write_msg_softc: SpinLock<WriteMsgSoftc>,
-    callback: AtomicPtr<AppleMboxRx>,
-    arg: AtomicPtr<bindings::_device>,
+    callback: AtomicPtr<TypeErasedAppleMboxRx>,
+    arg: AtomicPtr<c_void>,
     intrhand: FFICell<*mut c_void>,
 }
 
@@ -163,13 +164,14 @@ impl Driver {
         mbox_ref.device_from_xref()
     }
 
-    pub fn set_rx(mbox: &mut Device<Boot>, func: AppleMboxRx, client: Device) -> Result<()> {
-        let sc = Driver::get_softc_mut(mbox);
+    pub fn set_rx<T>(mbox: &mut Device<Boot>, func: AppleMboxRx<T>, arg: &T) -> Result<()> {
+        let sc = Driver::get_softc_with_state(mbox);
 
         let func = unsafe { transmute(func) };
         sc.callback.store(func, Ordering::Relaxed);
 
-        sc.arg.store(client.as_ptr(), Ordering::Relaxed);
+        let arg = arg as *const T as *const c_void as *mut c_void;
+        sc.arg.store(arg, Ordering::Relaxed);
 
         let irq = sc.irq.get_mut().take().ok_or(EDOOFUS)?;
         let flags = INTR_MPSAFE | INTR_TYPE_MISC;
@@ -193,7 +195,7 @@ impl Driver {
             let arg = sc.arg.load(Ordering::Relaxed);
             if !func.is_null() {
                 unsafe {
-                    (*func)(Device::new(arg), msg).unwrap();
+                    (*func)(arg, msg).unwrap();
                 }
             } else {
                 dprintln!(sc.dev, "Received RTKit msg w/o callback installed\n");

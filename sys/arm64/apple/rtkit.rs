@@ -60,7 +60,7 @@ pub struct RTKit<S = ()> {
     verbose: bool,
     noalloc: bool,
     ep_map: u64,
-    callbacks: [Option<(AppleMboxRx, *mut c_void)>; 32],
+    callbacks: [Option<(AppleMboxRx<RTKit>, *mut c_void)>; 32],
 }
 
 // RTKitTask is a subclass of `struct task`
@@ -68,12 +68,21 @@ type RTKitTask = SubClass<Task, RTKitTaskFields>;
 
 #[derive(Debug)]
 struct RTKitTaskFields {
-    rtkit: *mut RTKit,
+    //rtkit: *mut RTKit,
     msg: AppleMboxMsg,
 }
 
-pub trait ManagesRTKit<S>: ManagesSoftc {
-    fn get_rtkit(sc: &Self::Softc<S>) -> &RTKit<S>;
+pub trait ManagesRTKit: ManagesSoftc {
+    fn rtkit_for_device<S: SoftcInit>(dev: &mut Device<S>) -> &RTKit<()>;
+
+    fn rtkit_init(client: Device) -> Result<RTKit> {
+        RTKit::new(client)
+    }
+
+    fn rtkit_boot(rtkit: &mut RTKit<Boot>) -> Result<()> {
+        //apple_mbox::Driver::set_rx(&mut rtkit.mbox, RTKit::rx_callback, &rtkit.client, Self::rtkit_for_device)
+        todo!("")
+    }
 }
 
 impl RTKit {
@@ -92,15 +101,15 @@ impl RTKit {
             callbacks: [None; 32],
         })
     }
-    fn rx_callback(client: Device, msg: AppleMboxMsg) -> Result<()> {
+    fn rx_callback(&self, msg: AppleMboxMsg) -> Result<()> {
         Ok(())
     }
 }
 
 impl RTKit<Boot> {
     pub fn boot(&mut self) -> Result<()> {
-        let arg = self.client.copy_ptr();
-        apple_mbox::Driver::set_rx(&mut self.mbox, RTKit::rx_callback, arg)
+        todo!("")
+        //apple_mbox::Driver::set_rx(&mut self.mbox, RTKit::rx_callback, arg)
     }
 
     pub fn set_iop_pwr_state(&self, pwr_state: PwrState) -> Result<()> {
@@ -163,6 +172,7 @@ fn mbox_send_from_task(ctx: &RTKitTask, msg: EpTxMsg) -> Result<()> {
     */
     todo!("")
 }
+
 fn mbox_send(mut mbox: Device<Boot>, msg: EpTxMsg) -> Result<()> {
     apple_mbox::Driver::write_msg(&mut mbox, &msg.as_apple_mbox_msg())
 }
