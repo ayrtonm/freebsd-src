@@ -164,13 +164,13 @@ impl AppleMboxDriver {
         OF_device_from_xref(mbox_xref)
     }
 
-    pub fn set_rx<D: DeviceIf>(&self, mbox: &mut Device<Boot>, func: AppleMboxRx<D::Softc<Intr>>, client: Driver<D>) -> Result<()> {
+    pub fn set_rx<D: DeviceIf>(&self, mbox: &mut Device<Boot>, client: &Device, driver: &D, func: AppleMboxRx<D::Softc<Intr>>) -> Result<()> {
         let sc = self.device_get_softc_with_state(mbox);
 
         let func = unsafe { transmute(func) };
         sc.callback.store(func, Ordering::Relaxed);
 
-        let arg = client.driver.get_softc(client.dev) as *const D::Softc<Intr> as *const c_void as *mut c_void;
+        let arg = driver.device_get_softc(client) as *const D::Softc<()> as *const c_void as *mut c_void;
         sc.arg.store(arg, Ordering::Relaxed);
 
         let irq = sc.irq.get_mut();

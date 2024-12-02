@@ -55,9 +55,9 @@ pub struct AppleRTKitSoftc<S> {
 }
 
 impl ManagesRTKit for AppleRTKitDriver {
-    //fn rtkit_for_device<S: SoftcInit>(&self, dev: &mut Device<S>) -> &RTKit<()> {
-    //    &self.device_get_softc(dev).rtkit
-    //}
+    fn rtkit_from_sc<S>(sc: &Self::Softc<S>) -> &RTKit<S> {
+        &sc.rtkit
+    }
 }
 
 impl DeviceIf for AppleRTKitDriver {
@@ -103,16 +103,15 @@ impl DeviceIf for AppleRTKitDriver {
 
 impl AppleRTKitDriver {
     fn boot(&self, dev: &mut Device<Boot>) -> Result<()> {
-        let mem = self.device_get_softc_with_state(dev).mem.get_mut();
+        let sc = self.device_get_softc_with_state(dev);
+        let mem = sc.mem.get_mut();
         let ctrl = mem[0].read_4(CPU_CTRL);
         mem[0].write_4(CPU_CTRL, ctrl | CPU_CTRL_RUN);
 
-        //sc.rtkit.boot()?;
+        self.rtkit_boot(dev)?;
 
-        //let sc = Driver::get_softc_mut(dev).get();
-
-        //sc.rtkit.set_iop_pwr_state(PwrState::On)?;
-        //sc.rtkit.set_ap_pwr_state(PwrState::On)?;
+        sc.rtkit.set_iop_pwr_state(PwrState::On)?;
+        sc.rtkit.set_ap_pwr_state(PwrState::On)?;
         Ok(())
     }
 }
