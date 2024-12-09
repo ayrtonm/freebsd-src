@@ -47,18 +47,6 @@ type A2ISend = Register<MBOX_A2I_SEND0, 0x10>;
 type I2ACtrl = Register<MBOX_I2A_CTRL, 4>;
 type I2ARecv = Register<MBOX_I2A_RECV0, 0x10>;
 
-macro_rules! device_state {
-    ($state:ident) => {
-        #[derive(Debug)]
-        pub struct $state(());
-        unsafe impl UniqueOwner for $state {}
-        impl SoftcInit for $state {}
-    };
-}
-
-device_state!(Boot);
-device_state!(Intr);
-
 // This needs repr(C) while it remains shared with C code
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -74,10 +62,10 @@ pub type AppleMboxRx<T> = fn(&T, AppleMboxMsg) -> Result<()>;
 pub type TypeErasedAppleMboxRx = fn(*mut c_void, AppleMboxMsg) -> Result<()>;
 
 #[derive(Debug)]
-pub struct AppleMboxSoftc<S = ()> {
+pub struct AppleMboxSoftc {
     dev: Device,
-    irq: UniqueCell<Resource, Boot, S>,
-    intr_softc: UniqueCell<IntrSoftc, Intr, S>,
+    irq: UniqueCell<Resource>,
+    intr_softc: UniqueCell<IntrSoftc>,
     write_msg_softc: SpinLock<WriteMsgSoftc>,
     callback: AtomicPtr<TypeErasedAppleMboxRx>,
     arg: AtomicPtr<c_void>,
@@ -97,7 +85,7 @@ struct WriteMsgSoftc {
 }
 
 impl DeviceIf for AppleMboxDriver {
-    type Softc<S> = AppleMboxSoftc<S>;
+    type Softc = AppleMboxSoftc;
 
     fn device_probe(&self, dev: &Device) -> Result<ProbeRes> {
         if !ofw_bus_status_okay(dev) {
@@ -129,10 +117,10 @@ impl DeviceIf for AppleMboxDriver {
         let xref = OF_xref_from_node(node);
         OF_device_register_xref(dev, xref);
 
-        let res = self.device_init_softc(
+        let res = self.init_softc(
             dev,
             AppleMboxSoftc {
-                dev: dev.copy_ptr(),
+                dev: dev.clone(),
                 irq: UniqueCell::new(irq),
                 intr_softc: UniqueCell::new(IntrSoftc { i2a_ctrl, i2a_recv }),
                 write_msg_softc: SpinLock::new(
@@ -164,13 +152,13 @@ impl AppleMboxDriver {
         OF_device_from_xref(mbox_xref)
     }
 
-    pub fn set_rx<D: DeviceIf>(&self, mbox: &mut Device<Boot>, client: &Device, driver: &D, func: AppleMboxRx<D::Softc<Intr>>) -> Result<()> {
-        let sc = self.device_get_softc_with_state(mbox);
+    pub fn set_rx<D: DeviceIf>(&self, mbox: &mut Device, client: &Device, driver: &D, func: AppleMboxRx<D::Softc>) -> Result<()> {
+        let sc: AppleMboxSoftc = todo!("");//self.get_softc_with_state(mbox);
 
         let func = unsafe { transmute(func) };
         sc.callback.store(func, Ordering::Relaxed);
 
-        let arg = driver.device_get_softc(client) as *const D::Softc<()> as *const c_void as *mut c_void;
+        let arg = driver.get_softc(client) as *const D::Softc as *const c_void as *mut c_void;
         sc.arg.store(arg, Ordering::Relaxed);
 
         let irq = sc.irq.get_mut();
@@ -181,7 +169,7 @@ impl AppleMboxDriver {
         Ok(())
     }
 
-    extern "C" fn intr(sc: &AppleMboxSoftc<Intr>) {
+    extern "C" fn intr(sc: &AppleMboxSoftc) {
         let intr_sc = sc.intr_softc.get_mut();
 
         let mut ctrl = &mut intr_sc.i2a_ctrl;
@@ -203,8 +191,8 @@ impl AppleMboxDriver {
         }
     }
 
-    pub fn write_msg(&self, mbox: &Device<Boot>, msg: &AppleMboxMsg) -> Result<()> {
-        let mut write_msg_sc = self.device_get_softc(mbox).write_msg_softc.lock();
+    pub fn write_msg(&self, mbox: &Device, msg: &AppleMboxMsg) -> Result<()> {
+        let mut write_msg_sc = self.get_softc(mbox).write_msg_softc.lock();
         let mut ctrl = &mut write_msg_sc.a2i_ctrl;
         if (ctrl.read_4(0) & MBOX_A2I_CTRL_FULL) != 0 {
             return Err(EBUSY);

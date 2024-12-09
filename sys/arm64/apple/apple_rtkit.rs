@@ -37,7 +37,6 @@ use kpi::device::{Device, ProbeRes};
 use kpi::driver;
 use kpi::ofw::XRef;
 use rtkit::{ManagesRTKit, PwrState, RTKit};
-use apple_mbox::Boot;
 
 const CPU_CTRL: u64 = 0x44;
 const CPU_CTRL_RUN: u32 = 1 << 4;
@@ -49,19 +48,19 @@ const SPEC: [ResourceSpec; 2] = [
 ];
 
 #[derive(Debug)]
-pub struct AppleRTKitSoftc<S> {
-    mem: UniqueCell<[Register; 2], Boot, S>,
-    rtkit: RTKit<S>,
+pub struct AppleRTKitSoftc {
+    mem: UniqueCell<[Register; 2]>,
+    rtkit: RTKit,
 }
 
 impl ManagesRTKit for AppleRTKitDriver {
-    fn rtkit_from_sc<S>(sc: &Self::Softc<S>) -> &RTKit<S> {
+    fn rtkit_from_sc(sc: &Self::Softc) -> &RTKit {
         &sc.rtkit
     }
 }
 
 impl DeviceIf for AppleRTKitDriver {
-    type Softc<S> = AppleRTKitSoftc<S>;
+    type Softc = AppleRTKitSoftc;
 
     fn device_probe(&self, dev: &Device) -> Result<ProbeRes> {
         if !ofw_bus_status_okay(dev) {
@@ -80,7 +79,7 @@ impl DeviceIf for AppleRTKitDriver {
     fn device_attach(&self, dev: &mut Device) -> Result<AttachRes> {
         let resources = bus_alloc_resources(dev, SPEC)?;
         let mem = resources.map(|r| r.whole_register());
-        let rtkit = RTKit::new(dev.copy_ptr())?;
+        let rtkit = RTKit::new(dev.clone())?;
 
         let node = ofw_bus_get_node(dev);
         let xref = OF_xref_from_node(node);
@@ -91,7 +90,7 @@ impl DeviceIf for AppleRTKitDriver {
             mem: UniqueCell::new(mem),
             rtkit,
         };
-        let res = self.device_init_softc(dev, sc);
+        let res = self.init_softc(dev, sc);
 
         Ok(res)
     }
@@ -102,8 +101,8 @@ impl DeviceIf for AppleRTKitDriver {
 }
 
 impl AppleRTKitDriver {
-    fn boot(&self, dev: &mut Device<Boot>) -> Result<()> {
-        let sc = self.device_get_softc_with_state(dev);
+    fn boot(&self, dev: &mut Device) -> Result<()> {
+        let sc: &AppleRTKitSoftc = todo!("");//self.get_softc_with_state(dev);
         let mem = sc.mem.get_mut();
         let ctrl = mem[0].read_4(CPU_CTRL);
         mem[0].write_4(CPU_CTRL, ctrl | CPU_CTRL_RUN);
@@ -118,7 +117,7 @@ impl AppleRTKitDriver {
 
 #[no_mangle]
 unsafe extern "C" fn apple_rtkit_boot(helper: XRef) -> c_int {
-    let mut dev = unsafe { OF_device_from_xref(helper).unwrap().assume_state() };
+    let mut dev = OF_device_from_xref(helper).unwrap();
     match apple_rtkit_driver.boot(&mut dev) {
         Ok(_) => 0,
         Err(e) => e.as_c_type(),
