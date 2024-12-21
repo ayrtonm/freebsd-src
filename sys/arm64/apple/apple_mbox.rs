@@ -84,10 +84,12 @@ struct WriteMsgSoftc {
     a2i_send: A2ISend,
 }
 
-impl DeviceIf for AppleMboxDriver {
+impl DriverIf for AppleMboxDriver {
     type Softc = AppleMboxSoftc;
+}
 
-    fn device_probe(&self, dev: &Device) -> Result<ProbeRes> {
+impl AppleMboxDriver {
+    pub fn apple_mbox_probe(&self, dev: Device) -> Result<ProbeRes> {
         if !ofw_bus_status_okay(dev) {
             return Err(ENXIO);
         }
@@ -101,7 +103,7 @@ impl DeviceIf for AppleMboxDriver {
         Ok(BUS_PROBE_SPECIFIC)
     }
 
-    fn device_attach(&self, dev: &mut Device) -> Result<AttachRes> {
+    pub fn apple_mbox_attach(&self, dev: Device) -> Result<AttachRes> {
         let node = ofw_bus_get_node(dev);
 
         let rid = ofw_bus_find_string_index(node, c"interrupt-names", c"recv-not-empty")?;
@@ -138,7 +140,7 @@ impl DeviceIf for AppleMboxDriver {
         Ok(res)
     }
 
-    fn device_detach(&self, dev: &mut Device) -> Result<()> {
+    pub fn apple_mbox_detach(&self, dev: Device) -> Result<()> {
         unreachable!("device cannot be detached")
     }
 }
@@ -146,13 +148,13 @@ impl DeviceIf for AppleMboxDriver {
 impl AppleMboxDriver {
     // Get a mailbox device_t from the client's mboxes devicetree property. The mailbox must've
     // previously registered its devicetree node xref which happens when this driver attaches.
-    pub fn get_mbox(&self, client: &Device) -> Result<Device> {
+    pub fn get_mbox(&self, client: Device) -> Result<Device> {
         let client_node = ofw_bus_get_node(client);
         let mbox_xref = OF_getencprop_as_xref(client_node, c"mboxes")?;
         OF_device_from_xref(mbox_xref)
     }
 
-    pub fn set_rx<D: DeviceIf>(&self, mbox: &mut Device, client: &Device, driver: &D, func: AppleMboxRx<D::Softc>) -> Result<()> {
+    pub fn set_rx<D: DriverIf>(&self, mbox: Device, client: Device, driver: &D, func: AppleMboxRx<D::Softc>) -> Result<()> {
         let sc: AppleMboxSoftc = todo!("");//self.get_softc_with_state(mbox);
 
         let func = unsafe { transmute(func) };
@@ -191,7 +193,7 @@ impl AppleMboxDriver {
         }
     }
 
-    pub fn write_msg(&self, mbox: &Device, msg: &AppleMboxMsg) -> Result<()> {
+    pub fn write_msg(&self, mbox: Device, msg: &AppleMboxMsg) -> Result<()> {
         let mut write_msg_sc = self.get_softc(mbox).write_msg_softc.lock();
         let mut ctrl = &mut write_msg_sc.a2i_ctrl;
         if (ctrl.read_4(0) & MBOX_A2I_CTRL_FULL) != 0 {
@@ -207,5 +209,5 @@ impl AppleMboxDriver {
 driver!(apple_mbox_driver, c"mbox", AppleMboxDriver, apple_mbox_methods,
     device_probe apple_mbox_probe,
     device_attach apple_mbox_attach,
-    device_detach apple_mbox_detach
+    device_detach apple_mbox_detach,
 );

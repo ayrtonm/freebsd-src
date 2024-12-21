@@ -35,7 +35,7 @@ use core::ffi::c_int;
 use kpi::bus::{Register, ResourceSpec};
 use kpi::device::{Device, ProbeRes};
 use kpi::driver;
-use kpi::ofw::XRef;
+use kpi::ofw::{XRef, Node};
 use rtkit::{ManagesRTKit, PwrState, RTKit};
 
 const CPU_CTRL: u64 = 0x44;
@@ -59,10 +59,12 @@ impl ManagesRTKit for AppleRTKitDriver {
     }
 }
 
-impl DeviceIf for AppleRTKitDriver {
+impl DriverIf for AppleRTKitDriver {
     type Softc = AppleRTKitSoftc;
+}
 
-    fn device_probe(&self, dev: &Device) -> Result<ProbeRes> {
+impl AppleRTKitDriver {
+    pub fn apple_rtkit_probe(&self, dev: Device) -> Result<ProbeRes> {
         if !ofw_bus_status_okay(dev) {
             return Err(ENXIO);
         }
@@ -76,7 +78,7 @@ impl DeviceIf for AppleRTKitDriver {
         Ok(BUS_PROBE_SPECIFIC)
     }
 
-    fn device_attach(&self, dev: &mut Device) -> Result<AttachRes> {
+    pub fn apple_rtkit_attach(&self, dev: Device) -> Result<AttachRes> {
         let resources = bus_alloc_resources(dev, SPEC)?;
         let mem = resources.map(|r| r.whole_register());
         let rtkit = RTKit::new(dev.clone())?;
@@ -95,14 +97,15 @@ impl DeviceIf for AppleRTKitDriver {
         Ok(res)
     }
 
-    fn device_detach(&self, dev: &mut Device) -> Result<()> {
+    pub fn apple_rtkit_detach(&self, dev: Device) -> Result<()> {
         unreachable!("device cannot be detached")
     }
 }
 
 impl AppleRTKitDriver {
-    fn boot(&self, dev: &mut Device) -> Result<()> {
-        let sc: &AppleRTKitSoftc = todo!("");//self.get_softc_with_state(dev);
+    fn apple_rtkit_boot(&self, helper: XRef) -> Result<()> {
+        let mut dev = OF_device_from_xref(helper)?;
+        let sc = self.get_softc(dev);
         let mem = sc.mem.get_mut();
         let ctrl = mem[0].read_4(CPU_CTRL);
         mem[0].write_4(CPU_CTRL, ctrl | CPU_CTRL_RUN);
@@ -115,17 +118,21 @@ impl AppleRTKitDriver {
     }
 }
 
-#[no_mangle]
-unsafe extern "C" fn apple_rtkit_boot(helper: XRef) -> c_int {
-    let mut dev = OF_device_from_xref(helper).unwrap();
-    match apple_rtkit_driver.boot(&mut dev) {
-        Ok(_) => 0,
-        Err(e) => e.as_c_type(),
-    }
-}
+//#[no_mangle]
+//unsafe extern "C" fn apple_rtkit_boot(helper: XRef) -> c_int {
+//    let mut dev = OF_device_from_xref(helper).unwrap();
+//    match apple_rtkit_driver.apple_rtkit_boot(dev) {
+//        Ok(_) => 0,
+//        Err(e) => e.as_c_type(),
+//    }
+//}
 
 driver!(apple_rtkit_driver, c"apple_rtkit", AppleRTKitDriver, apple_rtkit_methods,
     device_probe apple_rtkit_probe,
     device_attach apple_rtkit_attach,
-    device_detach apple_rtkit_detach
+    device_detach apple_rtkit_detach,
+    {
+        int apple_rtkit_boot(phandle_t helper);
+    }
 );
+    //fn apple_rtkit_device_probe(dev: device_t) -> int;

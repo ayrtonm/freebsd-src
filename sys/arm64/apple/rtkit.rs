@@ -54,7 +54,7 @@ impl Into<u16> for PwrState {
 #[derive(Debug)]
 pub struct RTKit {
     client: Device,
-    mbox: SpinLock<Device>,
+    mbox: Device,
 
     iop_pwr_state: Sleepable<AtomicU16>,
     ap_pwr_state: Sleepable<AtomicU16>,
@@ -73,14 +73,14 @@ struct RTKitTaskFields {
     msg: AppleMboxMsg,
 }
 
-pub trait ManagesRTKit: DeviceIf {
+pub trait ManagesRTKit: DriverIf {
     fn rtkit_from_sc(sc: &Self::Softc) -> &RTKit;
 
-    fn rtkit_boot(&self, client: &mut Device) -> Result<()> {
+    fn rtkit_boot(&self, client: Device) -> Result<()> {
         let sc: &Self::Softc = todo!("");//self.get_softc_with_state(client);
         let rtkit = Self::rtkit_from_sc(sc);
-        let mut mbox = rtkit.mbox.lock();
-        apple_mbox_driver.set_rx(&mut *mbox, &rtkit.client, self, Self::rx_callback)?;
+        //let mut mbox = rtkit.mbox.lock();
+        apple_mbox_driver.set_rx(rtkit.mbox, rtkit.client, self, Self::rx_callback)?;
         Ok(())
     }
 
@@ -93,12 +93,12 @@ pub trait ManagesRTKit: DeviceIf {
 
 impl RTKit {
     pub fn new(client: Device) -> Result<Self> {
-        let mbox = apple_mbox_driver.get_mbox(&client)?;
+        let mbox = apple_mbox_driver.get_mbox(client)?;
         let iop_pwr_state = Sleepable::new(AtomicU16::new(PwrState::Sleep.into()));
         let ap_pwr_state = Sleepable::new(AtomicU16::new(PwrState::Quiesced.into()));
         Ok(Self {
             client,
-            mbox: SpinLock::new(mbox, c"", None, NOWAIT),
+            mbox,//: SpinLock::new(mbox, c"", None, NOWAIT),
             iop_pwr_state,
             ap_pwr_state,
             verbose: false,
@@ -119,8 +119,8 @@ impl RTKit {
 
         // Try setting the power state
         let msg = EpTxMsg::Mgmt(MgmtTxMsg::IopPwrState { pwr_state });
-        let mut mbox = self.mbox.lock();
-        apple_mbox_driver.write_msg(&mut *mbox, &msg.as_apple_mbox_msg())?;
+        //let mut mbox = self.mbox.lock();
+        apple_mbox_driver.write_msg(self.mbox, &msg.as_apple_mbox_msg())?;
 
         // If the power state hasn't changed sleep
         if self.iop_pwr_state.load(Ordering::Relaxed) != pwr_state {
@@ -138,8 +138,8 @@ impl RTKit {
         }
 
         let msg = EpTxMsg::Mgmt(MgmtTxMsg::ApPwrState { pwr_state });
-        let mut mbox = self.mbox.lock();
-        apple_mbox_driver.write_msg(&mut *mbox, &msg.as_apple_mbox_msg())?;
+        //let mut mbox = self.mbox.lock();
+        apple_mbox_driver.write_msg(self.mbox, &msg.as_apple_mbox_msg())?;
 
         if self.ap_pwr_state.load(Ordering::Relaxed) != pwr_state {
             self.ap_pwr_state.tsleep_in_hz(bindings::PWAIT, c"appwr", 1)
@@ -174,8 +174,8 @@ fn mbox_send_from_task(ctx: &RTKitTask, msg: EpTxMsg) -> Result<()> {
     todo!("")
 }
 
-fn mbox_send(mut mbox: Device, msg: EpTxMsg) -> Result<()> {
-    apple_mbox_driver.write_msg(&mbox, &msg.as_apple_mbox_msg())
+fn mbox_send(mbox: Device, msg: EpTxMsg) -> Result<()> {
+    apple_mbox_driver.write_msg(mbox, &msg.as_apple_mbox_msg())
 }
 
 const MSG_TYPE_SHIFT: u64 = 52;
