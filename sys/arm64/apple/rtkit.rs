@@ -32,6 +32,8 @@ use kpi::prelude::*;
 use kpi::taskq;
 use kpi::taskq::Task;
 use kpi::sync::SpinLock;
+use kpi::cell::SubClass;
+use kpi::sleep::Sleepable;
 use kpi::{bindings, enum_c_macros};
 
 use apple_mbox::{apple_mbox_driver, AppleMboxMsg, AppleMboxRx};

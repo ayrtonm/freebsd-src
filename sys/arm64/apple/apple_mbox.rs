@@ -24,10 +24,10 @@ use core::mem::transmute;
 use core::ops::DerefMut;
 use core::ptr::null_mut;
 use core::sync::atomic::{AtomicPtr, Ordering};
+use kpi::cell::{Mutable, FFICell};
 use kpi::bindings::{INTR_MPSAFE, INTR_TYPE_MISC};
 use kpi::bus::{Register, Resource};
-use kpi::device::{Device, ProbeRes};
-use kpi::sync::SpinLock;
+use kpi::device::{Device, BusProbe, SoftcInit};
 use kpi::{dprintln, driver};
 
 const MBOX_A2I_CTRL: u64 = 0x110;
@@ -64,9 +64,9 @@ pub type TypeErasedAppleMboxRx = fn(*mut c_void, AppleMboxMsg) -> Result<()>;
 #[derive(Debug)]
 pub struct AppleMboxSoftc {
     dev: Device,
-    irq: UniqueCell<Resource>,
-    intr_softc: UniqueCell<IntrSoftc>,
-    write_msg_softc: SpinLock<WriteMsgSoftc>,
+    irq: Mutable<Resource>,
+    intr_softc: Mutable<IntrSoftc>,
+    write_msg_softc: Mutable<WriteMsgSoftc>,
     callback: AtomicPtr<TypeErasedAppleMboxRx>,
     arg: AtomicPtr<c_void>,
     intrhand: FFICell<*mut c_void>,
@@ -89,7 +89,7 @@ impl DriverIf for AppleMboxDriver {
 }
 
 impl AppleMboxDriver {
-    pub fn apple_mbox_probe(&self, dev: Device) -> Result<ProbeRes> {
+    pub fn apple_mbox_probe(&self, dev: Device) -> Result<BusProbe> {
         if !ofw_bus_status_okay(dev) {
             return Err(ENXIO);
         }
@@ -103,7 +103,7 @@ impl AppleMboxDriver {
         Ok(BUS_PROBE_SPECIFIC)
     }
 
-    pub fn apple_mbox_attach(&self, dev: Device) -> Result<AttachRes> {
+    pub fn apple_mbox_attach(&self, dev: Device) -> Result<SoftcInit> {
         let node = ofw_bus_get_node(dev);
 
         let rid = ofw_bus_find_string_index(node, c"interrupt-names", c"recv-not-empty")?;
@@ -123,13 +123,10 @@ impl AppleMboxDriver {
             dev,
             AppleMboxSoftc {
                 dev: dev.clone(),
-                irq: UniqueCell::new(irq),
-                intr_softc: UniqueCell::new(IntrSoftc { i2a_ctrl, i2a_recv }),
-                write_msg_softc: SpinLock::new(
+                irq: Mutable::new(irq),
+                intr_softc: Mutable::new(IntrSoftc { i2a_ctrl, i2a_recv }),
+                write_msg_softc: Mutable::new(
                     WriteMsgSoftc { a2i_ctrl, a2i_send },
-                    c"",
-                    None,
-                    NOWAIT,
                 ),
                 callback: AtomicPtr::new(core::ptr::null_mut()),
                 arg: AtomicPtr::new(core::ptr::null_mut()),
@@ -163,7 +160,7 @@ impl AppleMboxDriver {
         let arg = driver.get_softc(client) as *const D::Softc as *const c_void as *mut c_void;
         sc.arg.store(arg, Ordering::Relaxed);
 
-        let irq = sc.irq.get_mut();
+        let irq = sc.irq.get_mut().deref_mut();
         let flags = INTR_MPSAFE | INTR_TYPE_MISC;
         let intrhand = sc.intrhand.as_ptr();
 
@@ -172,7 +169,8 @@ impl AppleMboxDriver {
     }
 
     extern "C" fn intr(sc: &AppleMboxSoftc) {
-        let intr_sc = sc.intr_softc.get_mut();
+        let mut intr_sc = sc.intr_softc.get_mut();
+        let mut intr_sc = intr_sc.deref_mut();
 
         let mut ctrl = &mut intr_sc.i2a_ctrl;
         let mut recv = &mut intr_sc.i2a_recv;
@@ -194,7 +192,7 @@ impl AppleMboxDriver {
     }
 
     pub fn write_msg(&self, mbox: Device, msg: &AppleMboxMsg) -> Result<()> {
-        let mut write_msg_sc = self.get_softc(mbox).write_msg_softc.lock();
+        let mut write_msg_sc = self.get_softc(mbox).write_msg_softc.get_mut();
         let mut ctrl = &mut write_msg_sc.a2i_ctrl;
         if (ctrl.read_4(0) & MBOX_A2I_CTRL_FULL) != 0 {
             return Err(EBUSY);
