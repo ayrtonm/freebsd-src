@@ -219,8 +219,6 @@ ${mfile:T:S/.m$/.c/}: ${mfile}
 	${AWK} -f $S/tools/makeobjops.awk ${mfile} -c
 ${mfile:T:S/.m$/.h/}: ${mfile}
 	${AWK} -f $S/tools/makeobjops.awk ${mfile} -h
-${mfile:T:S/.m$/.rs/}: ${mfile}
-	${AWK} -f $S/tools/makeobjops.awk ${mfile} -r; ${RUSTFMT} --edition 2021 ${mfile:T:S/.m$/.rs/}
 .endfor
 
 kernel-clean:
@@ -228,7 +226,7 @@ kernel-clean:
 	    ${FULLKERNEL} ${KERNEL_KO} ${KERNEL_KO}.debug \
 	    tags vers.c \
 	    vnode_if.c vnode_if.h vnode_if_newproto.h vnode_if_typedef.h \
-	    ${MFILES:T:S/.m$/.c/} ${MFILES:T:S/.m$/.h/} ${MFILES:T:S/.m$/.rs/} \
+	    ${MFILES:T:S/.m$/.c/} ${MFILES:T:S/.m$/.h/} \
 	    ${CLEAN}
 
 # This is a hack.  BFD "optimizes" away dynamic mode if there are no
