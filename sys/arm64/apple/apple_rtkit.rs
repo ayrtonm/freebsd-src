@@ -56,17 +56,15 @@ pub struct AppleRTKitSoftc {
 }
 
 impl ManagesRTKit for AppleRTKitDriver {
-    fn rtkit_from_sc(sc: &Self::Softc) -> &RTKit {
+    fn get_rtkit(sc: &Self::Softc) -> &RTKit {
         &sc.rtkit
     }
 }
 
-impl DriverIf for AppleRTKitDriver {
+impl DeviceIf for AppleRTKitDriver {
     type Softc = AppleRTKitSoftc;
-}
 
-impl AppleRTKitDriver {
-    fn apple_rtkit_probe(&self, dev: Device) -> Result<BusProbe> {
+    fn device_probe(&self, dev: Device) -> Result<BusProbe> {
         if !ofw_bus_status_okay(dev) {
             return Err(ENXIO);
         }
@@ -80,7 +78,7 @@ impl AppleRTKitDriver {
         Ok(BUS_PROBE_SPECIFIC)
     }
 
-    fn apple_rtkit_attach(&self, dev: Device) -> Result<SoftcInit> {
+    fn device_attach(&self, dev: Device) -> Result<SoftcInit> {
         let resources = bus_alloc_resources(dev, SPEC)?;
         let mem = resources.map(|r| r.whole_register());
 
@@ -100,10 +98,12 @@ impl AppleRTKitDriver {
         Ok(self.init_softc(dev, sc))
     }
 
-    fn apple_rtkit_detach(&self, dev: Device) -> Result<()> {
+    fn device_detach(&self, dev: Device) -> Result<()> {
         unreachable!("device cannot be detached")
     }
+}
 
+impl AppleRTKitDriver {
     fn apple_rtkit_boot(&self, helper: XRef) -> Result<()> {
         let dev = OF_device_from_xref(helper)?;
 
@@ -115,8 +115,8 @@ impl AppleRTKitDriver {
 
         self.rtkit_boot(dev)?;
 
-        //sc.rtkit.set_iop_pwr_state(PwrState::On)?;
-        sc.rtkit.set_ap_pwr_state(PwrState::On)?;
+        sc.rtkit.set_iop(PwrState::on())?;
+        sc.rtkit.set_ap(PwrState::on())?;
 
         Ok(())
     }
