@@ -27,16 +27,13 @@
  */
 
 #![no_std]
-#![feature(concat_idents)]
-
-extern crate alloc;
 
 use kpi::bus::{Register, ResourceSpec};
 use kpi::device::{Device, BusProbe, SoftcInit};
 use kpi::driver;
 use kpi::ofw::XRef;
 use kpi::cell::Mutable;
-use alloc::sync::Arc;
+use kpi::sync::Arc;
 use rtkit::{ManagesRTKit, PwrState, RTKit};
 
 const CPU_CTRL: u64 = 0x44;
@@ -87,7 +84,7 @@ impl DeviceIf for AppleRTKitDriver {
 
         OF_device_register_xref(dev, xref);
 
-        let rtkit = Arc::new(RTKit::new(dev)?);
+        let rtkit = Arc::new(RTKit::new(dev)?, M_NOWAIT);
 
         let sc = AppleRTKitSoftc {
             mem,

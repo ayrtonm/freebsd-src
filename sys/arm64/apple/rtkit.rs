@@ -16,17 +16,14 @@
  */
 
 #![no_std]
-#![feature(allocator_api)]
 
-extern crate alloc;
-
+use kpi::prelude::*;
 use core::ffi::{c_int, c_void};
 use core::sync::atomic::{AtomicU64, AtomicU16, Ordering};
 use kpi::device::Device;
-use kpi::prelude::*;
 use kpi::taskq::Task;
 use kpi::sleep::Sleepable;
-use alloc::sync::Arc;
+use kpi::sync::Arc;
 
 use apple_mbox::{apple_mbox_driver, AppleMboxMsg, AppleMboxRx};
 
@@ -83,7 +80,7 @@ pub trait ManagesRTKit: DeviceIf + Sized {
         };
         let mut task = Task::new(ctx);
         task.init(rx_task);
-        let boxed_task = Box::new_in(task, M_DEVBUF | M_NOWAIT);
+        let boxed_task = Box::new(task, M_NOWAIT);
         taskqueue_enqueue(taskqueue_thread(), boxed_task)
     }
 }
