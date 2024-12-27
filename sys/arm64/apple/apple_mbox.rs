@@ -17,7 +17,6 @@
  */
 
 #![no_std]
-#![feature(concat_idents)]
 
 use core::ffi::c_void;
 use core::mem::transmute;
