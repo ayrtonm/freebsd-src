@@ -101,9 +101,6 @@ static bool rtkit_verbose = true;
     do { if (rtkit_verbose && state->verbose) { \
 	device_printf(state->dev, fmt, ##__VA_ARGS__); } } while (0)
 
-#define BINDINGS_AS_HEADER
-#include <rust/bindings.c>
-
 static bool
 rtkit_endpoint_is_valid(uint32_t endpoint)
 {
