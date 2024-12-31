@@ -40,6 +40,7 @@
 #include <dev/ofw/ofw_bus.h>
 #include <dev/ofw/ofw_bus_subr.h>
 
+#include <arm64/apple/apple_mbox.h>
 #include <arm64/apple/rtkit.h>
 
 #if 0
