@@ -24,6 +24,7 @@ use kpi::device::Device;
 use kpi::taskq::Task;
 use kpi::sleep::Sleepable;
 use kpi::sync::Arc;
+use core::pin::Pin;
 
 use apple_mbox::{apple_mbox_driver, AppleMboxMsg, AppleMboxRx};
 
@@ -53,7 +54,7 @@ pub struct RTKit {
     verbose: bool,
     noalloc: bool,
     ep_map: AtomicU64,
-    // TODO: Use Mutable here
+    // TODO: Use Checked here
     //callbacks: [Option<(AppleMboxRx<RTKit>, AtomicPtr<c_void>)>; 32],
 }
 
@@ -63,17 +64,17 @@ struct RTKitTaskCtx {
     msg: AppleMboxMsg,
 }
 
-pub trait ManagesRTKit: DeviceIf + Sized {
+pub trait ManagesRTKit: DeviceIf + IsDriver + Sized {
     fn get_rtkit(sc: &Self::Softc) -> &Arc<RTKit>;
 
-    fn rtkit_boot(&self, client: Device) -> Result<()> {
-        let sc = self.get_softc(client);
-        let rtkit = Self::get_rtkit(sc);
-        apple_mbox_driver.set_rx(rtkit.mbox, rtkit.client, self, Self::rx_callback)
+    fn rtkit_boot(client: Device) -> Result<()> {
+        let sc = device_get_softc!(client);
+        let rtkit = Self::get_rtkit(sc.get_ref());
+        apple_mbox_driver.set_rx(rtkit.mbox, rtkit.client, /*self,*/ Self::rx_callback, sc)
     }
 
-    fn rx_callback(sc: &Self::Softc, msg: AppleMboxMsg) -> Result<()> {
-        let rtkit = Self::get_rtkit(sc).clone();
+    fn rx_callback(sc: Pin<&Self::Softc>, msg: AppleMboxMsg) -> Result<()> {
+        let rtkit = Self::get_rtkit(sc.get_ref()).clone();
         let ctx = RTKitTaskCtx {
             rtkit,
             msg,
@@ -85,7 +86,7 @@ pub trait ManagesRTKit: DeviceIf + Sized {
     }
 }
 
-extern "C" fn rx_task(ctx: Box<Task<RTKitTaskCtx>>, pending: c_int) {
+extern "C" fn rx_task(ctx: Box<Task<RTKitTaskCtx>, M_DEVBUF>, pending: c_int) {
     let ep = EpRxMsg::new(ctx.msg);
     let res = match ep {
         EpRxMsg::Mgmt(msg) => handle_mgmt(&ctx, msg),
