@@ -28,12 +28,13 @@
 
 #![no_std]
 
+use core::ops::DerefMut;
 use kpi::bus::{Register, ResourceSpec};
-use kpi::device::{Device, BusProbe, SoftcInit};
+use kpi::device::{Device, BusProbe};
 use kpi::driver;
 use kpi::ofw::XRef;
-use kpi::cell::Mutable;
-use kpi::sync::Arc;
+use kpi::cell::Checked;
+use kpi::sync::{Arc, Mutex};
 use rtkit::{ManagesRTKit, PwrState, RTKit};
 
 const CPU_CTRL: u64 = 0x44;
@@ -47,7 +48,8 @@ const SPEC: [ResourceSpec; 2] = [
 
 #[derive(Debug)]
 pub struct AppleRTKitSoftc {
-    mem: Mutable<[Register; 2]>,
+    asc: Checked<Register>,
+    //sram: Register,
     rtkit: Arc<RTKit>,
 }
 
@@ -60,7 +62,7 @@ impl ManagesRTKit for AppleRTKitDriver {
 impl DeviceIf for AppleRTKitDriver {
     type Softc = AppleRTKitSoftc;
 
-    fn device_probe(&self, dev: Device) -> Result<BusProbe> {
+    fn device_probe(dev: Device) -> Result<BusProbe> {
         if !ofw_bus_status_okay(dev) {
             return Err(ENXIO);
         }
@@ -74,10 +76,11 @@ impl DeviceIf for AppleRTKitDriver {
         Ok(BUS_PROBE_SPECIFIC)
     }
 
-    fn device_attach(&self, dev: Device) -> Result<SoftcInit> {
+    fn device_attach(mut dev: Device) -> Result<()> {
         let resources = bus_alloc_resources(dev, SPEC)?;
-        let regs = resources.map(|r| r.whole_register());
-        let mem = Mutable::new(regs);
+        let mut regs = resources.map(|r| r.take_register().ok());
+        let asc = Checked::new(regs[0].take().unwrap());
+        //let sram = regs[1].take().unwrap();
 
         let node = ofw_bus_get_node(dev);
         let xref = OF_xref_from_node(node);
@@ -87,29 +90,33 @@ impl DeviceIf for AppleRTKitDriver {
         let rtkit = Arc::new(RTKit::new(dev)?, M_NOWAIT);
 
         let sc = AppleRTKitSoftc {
-            mem,
+            asc,
+            //sram,
             rtkit,
         };
 
-        Ok(self.init_softc(dev, sc))
+        device_init_softc!(dev, sc);
+
+        Ok(())
     }
 
-    fn device_detach(&self, _dev: Device) -> Result<()> {
+    fn device_detach(_dev: Device) -> Result<()> {
         unreachable!("device cannot be detached")
     }
 }
 
 impl AppleRTKitDriver {
-    fn apple_rtkit_boot(&self, helper: XRef) -> Result<()> {
+    fn apple_rtkit_boot(helper: XRef) -> Result<()> {
         let dev = OF_device_from_xref(helper)?;
 
-        let sc = self.get_softc(dev);
+        let sc = device_get_softc!(dev);
 
-        let mut mem = sc.mem.get_mut();
-        let ctrl = mem[0].read_4(CPU_CTRL);
-        mem[0].write_4(CPU_CTRL, ctrl | CPU_CTRL_RUN);
+        let mut asc_guard = sc.asc.get_mut();
+        let mut asc = asc_guard.deref_mut();
+        let ctrl = bus_read_4(asc, CPU_CTRL);
+        bus_write_4(asc, CPU_CTRL, ctrl | CPU_CTRL_RUN);
 
-        self.rtkit_boot(dev)?;
+        Self::rtkit_boot(dev)?;
 
         sc.rtkit.set_iop(PwrState::On)?;
         sc.rtkit.set_ap(PwrState::On)?;
@@ -119,10 +126,12 @@ impl AppleRTKitDriver {
 }
 
 driver!(apple_rtkit_driver, c"apple_rtkit", AppleRTKitDriver, apple_rtkit_methods,
-    device_probe apple_rtkit_probe,
-    device_attach apple_rtkit_attach,
-    device_detach apple_rtkit_detach,
-    {
+    INTERFACES {
+        device_probe apple_rtkit_probe,
+        device_attach apple_rtkit_attach,
+        device_detach apple_rtkit_detach,
+    },
+    EXPORTS {
         int apple_rtkit_boot(phandle_t helper);
     }
 );
