@@ -55,6 +55,8 @@
 
 #include "pic_if.h"
 
+#if 0
+
 #define	AIC_INFO		0x0004
 #define  AIC_INFO_NDIE(val)	(((val) >> 24) & 0xf)
 #define	 AIC_INFO_NIRQS(val)	((val) & 0x0000ffff)
@@ -776,5 +778,7 @@ static device_method_t apple_aic_methods[] = {
 static DEFINE_CLASS_0(aic, apple_aic_driver, apple_aic_methods,
     sizeof(struct apple_aic_softc));
 
+#endif
+extern driver_t apple_aic_driver;
 EARLY_DRIVER_MODULE(aic, simplebus, apple_aic_driver, 0, 0,
     BUS_PASS_INTERRUPT + BUS_PASS_ORDER_MIDDLE);
