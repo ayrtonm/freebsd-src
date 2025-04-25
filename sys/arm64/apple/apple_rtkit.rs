@@ -28,13 +28,12 @@
 
 #![no_std]
 
-use core::ops::DerefMut;
 use kpi::bus::{Register, ResourceSpec};
-use kpi::device::{Device, BusProbe};
+use kpi::cell::Checked;
+use kpi::device::{BusProbe, Device};
 use kpi::driver;
 use kpi::ofw::XRef;
-use kpi::cell::Checked;
-use kpi::sync::{Arc, Mutex};
+use kpi::sync::Arc;
 use rtkit::{ManagesRTKit, PwrState, RTKit};
 
 const CPU_CTRL: u64 = 0x44;
@@ -49,12 +48,12 @@ const SPEC: [ResourceSpec; 2] = [
 #[derive(Debug)]
 pub struct AppleRTKitSoftc {
     asc: Checked<Register>,
-    //sram: Register,
-    rtkit: Arc<RTKit>,
+    sram: Checked<Register>,
+    rtkit: Arc<RTKit, M_DEVBUF>,
 }
 
 impl ManagesRTKit for AppleRTKitDriver {
-    fn get_rtkit(sc: &Self::Softc) -> &Arc<RTKit> {
+    fn get_rtkit(sc: &Self::Softc) -> &Arc<RTKit, M_DEVBUF> {
         &sc.rtkit
     }
 }
@@ -77,22 +76,34 @@ impl DeviceIf for AppleRTKitDriver {
     }
 
     fn device_attach(mut dev: Device) -> Result<()> {
-        let resources = bus_alloc_resources(dev, SPEC)?;
-        let mut regs = resources.map(|r| r.take_register().ok());
-        let asc = Checked::new(regs[0].take().unwrap());
-        //let sram = regs[1].take().unwrap();
+        let [asc_res, sram_res] = bus_alloc_resources(dev, SPEC).inspect_err(|e| {
+            device_println!(dev, "could not allocate device resources {e}");
+        })?;
+        let asc_reg = Register::new(asc_res).inspect_err(|e| {
+            device_println!(dev, "ASC does not have type SYS_RES_MEMORY {e}");
+        })?;
+        let sram_reg = Register::new(sram_res).inspect_err(|e| {
+            device_println!(dev, "SRAM does not have type SYS_RES_MEMORY {e}");
+        })?;
+        let asc = Checked::new(asc_reg);
+        let sram = Checked::new(sram_reg);
 
         let node = ofw_bus_get_node(dev);
         let xref = OF_xref_from_node(node);
 
         OF_device_register_xref(dev, xref);
 
-        let rtkit = Arc::new(RTKit::new(dev)?, M_NOWAIT);
+        let rtkit =
+            RTKit::new(dev).inspect_err(|e| device_println!(dev, "failed to create RTKit {e}"))?;
+
+        let refcounted_rtkit = Arc::try_new(rtkit, M_NOWAIT).inspect_err(|e| {
+            device_println!(dev, "failed to allocate memory for refcounted RTKit {e}");
+        })?;
 
         let sc = AppleRTKitSoftc {
             asc,
-            //sram,
-            rtkit,
+            sram,
+            rtkit: refcounted_rtkit,
         };
 
         device_init_softc!(dev, sc);
@@ -101,25 +112,32 @@ impl DeviceIf for AppleRTKitDriver {
     }
 
     fn device_detach(_dev: Device) -> Result<()> {
-        unreachable!("device cannot be detached")
+        unreachable!("apple RTKit helper cannot be detached")
     }
 }
 
 impl AppleRTKitDriver {
-    fn apple_rtkit_boot(helper: XRef) -> Result<()> {
-        let dev = OF_device_from_xref(helper)?;
+    fn apple_rtkit_boot(client: Device, helper: XRef) -> Result<()> {
+        let dev = OF_device_from_xref(helper).inspect_err(|e| {
+            device_println!(client, "could not get device from xref {e}");
+        })?;
 
         let sc = device_get_softc!(dev);
 
-        let mut asc_guard = sc.asc.get_mut();
-        let mut asc = asc_guard.deref_mut();
-        let ctrl = bus_read_4(asc, CPU_CTRL);
-        bus_write_4(asc, CPU_CTRL, ctrl | CPU_CTRL_RUN);
+        let mut asc = sc.asc.get_mut();
+        let ctrl = bus_read_4!(asc, CPU_CTRL);
+        bus_write_4!(asc, CPU_CTRL, ctrl | CPU_CTRL_RUN);
 
-        Self::rtkit_boot(dev)?;
+        Self::rtkit_boot(dev).inspect_err(|e| {
+            device_println!(dev, "failed to boot RTKit {e}");
+        })?;
 
-        sc.rtkit.set_iop(PwrState::On)?;
-        sc.rtkit.set_ap(PwrState::On)?;
+        sc.rtkit.set_iop(PwrState::On).inspect_err(|e| {
+            device_println!(dev, "failed to set IOP power state ON");
+        })?;
+        sc.rtkit.set_ap(PwrState::On).inspect_err(|e| {
+            device_println!(dev, "failed to set AP power state ON");
+        })?;
 
         Ok(())
     }
@@ -132,6 +150,6 @@ driver!(apple_rtkit_driver, c"apple_rtkit", AppleRTKitDriver, apple_rtkit_method
         device_detach apple_rtkit_detach,
     },
     EXPORTS {
-        int apple_rtkit_boot(phandle_t helper);
+        int apple_rtkit_boot(device_t client, phandle_t helper);
     }
 );

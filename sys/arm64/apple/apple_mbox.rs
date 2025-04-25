@@ -17,6 +17,7 @@
  */
 
 #![no_std]
+#![allow(dead_code)]
 
 use core::ffi::c_void;
 use core::mem::transmute;
@@ -94,13 +95,13 @@ impl DeviceIf for AppleMboxDriver {
         Ok(BUS_PROBE_SPECIFIC)
     }
 
-    fn device_attach(mut dev: Device) -> Result<()> {
+    fn device_attach(dev: Device) -> Result<()> {
         let node = ofw_bus_get_node(dev);
 
         let rid = ofw_bus_find_string_index(node, c"interrupt-names", c"recv-not-empty")?;
-        let irq = bus_alloc_resource(dev, SYS_RES_IRQ, rid)?;
-        let mut mem = bus_alloc_resource(dev, SYS_RES_MEMORY, 0)?;
-        let mut regs = mem.split_resource::<4>()?;
+        let irq = bus_alloc_resource(dev, SYS_RES_IRQ, rid, RF_ACTIVE)?;
+        let mem = bus_alloc_resource(dev, SYS_RES_MEMORY, 0, RF_ACTIVE)?;
+        let mut regs = mem.split_registers::<4>()?;
 
         let a2i_ctrl = regs.take_register(MBOX_A2I_CTRL, 4)?;
         let a2i_send = regs.take_register(MBOX_A2I_SEND0, 0x10)?;
@@ -121,7 +122,7 @@ impl DeviceIf for AppleMboxDriver {
         let xref = OF_xref_from_node(node);
         OF_device_register_xref(dev, xref);
 
-        let res = device_init_softc!(
+        let _res = device_init_softc!(
             dev,
             AppleMboxSoftc {
                 dev,
@@ -152,7 +153,7 @@ impl AppleMboxDriver {
     pub fn set_rx<T>(
         &self,
         mbox: Device,
-        client: Device,
+        _client: Device,
         //driver: &D,
         func: AppleMboxRx<T>,
         arg: Pin<&T>,
@@ -177,14 +178,14 @@ impl AppleMboxDriver {
 
         let mut write_msg = sc.write_msg.get_mut();
 
-        let ctrl = &mut write_msg.a2i_ctrl;
-        if (bus_read_4(ctrl, MBOX_A2I_CTRL) & MBOX_A2I_CTRL_FULL) != 0 {
+        let mut ctrl = &mut write_msg.a2i_ctrl;
+        if (bus_read_4!(ctrl, MBOX_A2I_CTRL) & MBOX_A2I_CTRL_FULL) != 0 {
             return Err(EBUSY);
         }
 
-        let send = &mut write_msg.a2i_send;
-        bus_write_8(send, MBOX_A2I_SEND0, msg.data0);
-        bus_write_8(send, MBOX_A2I_SEND1, u64::from(msg.data1));
+        let mut send = &mut write_msg.a2i_send;
+        bus_write_8!(send, MBOX_A2I_SEND0, msg.data0);
+        bus_write_8!(send, MBOX_A2I_SEND1, u64::from(msg.data1));
         Ok(())
     }
 }
@@ -194,10 +195,10 @@ impl AppleMboxDriver {
 extern "C" fn apple_mbox_intr(sc: &AppleMboxSoftc) {
     let mut intr = sc.intr.get_mut();
 
-    while (bus_read_4(&mut intr.i2a_ctrl, MBOX_I2A_CTRL) & MBOX_I2A_CTRL_EMPTY) == 0 {
+    while (bus_read_4!(&mut intr.i2a_ctrl, MBOX_I2A_CTRL) & MBOX_I2A_CTRL_EMPTY) == 0 {
         let msg = AppleMboxMsg {
-            data0: bus_read_8(&mut intr.i2a_recv, MBOX_I2A_RECV0),
-            data1: bus_read_8(&mut intr.i2a_recv, MBOX_I2A_RECV1) as u32,
+            data0: bus_read_8!(&mut intr.i2a_recv, MBOX_I2A_RECV0),
+            data1: bus_read_8!(&mut intr.i2a_recv, MBOX_I2A_RECV1) as u32,
         };
         let arg = intr.arg;
         (intr.callback)(arg, msg).unwrap();
