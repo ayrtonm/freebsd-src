@@ -16,9 +16,10 @@
  */
 
 #![no_std]
+#![allow(unused)]
 
 use kpi::prelude::*;
-use core::ffi::{c_int, c_void};
+use core::ffi::c_int;
 use core::sync::atomic::{AtomicU64, AtomicU16, Ordering};
 use kpi::device::Device;
 use kpi::taskq::Task;
@@ -26,7 +27,7 @@ use kpi::sleep::Sleepable;
 use kpi::sync::Arc;
 use core::pin::Pin;
 
-use apple_mbox::{apple_mbox_driver, AppleMboxMsg, AppleMboxRx};
+use apple_mbox::{apple_mbox_driver, AppleMboxMsg};
 
 #[repr(u16)]
 #[derive(Debug)]
@@ -60,12 +61,12 @@ pub struct RTKit {
 
 #[derive(Debug)]
 struct RTKitTaskCtx {
-    rtkit: Arc<RTKit>,
+    rtkit: Arc<RTKit, M_DEVBUF>,
     msg: AppleMboxMsg,
 }
 
 pub trait ManagesRTKit: DeviceIf + IsDriver + Sized {
-    fn get_rtkit(sc: &Self::Softc) -> &Arc<RTKit>;
+    fn get_rtkit(sc: &Self::Softc) -> &Arc<RTKit, M_DEVBUF>;
 
     fn rtkit_boot(client: Device) -> Result<()> {
         let sc = device_get_softc!(client);
@@ -81,14 +82,16 @@ pub trait ManagesRTKit: DeviceIf + IsDriver + Sized {
         };
         let mut task = Task::new(ctx);
         task.init(rx_task);
-        let boxed_task = Box::new(task, M_NOWAIT);
+        let boxed_task = Box::try_new(task, M_NOWAIT).inspect_err(|e| {
+            println!("failed to allocate memory for task {e}");
+        })?;
         taskqueue_enqueue(taskqueue_thread(), boxed_task)
     }
 }
 
 extern "C" fn rx_task(ctx: Box<Task<RTKitTaskCtx>, M_DEVBUF>, pending: c_int) {
     let ep = EpRxMsg::new(ctx.msg);
-    let res = match ep {
+    let _res = match ep {
         EpRxMsg::Mgmt(msg) => handle_mgmt(&ctx, msg),
         EpRxMsg::Crashlog => todo!(""),
         EpRxMsg::Syslog => todo!(""),
@@ -96,8 +99,8 @@ extern "C" fn rx_task(ctx: Box<Task<RTKitTaskCtx>, M_DEVBUF>, pending: c_int) {
         EpRxMsg::IOReport => todo!(""),
         EpRxMsg::OSlog => todo!(""),
         EpRxMsg::Tracekit => todo!(""),
-        EpRxMsg::Custom(ep) => todo!(""),
-        EpRxMsg::Unknown(ep) => todo!(""),
+        EpRxMsg::Custom(_ep) => todo!(""),
+        EpRxMsg::Unknown(_ep) => todo!(""),
     };
 }
 
@@ -369,12 +372,12 @@ fn handle_mgmt(ctx: &Task<RTKitTaskCtx>, msg: MgmtRxMsg) -> Result<()> {
                         | endpoint::IOREPORT
                         | endpoint::OSLOG
                         | endpoint::TRACEKIT => {
-                            dprintln!(dev, "starting rtkit endpoint {ep:?}");
+                            device_println!(dev, "starting rtkit endpoint {ep:?}");
                             let start_ep = MgmtTxMsg::StartEp { ep };
                             mbox_send_from_task(ctx, EpTxMsg::Mgmt(start_ep))?;
                         }
                         _ => {
-                            dprintln!(dev, "skipping endpoint {ep:?}");
+                            device_println!(dev, "skipping endpoint {ep:?}");
                         }
                     }
                 }

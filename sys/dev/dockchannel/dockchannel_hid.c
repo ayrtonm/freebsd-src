@@ -398,7 +398,7 @@ dockchannel_hid_start_config_hook(void *arg)
 	struct dockchannel_hid_softc *sc = arg;
 	device_t dev = sc->sc_dev;
 
-	error = apple_rtkit_boot(sc->sc_mtp);
+	error = apple_rtkit_boot(dev, sc->sc_mtp);
 	if (error != 0) {
 		device_printf(dev, "RTKit failed to boot (%d)\n", error);
 		return;
