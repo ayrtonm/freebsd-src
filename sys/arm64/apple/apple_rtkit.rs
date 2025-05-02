@@ -27,6 +27,7 @@
  */
 
 #![no_std]
+#![feature(macro_metavar_expr_concat)]
 
 use kpi::bus::{Register, ResourceSpec};
 use kpi::cell::Checked;
@@ -91,7 +92,7 @@ impl DeviceIf for AppleRTKitDriver {
         let node = ofw_bus_get_node(dev);
         let xref = OF_xref_from_node(node);
 
-        OF_device_register_xref(dev, xref);
+        OF_device_register_xref(xref, dev);
 
         let rtkit =
             RTKit::new(dev).inspect_err(|e| device_println!(dev, "failed to create RTKit {e}"))?;
@@ -150,6 +151,6 @@ driver!(apple_rtkit_driver, c"apple_rtkit", AppleRTKitDriver, apple_rtkit_method
         device_detach apple_rtkit_detach,
     },
     EXPORTS {
-        int apple_rtkit_boot(device_t client, phandle_t helper);
+        apple_rtkit_boot(client: device_t, helper: phandle_t) -> int;
     }
 );

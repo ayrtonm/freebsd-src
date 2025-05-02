@@ -17,17 +17,18 @@
  */
 
 #![no_std]
+#![feature(macro_metavar_expr_concat)]
 #![allow(dead_code)]
 
 use core::ffi::c_void;
 use core::mem::transmute;
 use core::ptr::null_mut;
+use core::ops::Deref;
 use kpi::bindings::{INTR_MPSAFE, INTR_TYPE_MISC};
 use kpi::bus::{Register, Resource};
 use kpi::cell::{FFICell, Checked};
 use kpi::device::{BusProbe, Device};
 use kpi::driver;
-use core::pin::Pin;
 
 const MBOX_A2I_CTRL: u64 = 0x110;
 const MBOX_A2I_CTRL_FULL: u32 = 1 << 16;
@@ -52,7 +53,7 @@ pub struct AppleMboxMsg {
 // This callback type's callsites are in rust so it doesn't need to be extern "C". If it were in C
 // it would need to go through the KPI crate which would enforce the extern "C" to avoid a compiler
 // error.
-pub type AppleMboxRx<T> = fn(Pin<&T>, AppleMboxMsg) -> Result<()>;
+pub type AppleMboxRx<T> = fn(&T, AppleMboxMsg) -> Result<()>;
 pub type RawAppleMboxRx = fn(*mut c_void, AppleMboxMsg) -> Result<()>;
 
 #[derive(Debug)]
@@ -120,7 +121,7 @@ impl DeviceIf for AppleMboxDriver {
         let write_msg = Checked::new(WriteMsg { a2i_ctrl, a2i_send });
 
         let xref = OF_xref_from_node(node);
-        OF_device_register_xref(dev, xref);
+        OF_device_register_xref(xref, dev);
 
         let _res = device_init_softc!(
             dev,
@@ -156,19 +157,19 @@ impl AppleMboxDriver {
         _client: Device,
         //driver: &D,
         func: AppleMboxRx<T>,
-        arg: Pin<&T>,
+        arg: &T,
     ) -> Result<()> {
         let sc = device_get_softc!(mbox);
 
         let mut intr = sc.intr.get_mut();
         let func = unsafe { transmute(func) };
         intr.callback = func;
-        intr.arg = arg.get_ref() as *const T as *const c_void as *mut c_void;
+        intr.arg = arg as *const T as *const c_void as *mut c_void;
 
         let flags = INTR_MPSAFE | INTR_TYPE_MISC;
         let intrhand = sc.intrhand.as_ptr();
 
-        self.bus_setup_intr(mbox, &sc.irq, flags, None, Some(apple_mbox_intr), sc, intrhand)?;
+        self.bus_setup_intr(mbox, &sc.irq, flags, None, Some(apple_mbox_intr), sc.deref(), intrhand)?;
 
         Ok(())
     }

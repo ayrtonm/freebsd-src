@@ -1,0 +1,87 @@
+/*-
+ * Copyright (c) 2024 Ayrton Muñoz
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+ * SUCH DAMAGE.
+ */
+
+#include "opt_platform.h"
+
+#include <sys/cdefs.h>
+
+#include <sys/param.h>
+#include <sys/bus.h>
+#include <sys/kernel.h>
+#include <sys/module.h>
+#include <sys/rman.h>
+
+#include <dev/fdt/simplebus.h>
+
+static device_probe_t apple_dcp_probe;
+static device_attach_t apple_dcp_attach;
+
+struct apple_dcp_softc {
+	struct simplebus_softc sc_simplebus; /* base class */
+};
+
+static int
+apple_dcp_probe(device_t dev)
+{
+	if (!ofw_bus_status_okay(dev)) {
+		return (ENXIO);
+	}
+
+	if (!ofw_bus_is_compatible(dev, "apple,dcp")) {
+		return (ENXIO);
+	}
+
+	device_set_desc(dev, "Apple DCP");
+	return (BUS_PROBE_DEFAULT);
+}
+
+static int
+apple_dcp_attach(device_t dev)
+{
+	struct apple_dcp_softc *sc;
+	int error;
+
+	sc = device_get_softc(dev);
+
+	error = simplebus_attach(dev);
+	if (error != 0) {
+		device_printf(dev, "simplebus_attach failed %d\n", error);
+		return (ENXIO);
+	}
+
+	return (0);
+}
+
+static device_method apple_dcp_methods[] = {
+	DEVMETHOD(device_probe, apple_dcp_probe),
+	DEVMETHOD(device_attach, apple_dcp_attach),
+	DEVMETHOD_END
+};
+
+DEFINE_CLASS_1(apple_dcp, apple_dcp_driver, apple_dcp_methods,
+    sizeof(struct apple_dcp_softc), simplebus_driver);
+
+DRIVER_MODULE(apple_dcp, simplebus, apple_dcp_driver, 0, 0);

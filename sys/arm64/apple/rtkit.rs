@@ -20,14 +20,16 @@
 
 use kpi::prelude::*;
 use core::ffi::c_int;
+use core::ops::Deref;
 use core::sync::atomic::{AtomicU64, AtomicU16, Ordering};
 use kpi::device::Device;
 use kpi::taskq::Task;
 use kpi::sleep::Sleepable;
 use kpi::sync::Arc;
-use core::pin::Pin;
 
 use apple_mbox::{apple_mbox_driver, AppleMboxMsg};
+
+type Box<T, M> = kpi::boxed::Box<T, M>;
 
 #[repr(u16)]
 #[derive(Debug)]
@@ -70,12 +72,12 @@ pub trait ManagesRTKit: DeviceIf + IsDriver + Sized {
 
     fn rtkit_boot(client: Device) -> Result<()> {
         let sc = device_get_softc!(client);
-        let rtkit = Self::get_rtkit(sc.get_ref());
-        apple_mbox_driver.set_rx(rtkit.mbox, rtkit.client, /*self,*/ Self::rx_callback, sc)
+        let rtkit = Self::get_rtkit(sc.deref());
+        apple_mbox_driver.set_rx(rtkit.mbox, rtkit.client, /*self,*/ Self::rx_callback, sc.deref())
     }
 
-    fn rx_callback(sc: Pin<&Self::Softc>, msg: AppleMboxMsg) -> Result<()> {
-        let rtkit = Self::get_rtkit(sc.get_ref()).clone();
+    fn rx_callback(sc: &Self::Softc, msg: AppleMboxMsg) -> Result<()> {
+        let rtkit = Self::get_rtkit(sc.deref()).clone();
         let ctx = RTKitTaskCtx {
             rtkit,
             msg,
