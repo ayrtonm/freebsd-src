@@ -30,11 +30,12 @@
 #![no_std]
 #![feature(macro_metavar_expr_concat)]
 
-use core::mem::MaybeUninit;
-use kpi::bindings::{intr_irqsrc, intr_polarity, intr_trigger};
-use kpi::bus::{Register, Resource};
+use core::ops::DerefMut;
+use core::sync::atomic::AtomicU32;
+use kpi::bindings::{cpuset_t, intr_irqsrc, intr_polarity, intr_trigger, trapframe};
+use kpi::bus::{Filter, Register, Resource};
+use kpi::cell::Checked;
 use kpi::cell::SubClass;
-use kpi::cell::{Checked, ManagedPtr};
 use kpi::device::{BusProbe, Device};
 use kpi::driver;
 use kpi::enum_c_macros;
@@ -46,9 +47,61 @@ type Vec<T, M> = kpi::vec::Vec<T, M>;
 
 const AIC_INFO: u64 = 0x0004;
 
+const AIC_EVENT: u64 = 0x2004;
+const AIC_EVENT_TYPE_NONE: u32 = 0;
+const AIC_EVENT_TYPE_IRQ: u32 = 1;
+const AIC_EVENT_TYPE_IPI: u32 = 4;
+
 const AIC_MAXDIES: usize = 4;
 const NUM_FIQS: usize = 6;
 const NUM_IPIS: usize = bindings::INTR_IPI_COUNT as usize;
+
+const AIC2_CONFIG: u64 = 0x0014;
+const AIC2_CONFIG_ENABLE: u32 = 1 << 0;
+
+const AIC_IPI_SR_EL1_PENDING: u64 = 1 << 0;
+
+const AIC_FIQ_VM_TIMER_VEN: u64 = 1 << 0;
+const AIC_FIQ_VM_TIMER_PEN: u64 = 1 << 1;
+const AIC_FIQ_VM_TIMER_BITS: u64 = AIC_FIQ_VM_TIMER_VEN | AIC_FIQ_VM_TIMER_PEN;
+
+const CNTV_CTL_ENABLE: u64 = 1 << 0;
+const CNTV_CTL_IMASK: u64 = 1 << 1;
+const CNTV_CTL_ISTATUS: u64 = 1 << 2;
+const CNTV_CTL_BITS: u64 = CNTV_CTL_ENABLE | CNTV_CTL_IMASK | CNTV_CTL_ISTATUS;
+
+const AIC_IRQ_CR_EL1_DISABLE: u64 = 3 << 0;
+
+macro_rules! aic {
+    ($($msg:tt)*) => {
+        //device_println!($($msg)*);
+    };
+}
+
+// Since this macro is only visible in this crate keep the name short
+macro_rules! reg {
+    (AIC_IPI_SR_EL1) => {
+        "s3_5_c15_c1_1"
+    };
+    (AIC_IPI_LOCAL_RR_EL1) => {
+        "s3_5_c15_c0_0"
+    };
+    (AIC_IPI_GLOBAL_RR_EL1) => {
+        "s3_5_c15_c0_1"
+    };
+    (AIC_TMR_CTL_GUEST_PHYS) => {
+        "s3_5_c14_c2_1"
+    };
+    (AIC_TMR_CTL_GUEST_VIRT) => {
+        "s3_5_c14_c3_1"
+    };
+    (AIC_FIQ_VM_TIMER) => {
+        "s3_5_c15_c1_3"
+    };
+    (AIC_IRQ_CR_EL1) => {
+        "s3_4_c15_c10_4"
+    };
+}
 
 fn info_nirqs(info: u32) -> usize {
     (info & 0xffff) as usize
@@ -139,31 +192,6 @@ fn apple_aic_sw_clear(sc: &AppleIntSoftc, die: usize, irq: usize) {
     offset += sc.cfg.die_stride * die;
     offset += (irq >> 5) * 4;
     bus_write_4!(sc.mem.get_mut(), offset, irq_mask(irq));
-}
-
-// Since this macro is only visible in this crate keep the name short
-macro_rules! reg {
-    (AIC_IPI_SR_EL1) => {
-        "s3_5_c15_c1_1"
-    };
-    (AIC_IPI_LOCAL_RR_EL1) => {
-        "s3_5_c15_c0_0"
-    };
-    (AIC_IPI_GLOBAL_RR_EL1) => {
-        "s3_5_c15_c0_1"
-    };
-    (AIC_TMR_CTL_GUEST_PHYS) => {
-        "s3_5_c14_c2_1"
-    };
-    (AIC_TMR_CTL_GUEST_VIRT) => {
-        "s3_5_c14_c3_1"
-    };
-    (AIC_FIQ_VM_TIMER) => {
-        "s3_5_c15_c1_3"
-    };
-    (AIC_IRQ_CR_EL1) => {
-        "s3_4_c15_c10_4"
-    };
 }
 
 fn apple_aic_fiq_unmask(sc: &AppleIntSoftc, fiq: AppleFiqKind) {
@@ -266,6 +294,8 @@ pub struct AppleIntSoftc {
     ipi_srcs: [AppleIrqSrc; NUM_IPIS],
     ndie: usize,
     nirqs: usize,
+    // TODO: make bindings for atomic_readandclear_32 and remove Checked
+    ipimasks: Box<[Checked<u32>]>,
 }
 
 impl DeviceIf for AppleIntDriver {
@@ -286,7 +316,7 @@ impl DeviceIf for AppleIntDriver {
         // Cannot fail since it must have been called successfully in device_probe
         let cfg = ofw_bus_search_compatible(dev, &COMPAT_DATA).unwrap();
 
-        let mem_res = bus_alloc_resource(dev, SYS_RES_MEMORY, 0, RF_ACTIVE).map_err(|e| {
+        let mem_res = bus_alloc_resource_any(dev, SYS_RES_MEMORY, 0, RF_ACTIVE).map_err(|e| {
             device_println!(dev, "unable to allocate memory register {e}");
             return ENXIO;
         })?;
@@ -294,10 +324,11 @@ impl DeviceIf for AppleIntDriver {
         let mut mem = Register::new(mem_res)?;
         let mut event = None;
         if cfg.version == 2 {
-            let event_res = bus_alloc_resource(dev, SYS_RES_MEMORY, 1, RF_ACTIVE).map_err(|e| {
-                device_println!(dev, "unable to allocate event register {e}");
-                return ENXIO;
-            })?;
+            let event_res =
+                bus_alloc_resource_any(dev, SYS_RES_MEMORY, 1, RF_ACTIVE).map_err(|e| {
+                    device_println!(dev, "unable to allocate event register {e}");
+                    return ENXIO;
+                })?;
             event = Some(Checked::new(Register::new(event_res)?));
         };
         let info = bus_read_4!(mem, AIC_INFO);
@@ -334,6 +365,15 @@ impl DeviceIf for AppleIntDriver {
         let fiq_srcs = AppleFiqKind::all_fiqs().map(|fiq| new_irq_src(AppleIntrKind::Fiq(fiq)));
         let ipi_srcs = [const { new_irq_src(AppleIntrKind::Ipi) }; NUM_IPIS];
 
+        let num_masks = mp_maxid() + 1;
+        let mut ipimasks = Vec::try_with_capacity(num_masks, M_WAITOK | M_ZERO)?;
+        for i in 0..num_masks {
+            ipimasks.push(Checked::new(0));
+        }
+        let ipimasks = ipimasks.into_boxed_slice();
+        if cfg.version == 1 {
+            todo!("set cpuids");
+        }
         let sc = AppleIntSoftc {
             dev,
             cfg,
@@ -344,6 +384,7 @@ impl DeviceIf for AppleIntDriver {
             ipi_srcs,
             ndie,
             nirqs,
+            ipimasks,
         };
         let sc = device_init_softc!(dev, sc);
         let name = device_get_nameunit(dev);
@@ -380,9 +421,6 @@ impl DeviceIf for AppleIntDriver {
             }
         }
 
-        if sc.cfg.version == 1 {
-            todo!("")
-        }
         for ipi in 0..NUM_IPIS {
             let isrc = project!(sc->ipi_srcs[ipi]);
             if let Err(e) = intr_isrc_register(
@@ -398,12 +436,19 @@ impl DeviceIf for AppleIntDriver {
                 return Err(ENXIO);
             }
         }
+        if let Err(e) = intr_ipi_pic_register(dev, 0) {
+            device_println!(dev, "could not register for IPIs {e}");
+            return Err(ENXIO);
+        }
+
 
         let xref = OF_xref_from_node(ofw_bus_get_node(dev));
         if let Err(e) = intr_pic_register(dev, xref) {
             device_println!(dev, "unable to register interrupt handler {e}");
             return Err(ENXIO);
         };
+
+        OF_device_register_xref(xref, dev);
 
         if let Err(e) = intr_pic_claim_root(dev, xref, Self::apple_aic_irq, &sc, INTR_ROOT_IRQ) {
             device_println!(dev, "unable to set root interrupt controller {e}");
@@ -417,16 +462,7 @@ impl DeviceIf for AppleIntDriver {
             return Err(ENXIO);
         }
 
-        if let Err(e) = intr_ipi_pic_register(dev, 0) {
-            device_println!(dev, "could not register for IPIs {e}");
-            return Err(ENXIO);
-        }
-
-        OF_device_register_xref(xref, dev);
-
         if sc.cfg.version == 2 {
-            const AIC2_CONFIG: u64 = 0x0014;
-            const AIC2_CONFIG_ENABLE: u32 = 1 << 0;
             let mut mem = sc.mem.get_mut();
             let config = bus_read_4!(mem, AIC2_CONFIG);
             bus_write_4!(mem, AIC2_CONFIG, config | AIC2_CONFIG_ENABLE);
@@ -437,16 +473,6 @@ impl DeviceIf for AppleIntDriver {
         Ok(())
     }
 }
-
-const CNTV_CTL_ENABLE: u64 = 1 << 0;
-const CNTV_CTL_IMASK: u64 = 1 << 1;
-const CNTV_CTL_ISTATUS: u64 = 1 << 2;
-const CNTV_CTL_BITS: u64 = CNTV_CTL_ENABLE | CNTV_CTL_IMASK | CNTV_CTL_ISTATUS;
-
-const AIC_IPI_SR_EL1_PENDING: u64 = 1 << 0;
-const AIC_FIQ_VM_TIMER_VEN: u64 = 1 << 0;
-const AIC_FIQ_VM_TIMER_PEN: u64 = 1 << 1;
-const AIC_FIQ_VM_TIMER_BITS: u64 = AIC_FIQ_VM_TIMER_VEN | AIC_FIQ_VM_TIMER_PEN;
 
 fn apple_aic_init_cpu() {
     /* mask pending IPI FIQs */
@@ -472,16 +498,13 @@ fn apple_aic_init_cpu() {
 }
 
 impl AppleIntDriver {
-    extern "C" fn apple_aic_irq(sc: &AppleIntSoftc) -> i32 {
-        const AIC_EVENT: u64 = 0x2004;
+    extern "C" fn apple_aic_irq(sc: &AppleIntSoftc) -> Filter {
+        aic!(sc.dev, "got interrupt request");
         let event = match &sc.event {
             Some(reg) => bus_read_4!(reg.get_mut(), 0),
             None => bus_read_4!(sc.mem.get_mut(), AIC_EVENT),
         };
         let ty = event_type(event);
-        const AIC_EVENT_TYPE_NONE: u32 = 0;
-        const AIC_EVENT_TYPE_IRQ: u32 = 1;
-        const AIC_EVENT_TYPE_IPI: u32 = 4;
         assert!(ty != AIC_EVENT_TYPE_IPI);
 
         let die = event_die(event);
@@ -496,15 +519,72 @@ impl AppleIntDriver {
 
         let tf = curthread!(td_intr_frame);
 
-        let aisrc = &sc.irq_srcs[die][irq];
-        if intr_isrc_dispatch(aisrc, tf) != 0 {
-            return -1;
+        let isrc = &sc.irq_srcs[die][irq];
+        if intr_isrc_dispatch(isrc, tf) != 0 {
+            aic!(sc.dev, "stray irq {die}:{irq} disable");
+            return FILTER_STRAY;
         }
 
-        0
+        return FILTER_HANDLED;
     }
-    extern "C" fn apple_aic_fiq(sc: &AppleIntSoftc) -> i32 {
-        0
+
+    extern "C" fn apple_aic_fiq(sc: &AppleIntSoftc) -> Filter {
+        //aic!(sc.dev, "got fast interrupt request");
+        let tf = curthread!(td_intr_frame);
+
+        // #ifdef SMP
+        if read_specialreg!(reg!(AIC_IPI_SR_EL1)) & AIC_IPI_SR_EL1_PENDING != 0 {
+            aic!(sc.dev, "received an ipi");
+            write_specialreg!(reg!(AIC_IPI_SR_EL1), AIC_IPI_SR_EL1_PENDING);
+            isb!();
+            apple_aic_ipi_received(sc, tf);
+        }
+        let reg = read_specialreg!(cntp_ctl_el0);
+        //device_println!(sc.dev, "cntp_ctl_el0 {reg:x?}");
+        if (reg & CNTV_CTL_BITS) == (CNTV_CTL_ENABLE | CNTV_CTL_ISTATUS) {
+            let isrc = &sc.fiq_srcs[bindings::AIC_TMR_HV_PHYS as usize];
+            //device_println!(sc.dev, "dispatch isrc for EL1 phys timer {:x?}", unsafe { SubClass::get_base_ref_unchecked(isrc) });
+            intr_isrc_dispatch(isrc, tf);
+        };
+
+        let reg = read_specialreg!(cntv_ctl_el0);
+        //device_println!(sc.dev, "cntv_ctl_el0 {reg:x?}");
+        if (reg & CNTV_CTL_BITS) == (CNTV_CTL_ENABLE | CNTV_CTL_ISTATUS) {
+            intr_isrc_dispatch(&sc.fiq_srcs[bindings::AIC_TMR_HV_VIRT as usize], tf);
+        };
+
+        if in_vhe() {
+            let reg = read_specialreg!(reg!(AIC_FIQ_VM_TIMER));
+
+            aic!(sc.dev, "fiq_vm_timer {reg:x?}");
+            if (reg & AIC_FIQ_VM_TIMER_PEN) != 0 {
+                let reg = read_specialreg!(reg!(AIC_TMR_CTL_GUEST_PHYS));
+                if (reg & CNTV_CTL_BITS) == (CNTV_CTL_ENABLE | CNTV_CTL_ISTATUS) {
+                    intr_isrc_dispatch(&sc.fiq_srcs[bindings::AIC_TMR_GUEST_PHYS as usize], tf);
+                }
+            };
+            if (reg & AIC_FIQ_VM_TIMER_VEN) != 0 {
+                let reg = read_specialreg!(reg!(AIC_TMR_CTL_GUEST_VIRT));
+                if (reg & CNTV_CTL_BITS) == (CNTV_CTL_ENABLE | CNTV_CTL_ISTATUS) {
+                    intr_isrc_dispatch(&sc.fiq_srcs[bindings::AIC_TMR_GUEST_VIRT as usize], tf);
+                }
+            };
+        }
+        return FILTER_HANDLED;
+    }
+}
+
+fn apple_aic_ipi_received(sc: &AppleIntSoftc, tf: *mut trapframe) {
+    let cpu = pcpu_get!(pc_cpuid) as usize;
+    rmb!();
+    let mut mask = atomic_readandclear_32(sc.ipimasks[cpu].get_mut().deref_mut());
+
+    while mask != 0 {
+        let ipi = mask.trailing_zeros();
+        mask &= !(1 << ipi);
+
+        aic!(sc.dev, "dispatching ipi {ipi}");
+        intr_ipi_dispatch(ipi);
     }
 }
 
@@ -558,14 +638,14 @@ impl PicIf for AppleIntDriver {
         let (kind, flags) = get_fdt_intr_data(dev, &data)?;
         let sc = device_get_softc!(dev);
         if isrc.kind != kind {
-            device_println!(
+            aic!(
                 dev,
                 "input irq doesn't match dt {kind:?} vs {:?}",
                 isrc.kind
             );
             return Err(EINVAL);
         }
-        let base_isrc = unsafe { SubClass::get_base_ref(isrc) };
+        let base_isrc = unsafe { SubClass::get_base_ref_unchecked(isrc) };
         if base_isrc.isrc_flags & bindings::INTR_ISRCF_PPI as u32 != 0 {
             let cpuid = pcpu_get!(pc_cpuid);
             // CPU_SET(cpuid, &isrc->isrc_cpu);
@@ -681,6 +761,11 @@ impl PicIf for AppleIntDriver {
             INTR_ROOT_IRQ => {
                 let sc = device_get_softc!(dev);
                 if sc.cfg.version == 2 {
+                    /*
+                     * AIC2 doesn't provide a way to target external interrupt to a
+                     * particular core so disable IRQ delivery to secondary CPUs
+                     */
+                    //write_specialreg!(reg!(AIC_IRQ_CR_EL1), AIC_IRQ_CR_EL1_DISABLE);
                     return;
                 }
                 let cpuid = pcpu_get!(pc_cpuid);
@@ -688,6 +773,7 @@ impl PicIf for AppleIntDriver {
             }
         }
     }
+
     fn pic_ipi_setup(dev: Device, ipi: u32, isrcp: *mut *mut intr_irqsrc) -> Result<()> {
         let sc = device_get_softc!(dev);
         let ipi = ipi as usize;
@@ -701,6 +787,11 @@ impl PicIf for AppleIntDriver {
         }
 
         Ok(())
+    }
+
+    fn pic_ipi_send(dev: Device, isrc: &mut AppleIrqSrc, cpus: cpuset_t, ipi: u32) {
+        //aic!(dev, "sending ipi {ipi} for isrc {isrc:x?}");
+        let sc = device_get_softc!(dev);
     }
 }
 driver!(apple_aic_driver, c"aic", AppleIntDriver, apple_aic_methods,
@@ -724,8 +815,6 @@ driver!(apple_aic_driver, c"aic", AppleIntDriver, apple_aic_methods,
         pic_init_secondary apple_aic_init_secondary,
 
         pic_ipi_setup apple_aic_ipi_setup,
-        /*
         pic_ipi_send apple_aic_ipi_send,
-        */
     }
 );

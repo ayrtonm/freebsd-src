@@ -7,3 +7,6 @@ include		"std.apple"
 
 makeoptions	NO_MODULES
 makeoptions	WITHOUT_MODULES="hyperv"
+
+#options		DIAGNOSTIC
+#options		BOOTVERBOSE=1
