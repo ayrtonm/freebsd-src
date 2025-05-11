@@ -124,9 +124,10 @@ impl RTKit {
             //callbacks: [const { None }; 32],
         })
     }
-}
 
-impl RTKit {
+    pub fn boot(&self) -> Result<()> {
+        todo!("")
+    }
     pub fn set_iop(&self, pwr_state: PwrState) -> Result<()> {
         let pwr_state = pwr_state.into();
         // If already in the correct power state do nothing
@@ -450,14 +451,14 @@ impl EpTxMsg {
     }
 }
 
-#[no_mangle]
-extern "C" fn rtkit_init(dev: Device, noalloc: bool) -> *mut RTKit {
-    //RTKit::new(dev/*, noalloc*/).unwrap();
-    todo!("")
-}
-
-#[no_mangle]
-unsafe extern "C" fn rtkit_boot(rtkit: *mut RTKit) -> c_int {
-    //RTKit::boot(rtkit).unwrap();
-    todo!("")
-}
+//#[no_mangle]
+//extern "C" fn rtkit_init(dev: Device) -> *mut RTKit {
+//    RTKit::new(dev).unwrap();
+//    todo!("")
+//}
+//
+//#[no_mangle]
+//unsafe extern "C" fn rtkit_boot(rtkit: *mut RTKit) -> c_int {
+//    //RTKit::boot(rtkit).unwrap();
+//    todo!("")
+//}

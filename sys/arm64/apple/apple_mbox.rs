@@ -23,10 +23,9 @@
 use core::ffi::c_void;
 use core::mem::transmute;
 use core::ptr::null_mut;
-use core::ops::Deref;
 use kpi::bindings::{INTR_MPSAFE, INTR_TYPE_MISC};
 use kpi::bus::{Register, Resource};
-use kpi::cell::{FFICell, Checked};
+use kpi::cell::Checked;
 use kpi::device::{BusProbe, Device};
 use kpi::driver;
 
@@ -62,7 +61,7 @@ pub struct AppleMboxSoftc {
     irq: Resource,
     intr: Checked<Intr>,
     write_msg: Checked<WriteMsg>,
-    intrhand: FFICell<*mut c_void>,
+    intrhand: *mut c_void,
 }
 
 #[derive(Debug)]
@@ -99,22 +98,49 @@ impl DeviceIf for AppleMboxDriver {
     fn device_attach(dev: Device) -> Result<()> {
         let node = ofw_bus_get_node(dev);
 
-        let rid = ofw_bus_find_string_index(node, c"interrupt-names", c"recv-not-empty")?;
-        let irq = bus_alloc_resource(dev, SYS_RES_IRQ, rid, RF_ACTIVE)?;
-        let mem = bus_alloc_resource(dev, SYS_RES_MEMORY, 0, RF_ACTIVE)?;
-        let mut regs = mem.split_registers::<4>()?;
+        let rid = ofw_bus_find_string_index(node, c"interrupt-names", c"recv-not-empty").map_err(
+            |e| {
+                device_println!(
+                    dev,
+                    "could not find 'recv-not-empty' property in 'interrupt-names' {e}"
+                );
+                return ENXIO;
+            },
+        )?;
+        let irq = bus_alloc_resource_any(dev, SYS_RES_IRQ, rid, RF_ACTIVE).map_err(|e| {
+            device_println!(dev, "could not allocate irq resource {e}");
+            return ENXIO;
+        })?;
+        let mem = bus_alloc_resource_any(dev, SYS_RES_MEMORY, 0, RF_ACTIVE).map_err(|e| {
+            device_println!(dev, "could not allocate memory resource {e}");
+            return ENXIO;
+        })?;
+        let mut regs = mem.split_registers::<4>().map_err(|e| {
+            device_println!(dev, "tried to split non-memory resource");
+            return ENXIO;
+        })?;
 
-        let a2i_ctrl = regs.take_register(MBOX_A2I_CTRL, 4)?;
-        let a2i_send = regs.take_register(MBOX_A2I_SEND0, 0x10)?;
-        let i2a_ctrl = regs.take_register(MBOX_I2A_CTRL, 4)?;
-        let i2a_recv = regs.take_register(MBOX_I2A_RECV0, 0x10)?;
+        let a2i_ctrl = regs.take_register(MBOX_A2I_CTRL, 4).map_err(|e| {
+            device_print!(dev, "failed to split {MBOX_A2I_CTRL:x?} from register");
+            return ENXIO;
+        })?;
+        let a2i_send = regs.take_register(MBOX_A2I_SEND0, 0x10).map_err(|e| {
+            device_print!(dev, "failed to split {MBOX_A2I_SEND0:x?} from register");
+            return ENXIO;
+        })?;
+        let i2a_ctrl = regs.take_register(MBOX_I2A_CTRL, 4).map_err(|e| {
+            device_print!(dev, "failed to split {MBOX_I2A_CTRL:x?} from register");
+            return ENXIO;
+        })?;
+        let i2a_recv = regs.take_register(MBOX_I2A_RECV0, 0x10).map_err(|e| {
+            device_print!(dev, "failed to split {MBOX_I2A_RECV0:x?} from register");
+            return ENXIO;
+        })?;
 
         let intr = Checked::new(Intr {
             i2a_ctrl,
             i2a_recv,
-            callback: |_, _|  {
-                panic!("Received RTKit message without a callback installed")
-            },
+            callback: |_, _| panic!("Received RTKit message without a callback installed"),
             arg: null_mut(),
         });
 
@@ -130,7 +156,7 @@ impl DeviceIf for AppleMboxDriver {
                 irq,
                 intr,
                 write_msg,
-                intrhand: FFICell::zeroed(),
+                intrhand: null_mut(),
             }
         );
 
@@ -165,11 +191,19 @@ impl AppleMboxDriver {
         let func = unsafe { transmute(func) };
         intr.callback = func;
         intr.arg = arg as *const T as *const c_void as *mut c_void;
+        drop(intr);
 
         let flags = INTR_MPSAFE | INTR_TYPE_MISC;
-        let intrhand = sc.intrhand.as_ptr();
 
-        self.bus_setup_intr(mbox, &sc.irq, flags, None, Some(apple_mbox_intr), sc.deref(), intrhand)?;
+        bus_setup_intr(
+            mbox,
+            &sc.irq,
+            flags,
+            None,
+            Some(apple_mbox_intr),
+            &sc,
+            &project!(sc->intrhand),
+        )?;
 
         Ok(())
     }
