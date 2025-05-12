@@ -527,7 +527,7 @@ skip_phys:
 
 #ifdef FDT
 static struct ofw_compat_data compat_data[] = {
-	{ "snps,dwc3",	1 },
+	{ "NOT_YET snps,dwc3",	1 },
 	{ NULL,		0 }
 };
 

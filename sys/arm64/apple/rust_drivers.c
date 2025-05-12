@@ -7,6 +7,7 @@ extern driver_t apple_aic_driver;
 extern driver_t apple_mbox_driver;
 extern driver_t apple_rtkit_driver;
 extern driver_t nvme_ans_driver;
+extern driver_t apple_smc_driver;
 
 EARLY_DRIVER_MODULE(aic, simplebus, apple_aic_driver, 0, 0,
     BUS_PASS_INTERRUPT + BUS_PASS_ORDER_MIDDLE);
@@ -18,3 +19,5 @@ EARLY_DRIVER_MODULE(apple_rtkit, simplebus, apple_rtkit_driver, 0, 0,
     BUS_PASS_INTERRUPT + BUS_PASS_ORDER_LAST);
 
 DRIVER_MODULE(nvme, simplebus, nvme_ans_driver, NULL, NULL);
+
+DRIVER_MODULE(apple_smc, simplebus, apple_smc_driver, NULL, NULL);
