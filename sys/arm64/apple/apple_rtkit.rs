@@ -34,8 +34,7 @@ use kpi::cell::Checked;
 use kpi::device::{BusProbe, Device};
 use kpi::driver;
 use kpi::ofw::XRef;
-use kpi::sync::Arc;
-use rtkit::{ManagesRTKit, PwrState, RTKit};
+use rtkit::{PwrState, RTKit};
 
 const CPU_CTRL: u64 = 0x44;
 const CPU_CTRL_RUN: u32 = 1 << 4;
@@ -50,13 +49,7 @@ const SPEC: [ResourceSpec; 2] = [
 pub struct AppleRTKitSoftc {
     asc: Checked<Register>,
     sram: Checked<Register>,
-    rtkit: Arc<RTKit, M_DEVBUF>,
-}
-
-impl ManagesRTKit for AppleRTKitDriver {
-    fn get_rtkit(sc: &Self::Softc) -> &Arc<RTKit, M_DEVBUF> {
-        &sc.rtkit
-    }
+    rtkit: RTKit,
 }
 
 impl DeviceIf for AppleRTKitDriver {
@@ -97,14 +90,10 @@ impl DeviceIf for AppleRTKitDriver {
         let rtkit =
             RTKit::new(dev).inspect_err(|e| device_println!(dev, "failed to create RTKit {e}"))?;
 
-        let refcounted_rtkit = Arc::try_new(rtkit, M_NOWAIT).inspect_err(|e| {
-            device_println!(dev, "failed to allocate memory for refcounted RTKit {e}");
-        })?;
-
         let sc = AppleRTKitSoftc {
             asc,
             sram,
-            rtkit: refcounted_rtkit,
+            rtkit,
         };
 
         device_init_softc!(dev, sc);
@@ -129,7 +118,7 @@ impl AppleRTKitDriver {
         let ctrl = bus_read_4!(asc, CPU_CTRL);
         bus_write_4!(asc, CPU_CTRL, ctrl | CPU_CTRL_RUN);
 
-        Self::rtkit_boot(dev).inspect_err(|e| {
+        RTKit::boot(project!(&sc.rtkit)).inspect_err(|e| {
             device_println!(dev, "failed to boot RTKit {e}");
         })?;
 

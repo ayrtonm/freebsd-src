@@ -391,6 +391,8 @@ err_alloc_tx:
 	return (ENXIO);
 }
 
+int apple_rtkit_boot(device_t dev, phandle_t helper);
+
 static void
 dockchannel_hid_start_config_hook(void *arg)
 {
