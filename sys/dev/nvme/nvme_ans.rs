@@ -46,7 +46,7 @@
 
 use core::ffi::c_void;
 use kpi::bindings::{
-    bus_addr_t, bus_dma_tag_t, bus_dmamap_t, bus_size_t, nvme_controller, nvme_qpair,
+    nvme_controller, bus_addr_t, bus_dma_tag_t, bus_dmamap_t, bus_size_t, nvme_qpair,
     nvme_registers, nvme_tracker, phandle_t, INTR_MPSAFE, INTR_TYPE_MISC, QUIRK_ANS,
 };
 use kpi::bus::{Register, Resource};
@@ -120,7 +120,7 @@ pub struct NvmeAnsSoftc {
 }
 
 impl DeviceIf for NvmeAnsDriver {
-    type Softc = SubClass<bindings::nvme_controller, NvmeAnsSoftc>;
+    type Softc = SubClass<nvme_controller, NvmeAnsSoftc>;
 
     fn device_probe(dev: Device) -> Result<BusProbe> {
         if !ofw_bus_status_okay(dev) {
@@ -194,7 +194,7 @@ impl DeviceIf for NvmeAnsDriver {
             ioq,
         };
         let sc = device_init_softc!(dev, SubClass::new_with_base(ctrlr, ans_sc));
-        let ctrlr = SubClass::get_base_ref(&sc);
+        let ctrlr = sc.get_base();
         let error = unsafe {
             bindings::bus_setup_intr(
                 dev.as_ptr(),
@@ -236,7 +236,7 @@ impl DeviceIf for NvmeAnsDriver {
 impl NvmeAnsDriver {
     fn nvme_delayed_attach(dev: Device) -> Result<()> {
         let sc = device_get_softc!(dev);
-        let mut ctrlr = unsafe { SubClass::get_base_ref_unchecked(&sc) };
+        let mut ctrlr = sc.get_base();
         let mut ans = sc.ans.get_mut();
         let mut ctrl = bus_read_4!(ans, ANS_CPU_CTRL);
         bus_write_4!(ans, ANS_CPU_CTRL, ctrl | ANS_CPU_CTRL_RUN);
@@ -246,7 +246,7 @@ impl NvmeAnsDriver {
         let mut status = bus_read_4!(nvme_reg, ANS_BOOT_STATUS);
         if status != ANS_BOOT_STATUS_OK {
             device_println!(dev, "booting rtkit");
-            sc.rtkit.boot()?;
+            RTKit::boot(project!(&sc.rtkit))?;
         }
         for timo in 0..100000 {
             status = bus_read_4!(nvme_reg, ANS_BOOT_STATUS);
@@ -286,7 +286,7 @@ impl NvmeAnsDriver {
 
     fn nvme_enable(dev: Device) -> Result<()> {
         let sc = device_get_softc!(dev);
-        let mut ctrlr = unsafe { SubClass::get_base_ref_unchecked(&sc) };
+        let mut ctrlr = sc.get_base();
         let res: Resource = ctrlr.res.as_rust_type();
         let mut nvme_reg = res.as_register()?;
         bus_write_4!(
@@ -313,7 +313,7 @@ impl NvmeAnsDriver {
         let id = unsafe { (*tr.req).cmd.cid };
         let cmd = unsafe { qpair.cmd.add(usize::from(id)) };
 
-        let mut ctrlr = unsafe { SubClass::get_base_ref_unchecked(&sc) };
+        let mut ctrlr = sc.get_base();
         let res: Resource = ctrlr.res.as_rust_type();
         let mut nvme_reg = res.as_register().unwrap();
         bus_write_4!(nvme_reg, u64::from(qpair.sq_tdbl_off), u32::from(id));

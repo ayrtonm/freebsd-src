@@ -18,18 +18,19 @@
 #![no_std]
 #![allow(unused)]
 
+use kpi::cell::{OwnedRef, OwnedPtr, Checked};
 use kpi::prelude::*;
 use core::ffi::c_int;
 use core::ops::Deref;
 use core::sync::atomic::{AtomicU64, AtomicU16, Ordering};
 use kpi::device::Device;
 use kpi::taskq::Task;
-use kpi::sleep::Sleepable;
 use kpi::sync::Arc;
+use core::mem::transmute;
 
 use apple_mbox::{apple_mbox_driver, AppleMboxMsg};
 
-type Box<T, M> = kpi::boxed::Box<T, M>;
+type Box<T> = kpi::boxed::Box<T, M_DEVBUF>;
 
 #[repr(u16)]
 #[derive(Debug)]
@@ -45,89 +46,92 @@ impl Into<u16> for PwrState {
     }
 }
 
+pub type RTKitRx<T> = extern "C" fn(OwnedRef<T>, u64) -> Result<()>;
+pub type RawRTKitRx = extern "C" fn(OwnedPtr<(), true>, u64) -> Result<()>;
+
+#[derive(Debug)]
+struct RTKitClosure {
+    func: RawRTKitRx,
+    arg: OwnedPtr,
+}
+
 #[repr(C)]
 #[derive(Debug)]
 pub struct RTKit {
     client: Device,
     mbox: Device,
 
-    iop: Sleepable<AtomicU16>,
-    ap: Sleepable<AtomicU16>,
+    iop: AtomicU16,
+    ap: AtomicU16,
 
     verbose: bool,
     noalloc: bool,
     ep_map: AtomicU64,
-    // TODO: Use Checked here
-    //callbacks: [Option<(AppleMboxRx<RTKit>, AtomicPtr<c_void>)>; 32],
+    callbacks: Checked<[Option<RTKitClosure>; 32]>,
 }
+
+type RTKitTask = Task<RTKitTaskCtx>;
 
 #[derive(Debug)]
 struct RTKitTaskCtx {
-    rtkit: Arc<RTKit, M_DEVBUF>,
+    rtkit: OwnedPtr<RTKit, true>,
     msg: AppleMboxMsg,
-}
-
-pub trait ManagesRTKit: DeviceIf + IsDriver + Sized {
-    fn get_rtkit(sc: &Self::Softc) -> &Arc<RTKit, M_DEVBUF>;
-
-    fn rtkit_boot(client: Device) -> Result<()> {
-        let sc = device_get_softc!(client);
-        let rtkit = Self::get_rtkit(sc.deref());
-        apple_mbox_driver.set_rx(rtkit.mbox, rtkit.client, /*self,*/ Self::rx_callback, sc.deref())
-    }
-
-    fn rx_callback(sc: &Self::Softc, msg: AppleMboxMsg) -> Result<()> {
-        let rtkit = Self::get_rtkit(sc.deref()).clone();
-        let ctx = RTKitTaskCtx {
-            rtkit,
-            msg,
-        };
-        let mut task = Task::new(ctx);
-        task.init(rx_task);
-        let boxed_task = Box::try_new(task, M_NOWAIT).inspect_err(|e| {
-            println!("failed to allocate memory for task {e}");
-        })?;
-        taskqueue_enqueue(taskqueue_thread(), boxed_task)
-    }
-}
-
-extern "C" fn rx_task(ctx: Box<Task<RTKitTaskCtx>, M_DEVBUF>, pending: c_int) {
-    let ep = EpRxMsg::new(ctx.msg);
-    let _res = match ep {
-        EpRxMsg::Mgmt(msg) => handle_mgmt(&ctx, msg),
-        EpRxMsg::Crashlog => todo!(""),
-        EpRxMsg::Syslog => todo!(""),
-        EpRxMsg::Debug => todo!(""),
-        EpRxMsg::IOReport => todo!(""),
-        EpRxMsg::OSlog => todo!(""),
-        EpRxMsg::Tracekit => todo!(""),
-        EpRxMsg::Custom(_ep) => todo!(""),
-        EpRxMsg::Unknown(_ep) => todo!(""),
-    };
 }
 
 impl RTKit {
     pub fn new(client: Device) -> Result<Self> {
         let mbox = apple_mbox_driver.get_mbox(client)?;
-        let iop = Sleepable::new(AtomicU16::new(PwrState::Sleep.into()));
-        let ap = Sleepable::new(AtomicU16::new(PwrState::Quiesced.into()));
+        let iop = AtomicU16::new(PwrState::Sleep.into());
+        let ap = AtomicU16::new(PwrState::Quiesced.into());
         Ok(Self {
             client,
             mbox,
-
             iop,
             ap,
-
             verbose: false,
             noalloc: false,
             ep_map: AtomicU64::new(0),
-            //callbacks: [const { None }; 32],
+            callbacks: Checked::new([const { None }; 32]),
         })
     }
 
-    pub fn boot(&self) -> Result<()> {
-        todo!("")
+    pub fn boot(rtkit: &OwnedRef<Self>) -> Result<()> {
+        apple_mbox_driver.set_rx(rtkit.mbox, rtkit.client, Self::rx_callback, rtkit)
     }
+
+    pub extern "C" fn rx_callback(rtkit: OwnedPtr<Self, true>, msg: AppleMboxMsg) -> Result<()> {
+        let client = rtkit.as_ref().client;
+        let ctx = RTKitTaskCtx {
+            rtkit,
+            msg,
+        };
+        let mut task = Task::new(ctx);
+        let boxed_task = Box::try_new(task, M_NOWAIT).inspect_err(|e| {
+            device_println!(client, "failed to allocate memory for task {e}");
+        })?;
+        taskqueue_enqueue(taskqueue_thread(), boxed_task, Self::rx_task).map_err(|(e, _task)| {
+            device_println!(client, "failed to enqueue task {e}");
+            return e;
+        })?;
+        Ok(())
+    }
+
+    extern "C" fn rx_task(ctx: Box<RTKitTask>, pending: c_int) {
+        let ep = EpRxMsg::new(ctx.msg);
+        let _res = match ep {
+            EpRxMsg::Mgmt(msg) => handle_mgmt(&ctx, msg),
+            EpRxMsg::Crashlog => todo!(""),
+            EpRxMsg::Syslog => todo!(""),
+            EpRxMsg::Debug => todo!(""),
+            EpRxMsg::IOReport => todo!(""),
+            EpRxMsg::OSlog => todo!(""),
+            EpRxMsg::Tracekit => todo!(""),
+            EpRxMsg::Custom(_ep) => todo!(""),
+            EpRxMsg::Unknown(_ep) => todo!(""),
+        };
+    }
+
+
     pub fn set_iop(&self, pwr_state: PwrState) -> Result<()> {
         let pwr_state = pwr_state.into();
         // If already in the correct power state do nothing
@@ -162,10 +166,25 @@ impl RTKit {
             Ok(())
         }
     }
+
+    pub fn start_endpoint<T>(&self, ep: u32, func: RTKitRx<T>, arg: &OwnedRef<T>) -> Result<()> {
+        let func = unsafe { transmute(func) };
+        let arg = arg.erase_lifetime().erase_type();
+        let closure = RTKitClosure { func, arg };
+        let mut this_endpoint = &mut self.callbacks.get_mut()[32 - (ep as usize)];
+        *this_endpoint = Some(closure);
+        //this_endpoint.func = func;
+        //this_endpoint.arg = arg;
+
+        let start_ep = MgmtTxMsg::StartEp { ep };
+        let msg = EpTxMsg::Mgmt(start_ep);
+        apple_mbox_driver.write_msg(self.mbox, msg.as_apple_mbox_msg())
+    }
 }
 
-fn mbox_send_from_task(ctx: &Task<RTKitTaskCtx>, msg: EpTxMsg) -> Result<()> {
-    apple_mbox_driver.write_msg(ctx.rtkit.mbox, msg.as_apple_mbox_msg())
+fn mbox_send_from_task(ctx: &RTKitTask, msg: EpTxMsg) -> Result<()> {
+    let rtkit = ctx.rtkit.as_ref();
+    apple_mbox_driver.write_msg(rtkit.mbox, msg.as_apple_mbox_msg())
 }
 
 const MSG_TYPE_SHIFT: u64 = 52;
@@ -324,7 +343,8 @@ mod mgmt {
 const MINVER: u16 = 11;
 const MAXVER: u16 = 12;
 
-fn handle_mgmt(ctx: &Task<RTKitTaskCtx>, msg: MgmtRxMsg) -> Result<()> {
+fn handle_mgmt(ctx: &RTKitTask, msg: MgmtRxMsg) -> Result<()> {
+    let rtkit = ctx.rtkit.as_ref();
     match msg {
         MgmtRxMsg::Hello { minver, maxver } => {
             if minver > MAXVER {
@@ -344,24 +364,24 @@ fn handle_mgmt(ctx: &Task<RTKitTaskCtx>, msg: MgmtRxMsg) -> Result<()> {
             mbox_send_from_task(ctx, EpTxMsg::Mgmt(ack))
         }
         MgmtRxMsg::IopPwrStateAck(pwr_state) => {
-            ctx.rtkit.iop.store(pwr_state, Ordering::Relaxed);
-            wakeup(&ctx.rtkit.iop);
+            rtkit.iop.store(pwr_state, Ordering::Relaxed);
+            wakeup(&rtkit.iop);
             Ok(())
         }
         MgmtRxMsg::ApPwrStateAck(pwr_state) => {
-            ctx.rtkit.ap.store(pwr_state, Ordering::Relaxed);
-            wakeup(&ctx.rtkit.ap);
+            rtkit.ap.store(pwr_state, Ordering::Relaxed);
+            wakeup(&rtkit.ap);
             Ok(())
         }
         MgmtRxMsg::EpMap { base, bitmap, last } => {
-            let old_bitmap = ctx.rtkit.ep_map.load(Ordering::Relaxed);
+            let old_bitmap = rtkit.ep_map.load(Ordering::Relaxed);
             let new_bits = (bitmap as u64) << (base * 32);
             let new_bitmap = old_bitmap | new_bits;
-            ctx.rtkit.ep_map.store(new_bitmap, Ordering::Relaxed);
+            rtkit.ep_map.store(new_bitmap, Ordering::Relaxed);
             let reply = MgmtTxMsg::EpMap { base, last };
             mbox_send_from_task(ctx, EpTxMsg::Mgmt(reply))?;
             if last {
-                let dev = ctx.rtkit.client;
+                let dev = rtkit.client;
                 // range bounds are not a typo, bit 0 is not an endpoint
                 for ep in 1..32 {
                     if new_bitmap & (1 << ep) == 0 {
@@ -450,15 +470,3 @@ impl EpTxMsg {
         }
     }
 }
-
-//#[no_mangle]
-//extern "C" fn rtkit_init(dev: Device) -> *mut RTKit {
-//    RTKit::new(dev).unwrap();
-//    todo!("")
-//}
-//
-//#[no_mangle]
-//unsafe extern "C" fn rtkit_boot(rtkit: *mut RTKit) -> c_int {
-//    //RTKit::boot(rtkit).unwrap();
-//    todo!("")
-//}
