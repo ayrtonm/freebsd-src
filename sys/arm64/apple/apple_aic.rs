@@ -30,19 +30,19 @@
 #![no_std]
 #![feature(macro_metavar_expr_concat)]
 
-use core::ops::DerefMut;
-use core::sync::atomic::AtomicU32;
-use kpi::bindings::{cpuset_t, intr_irqsrc, intr_polarity, intr_trigger, trapframe};
-use kpi::bus::{Filter, Register, Resource};
-use kpi::cell::Checked;
-use kpi::cell::{SubClass, OwnedPtr};
-use kpi::device::{BusProbe, Device};
-use kpi::driver;
-use kpi::enum_c_macros;
-use kpi::intr::{IntrRoot, IrqSrc, MapData};
-use kpi::ofw::OfwCompatData;
 use core::array;
 use core::mem::MaybeUninit;
+use core::ops::DerefMut;
+use core::sync::atomic::AtomicU32;
+use kpi::bindings::{cpuset_t, device_t, intr_irqsrc, intr_polarity, intr_trigger, trapframe};
+use kpi::bus::{Filter, Register, Resource};
+use kpi::cell::Mutable;
+use kpi::cell::{Ref, SubClass};
+use kpi::device::BusProbe;
+use kpi::driver;
+use kpi::enum_c_macros;
+use kpi::intr::{IntrRoot, IrqSrc, MapData, Pic};
+use kpi::ofw::OfwCompatData;
 
 type Box<T> = kpi::boxed::Box<T, M_DEVBUF>;
 type Vec<T, M> = kpi::vec::Vec<T, M>;
@@ -287,23 +287,23 @@ pub fn new_irq_src(kind: AppleIntrKind) -> AppleIrqSrc {
 
 #[derive(Debug)]
 pub struct AppleIntSoftc {
-    dev: Device,
+    dev: device_t,
     cfg: &'static AppleIntData,
-    mem: Checked<Register>,
-    event: Option<Checked<Register>>,
+    mem: Mutable<Register>,
+    event: Option<Mutable<Register>>,
     irq_srcs: Box<[Box<[AppleIrqSrc]>]>,
     fiq_srcs: [AppleIrqSrc; NUM_FIQS],
     ipi_srcs: [AppleIrqSrc; NUM_IPIS],
     ndie: usize,
     nirqs: usize,
-    // TODO: make proper bindings for atomic_readandclear_32 and remove Checked
-    ipimasks: Box<[Checked<u32>]>,
+    ipimasks: Box<[AtomicU32]>,
+    pic: Pic,
 }
 
 impl DeviceIf for AppleIntDriver {
     type Softc = AppleIntSoftc;
 
-    fn device_probe(dev: Device) -> Result<BusProbe> {
+    fn device_probe(dev: device_t) -> Result<BusProbe> {
         if !ofw_bus_status_okay(dev) {
             return Err(ENXIO);
         }
@@ -314,7 +314,7 @@ impl DeviceIf for AppleIntDriver {
         return Ok(BUS_PROBE_DEFAULT);
     }
 
-    fn device_attach(dev: Device) -> Result<()> {
+    fn device_attach(dev: device_t) -> Result<()> {
         // Cannot fail since it must have been called successfully in device_probe
         let cfg = ofw_bus_search_compatible(dev, &COMPAT_DATA).unwrap();
 
@@ -331,7 +331,7 @@ impl DeviceIf for AppleIntDriver {
                     device_println!(dev, "unable to allocate event register {e}");
                     return ENXIO;
                 })?;
-            event = Some(Checked::new(Register::new(event_res)?));
+            event = Some(Mutable::new(Register::new(event_res)?));
         };
         let info = bus_read_4!(mem, AIC_INFO);
         let nirqs = info_nirqs(info);
@@ -370,7 +370,7 @@ impl DeviceIf for AppleIntDriver {
         let num_masks = mp_maxid() + 1;
         let mut ipimasks = Vec::try_with_capacity(num_masks, M_WAITOK | M_ZERO)?;
         for i in 0..num_masks {
-            ipimasks.push(Checked::new(0));
+            ipimasks.push(AtomicU32::new(0));
         }
         let ipimasks = ipimasks.into_boxed_slice();
         if cfg.version == 1 {
@@ -379,7 +379,7 @@ impl DeviceIf for AppleIntDriver {
         let sc = AppleIntSoftc {
             dev,
             cfg,
-            mem: Checked::new(mem),
+            mem: Mutable::new(mem),
             event,
             irq_srcs,
             fiq_srcs,
@@ -387,12 +387,13 @@ impl DeviceIf for AppleIntDriver {
             ndie,
             nirqs,
             ipimasks,
+            pic: Pic::new(),
         };
         let sc = device_init_softc!(dev, sc);
         let name = device_get_nameunit(dev);
-        for die in 0..ndie {
-            for irq in 0..nirqs {
-                let isrc = project!(&sc->irq_srcs[die][irq]);
+        for die in 0..sc.ndie {
+            for irq in 0..sc.nirqs {
+                let isrc = project!(sc->irq_srcs[die][irq]);
                 if let Err(e) = intr_isrc_register(
                     isrc,
                     sc.dev,
@@ -408,7 +409,7 @@ impl DeviceIf for AppleIntDriver {
             }
         }
         for fiq in 0..NUM_FIQS {
-            let isrc = project!(&sc->fiq_srcs[fiq]);
+            let isrc = project!(sc->fiq_srcs[fiq]);
             if let Err(e) = intr_isrc_register(
                 isrc,
                 sc.dev,
@@ -424,7 +425,7 @@ impl DeviceIf for AppleIntDriver {
         }
 
         for ipi in 0..NUM_IPIS {
-            let isrc = project!(&sc->ipi_srcs[ipi]);
+            let isrc = project!(sc->ipi_srcs[ipi]);
             if let Err(e) = intr_isrc_register(
                 isrc,
                 sc.dev,
@@ -443,7 +444,6 @@ impl DeviceIf for AppleIntDriver {
             return Err(ENXIO);
         }
 
-
         let xref = OF_xref_from_node(ofw_bus_get_node(dev));
         if let Err(e) = intr_pic_register(dev, xref) {
             device_println!(dev, "unable to register interrupt handler {e}");
@@ -452,13 +452,27 @@ impl DeviceIf for AppleIntDriver {
 
         OF_device_register_xref(xref, dev);
 
-        if let Err(e) = intr_pic_claim_root(dev, xref, Self::apple_aic_irq, &sc, INTR_ROOT_IRQ) {
+        if let Err(e) = intr_pic_claim_root(
+            dev,
+            project!(sc->pic),
+            xref,
+            Self::apple_aic_irq,
+            sc,
+            INTR_ROOT_IRQ,
+        ) {
             device_println!(dev, "unable to set root interrupt controller {e}");
             //intr_pic_deregister(dev, xref);
             return Err(ENXIO);
         }
 
-        if let Err(e) = intr_pic_claim_root(dev, xref, Self::apple_aic_fiq, &sc, INTR_ROOT_FIQ) {
+        if let Err(e) = intr_pic_claim_root(
+            dev,
+            project!(sc->pic),
+            xref,
+            Self::apple_aic_fiq,
+            sc,
+            INTR_ROOT_FIQ,
+        ) {
             device_println!(dev, "unable to set root fiq controller {e}");
             //intr_pic_deregister(dev, xref);
             return Err(ENXIO);
@@ -579,7 +593,7 @@ impl AppleIntDriver {
 fn apple_aic_ipi_received(sc: &AppleIntSoftc, tf: *mut trapframe) {
     let cpu = pcpu_get!(pc_cpuid) as usize;
     rmb!();
-    let mut mask = atomic_readandclear_32(sc.ipimasks[cpu].get_mut().deref_mut());
+    let mut mask = atomic_readandclear_32(&sc.ipimasks[cpu]);
 
     while mask != 0 {
         let ipi = mask.trailing_zeros();
@@ -590,7 +604,7 @@ fn apple_aic_ipi_received(sc: &AppleIntSoftc, tf: *mut trapframe) {
     }
 }
 
-fn get_fdt_intr_data(dev: Device, data: &MapData) -> Result<(AppleIntrKind, i32)> {
+fn get_fdt_intr_data(dev: device_t, data: &MapData) -> Result<(AppleIntrKind, i32)> {
     match data {
         MapData::FDT(fdt_data) => {
             /*
@@ -632,7 +646,7 @@ impl PicIf for AppleIntDriver {
     type IrqSrcFields = AppleIrqSrcFields;
 
     fn pic_setup_intr(
-        dev: Device,
+        dev: device_t,
         isrc: &mut AppleIrqSrc,
         res: Resource,
         data: MapData,
@@ -647,10 +661,13 @@ impl PicIf for AppleIntDriver {
             );
             return Err(EINVAL);
         }
-        let base_isrc = isrc.get_base();
+        let base_isrc = SubClass::get_base(isrc);
         if base_isrc.isrc_flags & bindings::INTR_ISRCF_PPI as u32 != 0 {
             let cpuid = pcpu_get!(pc_cpuid);
-            CPU_SET(cpuid, &base_isrc.isrc_cpu as *const cpuset_t as *mut cpuset_t);
+            CPU_SET(
+                cpuid,
+                &base_isrc.isrc_cpu as *const cpuset_t as *mut cpuset_t,
+            );
         }
         if sc.cfg.version == 1 {
             if let AppleIntrKind::Irq { die, irq } = isrc.kind {
@@ -663,23 +680,27 @@ impl PicIf for AppleIntDriver {
         Ok(())
     }
 
-    fn pic_map_intr(dev: Device, data: MapData, isrcp: &mut OwnedPtr<AppleIrqSrc>) -> Result<()> {
+    fn pic_map_intr(
+        dev: device_t,
+        data: MapData,
+        isrcp: &mut Option<Ref<AppleIrqSrc>>,
+    ) -> Result<()> {
         let (kind, _flags) = get_fdt_intr_data(dev, &data)?;
 
         let sc = device_get_softc!(dev);
         match kind {
             AppleIntrKind::Irq { die, irq } => {
-                *isrcp = project!(&sc->irq_srcs[die][irq]);
-            },
+                *isrcp = Some(project!(sc->irq_srcs[die][irq]));
+            }
             AppleIntrKind::Fiq(fiq) => {
-                *isrcp = project!(&sc->fiq_srcs[fiq as usize])
-            },
+                *isrcp = Some(project!(sc->fiq_srcs[fiq as usize]));
+            }
             AppleIntrKind::Ipi => (),
         }
         Ok(())
     }
 
-    fn pic_enable_intr(dev: Device, isrc: &mut AppleIrqSrc) {
+    fn pic_enable_intr(dev: device_t, isrc: &mut AppleIrqSrc) {
         let sc = device_get_softc!(dev);
         match isrc.kind {
             AppleIntrKind::Irq { die, irq } => {
@@ -692,7 +713,7 @@ impl PicIf for AppleIntDriver {
         }
     }
 
-    fn pic_disable_intr(dev: Device, isrc: &mut AppleIrqSrc) {
+    fn pic_disable_intr(dev: device_t, isrc: &mut AppleIrqSrc) {
         let sc = device_get_softc!(dev);
         match isrc.kind {
             AppleIntrKind::Irq { die, irq } => {
@@ -706,7 +727,7 @@ impl PicIf for AppleIntDriver {
     }
 
     fn pic_teardown_intr(
-        dev: Device,
+        dev: device_t,
         isrc: &mut AppleIrqSrc,
         res: Resource,
         data: MapData,
@@ -714,7 +735,7 @@ impl PicIf for AppleIntDriver {
         todo!("")
     }
 
-    fn pic_post_filter(dev: Device, isrc: &mut AppleIrqSrc) {
+    fn pic_post_filter(dev: device_t, isrc: &mut AppleIrqSrc) {
         let sc = device_get_softc!(dev);
         match isrc.kind {
             AppleIntrKind::Irq { die, irq } => {
@@ -728,7 +749,7 @@ impl PicIf for AppleIntDriver {
         }
     }
 
-    fn pic_pre_ithread(dev: Device, isrc: &mut AppleIrqSrc) {
+    fn pic_pre_ithread(dev: device_t, isrc: &mut AppleIrqSrc) {
         let sc = device_get_softc!(dev);
         match isrc.kind {
             AppleIntrKind::Irq { die, irq } => {
@@ -740,7 +761,7 @@ impl PicIf for AppleIntDriver {
         }
     }
 
-    fn pic_post_ithread(dev: Device, isrc: &mut AppleIrqSrc) {
+    fn pic_post_ithread(dev: device_t, isrc: &mut AppleIrqSrc) {
         let sc = device_get_softc!(dev);
         match isrc.kind {
             AppleIntrKind::Irq { die, irq } => {
@@ -751,11 +772,11 @@ impl PicIf for AppleIntDriver {
         }
     }
 
-    fn pic_bind_intr(dev: Device, isrc: &mut AppleIrqSrc) -> Result<()> {
+    fn pic_bind_intr(dev: device_t, isrc: &mut AppleIrqSrc) -> Result<()> {
         return Err(ENOTSUP);
     }
 
-    fn pic_init_secondary(dev: Device, root: IntrRoot) {
+    fn pic_init_secondary(dev: device_t, root: IntrRoot) {
         match root {
             INTR_ROOT_FIQ => {
                 apple_aic_init_cpu();
@@ -776,28 +797,31 @@ impl PicIf for AppleIntDriver {
         }
     }
 
-    fn pic_ipi_setup(dev: Device, ipi: u32, isrcp: &mut OwnedPtr<AppleIrqSrc>) -> Result<()> {
+    fn pic_ipi_setup(dev: device_t, ipi: u32, isrcp: &mut Option<Ref<AppleIrqSrc>>) -> Result<()> {
         let sc = device_get_softc!(dev);
         let ipi = ipi as usize;
         if ipi >= NUM_IPIS {
             panic!("ipi {ipi} too high");
         }
         let cpuid = pcpu_get!(pc_cpuid);
-        let base_isrc = sc.ipi_srcs[ipi].get_base();
-        CPU_SET(pcpu_get!(pc_cpuid), &base_isrc.isrc_cpu as *const cpuset_t as *mut cpuset_t);
-        *isrcp = project!(&sc->ipi_srcs[ipi]);
+        let base_isrc = SubClass::get_base(&sc.ipi_srcs[ipi]);
+        CPU_SET(
+            pcpu_get!(pc_cpuid),
+            &base_isrc.isrc_cpu as *const cpuset_t as *mut cpuset_t,
+        );
+        *isrcp = Some(project!(sc->ipi_srcs[ipi]));
 
         Ok(())
     }
 
-    fn pic_ipi_send(dev: Device, isrc: &mut AppleIrqSrc, cpus: cpuset_t, ipi: u32) {
+    fn pic_ipi_send(dev: device_t, isrc: &mut AppleIrqSrc, cpus: cpuset_t, ipi: u32) {
         let sc = device_get_softc!(dev);
         let localgrp = CPU_AFF1(CPU_AFFINITY(pcpu_get!(pc_cpuid)));
         for cpu in 0..mp_maxid() as bindings::u_int {
             if CPU_ISSET(cpu, &cpus) {
                 let aff = CPU_AFFINITY(cpu);
                 let mut sendmask = CPU_AFF0(aff);
-                atomic_set_32(sc.ipimasks[cpu as usize].get_mut().deref_mut(), 1 << ipi);
+                atomic_set_32(&sc.ipimasks[cpu as usize], 1 << ipi);
                 wmb!();
 
                 if CPU_AFF1(aff) == localgrp {
@@ -813,7 +837,7 @@ impl PicIf for AppleIntDriver {
 }
 driver!(apple_aic_driver, c"aic", AppleIntDriver, apple_aic_methods,
     INTERFACES {
-        /* Device interface */
+        /* device_t interface */
         device_probe apple_aic_probe,
         device_attach apple_aic_attach,
 

@@ -18,6 +18,6 @@ EARLY_DRIVER_MODULE(apple_mbox, simplebus, apple_mbox_driver, 0, 0,
 EARLY_DRIVER_MODULE(apple_rtkit, simplebus, apple_rtkit_driver, 0, 0,
     BUS_PASS_INTERRUPT + BUS_PASS_ORDER_LAST);
 
-DRIVER_MODULE(nvme, simplebus, nvme_ans_driver, NULL, NULL);
+DRIVER_MODULE(nvme, simplebus, nvme_ans_driver, 0, 0);
 
-DRIVER_MODULE(apple_smc, simplebus, apple_smc_driver, NULL, NULL);
+DRIVER_MODULE(apple_smc, simplebus, apple_smc_driver, 0, 0);

@@ -44,17 +44,18 @@
 #![no_std]
 #![feature(macro_metavar_expr_concat)]
 
+use core::cell::UnsafeCell;
 use core::ffi::c_void;
+use kpi::ErrCode;
 use kpi::bindings::{
-    nvme_controller, bus_addr_t, bus_dma_tag_t, bus_dmamap_t, bus_size_t, nvme_qpair,
-    nvme_registers, nvme_tracker, phandle_t, INTR_MPSAFE, INTR_TYPE_MISC, QUIRK_ANS,
+    INTR_MPSAFE, INTR_TYPE_MISC, QUIRK_ANS, bus_addr_t, bus_dma_tag_t, bus_dmamap_t, bus_size_t,
+    device_t, nvme_controller, nvme_qpair, nvme_registers, nvme_tracker, phandle_t,
 };
 use kpi::bus::{Register, Resource};
-use kpi::cell::{Checked, SubClass};
-use kpi::device::{BusProbe, Device};
+use kpi::cell::{Mutable, SubClass};
+use kpi::device::BusProbe;
 use kpi::driver;
-use kpi::ErrCode;
-use rtkit::RTKit;
+use rtkit::{RTKit, rtkit_boot};
 
 const ANS_CPU_CTRL: u64 = 0x0044;
 const ANS_CPU_CTRL_RUN: u32 = 1 << 4;
@@ -112,17 +113,18 @@ struct NvmeAnsQpair {
 }
 
 pub struct NvmeAnsSoftc {
-    ans: Checked<Register>,
+    //ctrlr: UnsafeCell<nvme_controller>,
+    ans: Mutable<Register>,
     sart: phandle_t,
     rtkit: RTKit,
-    adminq: Checked<NvmeAnsQpair>,
-    ioq: Checked<NvmeAnsQpair>,
+    adminq: Mutable<NvmeAnsQpair>,
+    ioq: Mutable<NvmeAnsQpair>,
 }
 
 impl DeviceIf for NvmeAnsDriver {
     type Softc = SubClass<nvme_controller, NvmeAnsSoftc>;
 
-    fn device_probe(dev: Device) -> Result<BusProbe> {
+    fn device_probe(dev: device_t) -> Result<BusProbe> {
         if !ofw_bus_status_okay(dev) {
             return Err(ENXIO);
         }
@@ -133,7 +135,7 @@ impl DeviceIf for NvmeAnsDriver {
         Ok(BUS_PROBE_DEFAULT)
     }
 
-    fn device_attach(dev: Device) -> Result<()> {
+    fn device_attach(dev: device_t) -> Result<()> {
         let node = ofw_bus_get_node(dev);
 
         let ans_id = ofw_bus_find_string_index(node, c"reg-names", c"ans").map_err(|e| {
@@ -145,7 +147,7 @@ impl DeviceIf for NvmeAnsDriver {
                 device_println!(dev, "couldn't allocate 'ans' mem resource {e}");
                 ENOMEM
             })?;
-        let ans = Checked::new(ans_reg.as_register()?);
+        let ans = Mutable::new(ans_reg.as_register()?);
 
         let mut ctrlr = nvme_controller::default();
         ctrlr.resource_id =
@@ -184,33 +186,34 @@ impl DeviceIf for NvmeAnsDriver {
             device_println!(dev, "error initializing rtkit {e}");
             ENXIO
         })?;
-        let adminq = Checked::new(NvmeAnsQpair::default());
-        let ioq = Checked::new(NvmeAnsQpair::default());
-        let ans_sc = NvmeAnsSoftc {
+        let adminq = Mutable::new(NvmeAnsQpair::default());
+        let ioq = Mutable::new(NvmeAnsQpair::default());
+        let sc = NvmeAnsSoftc {
+            //ctrlr: UnsafeCell::new(ctrlr),
             ans,
             sart,
             rtkit,
             adminq,
             ioq,
         };
-        let sc = device_init_softc!(dev, SubClass::new_with_base(ctrlr, ans_sc));
-        let ctrlr = sc.get_base();
+        let sc = device_init_softc!(dev, SubClass::new_with_base(ctrlr, sc));
+        let ctrlr = SubClass::as_base_ptr(&sc);
         let error = unsafe {
             bindings::bus_setup_intr(
-                dev.as_ptr(),
-                ctrlr.res,
+                dev,
+                (*ctrlr).res,
                 (INTR_TYPE_MISC | INTR_MPSAFE) as i32,
                 None,
                 Some(bindings::nvme_ctrlr_shared_handler),
-                ctrlr as *const nvme_controller as *const c_void as *mut c_void,
-                &ctrlr.tag as *const *mut c_void as *mut *mut c_void,
+                ctrlr.cast::<c_void>(),
+                &raw const (*ctrlr).tag as *const *mut c_void as *mut *mut c_void,
             )
         };
         if error != 0 {
             device_println!(dev, "couldn't set up interrupt handler {error}");
             return Err(ErrCode::from(error));
         }
-        let error = unsafe { bindings::nvme_attach(dev.as_c_type()) };
+        let error = unsafe { bindings::nvme_attach(dev) };
         if error != 0 {
             device_println!(dev, "generic nvme_attach failed {error}");
             return Err(ErrCode::from(error));
@@ -220,23 +223,23 @@ impl DeviceIf for NvmeAnsDriver {
 
     // FIXME: this is silly since the original version just set nvme_detach in the method table. I
     // should find a way to do that
-    fn device_detach(dev: Device) -> Result<()> {
-        let res = unsafe { bindings::nvme_detach(dev.as_c_type()) };
+    fn device_detach(dev: device_t) -> Result<()> {
+        let res = unsafe { bindings::nvme_detach(dev) };
         if res != 0 {
             return Err(ErrCode::from(res));
         }
         Ok(())
     }
 
-    fn device_shutdown(dev: Device) -> Result<()> {
+    fn device_shutdown(dev: device_t) -> Result<()> {
         todo!("")
     }
 }
 
 impl NvmeAnsDriver {
-    fn nvme_delayed_attach(dev: Device) -> Result<()> {
+    fn nvme_delayed_attach(dev: device_t) -> Result<()> {
         let sc = device_get_softc!(dev);
-        let mut ctrlr = sc.get_base();
+        let mut ctrlr = SubClass::get_base(&sc);
         let mut ans = sc.ans.get_mut();
         let mut ctrl = bus_read_4!(ans, ANS_CPU_CTRL);
         bus_write_4!(ans, ANS_CPU_CTRL, ctrl | ANS_CPU_CTRL_RUN);
@@ -246,7 +249,7 @@ impl NvmeAnsDriver {
         let mut status = bus_read_4!(nvme_reg, ANS_BOOT_STATUS);
         if status != ANS_BOOT_STATUS_OK {
             device_println!(dev, "booting rtkit");
-            RTKit::boot(project!(&sc.rtkit))?;
+            rtkit_boot(project!(sc->rtkit))?;
         }
         for timo in 0..100000 {
             status = bus_read_4!(nvme_reg, ANS_BOOT_STATUS);
@@ -279,14 +282,14 @@ impl NvmeAnsDriver {
         Ok(())
     }
 
-    fn alloc_qpair(dev: Device, id: u32) -> Result<NvmeAnsQpair> {
+    fn alloc_qpair(dev: device_t, id: u32) -> Result<NvmeAnsQpair> {
         let is_admin = id == 0;
         Ok(todo!(""))
     }
 
-    fn nvme_enable(dev: Device) -> Result<()> {
+    fn nvme_enable(dev: device_t) -> Result<()> {
         let sc = device_get_softc!(dev);
-        let mut ctrlr = sc.get_base();
+        let mut ctrlr = SubClass::get_base(&sc);
         let res: Resource = ctrlr.res.as_rust_type();
         let mut nvme_reg = res.as_register()?;
         bus_write_4!(
@@ -298,12 +301,12 @@ impl NvmeAnsDriver {
         Ok(())
     }
 
-    fn nvme_sq_enter(dev: Device, qpair: *mut nvme_qpair, tr: &nvme_tracker) -> u32 {
+    fn nvme_sq_enter(dev: device_t, qpair: *mut nvme_qpair, tr: &nvme_tracker) -> u32 {
         let id = unsafe { (*tr.req).cmd.cid };
         u32::from(id)
     }
 
-    fn nvme_sq_leave(dev: Device, qpair: &nvme_qpair, tr: &nvme_tracker) {
+    fn nvme_sq_leave(dev: device_t, qpair: &nvme_qpair, tr: &nvme_tracker) {
         let sc = device_get_softc!(dev);
         let mut ans_qpair = &sc.adminq;
         if qpair.id != 0 {
@@ -313,27 +316,21 @@ impl NvmeAnsDriver {
         let id = unsafe { (*tr.req).cmd.cid };
         let cmd = unsafe { qpair.cmd.add(usize::from(id)) };
 
-        let mut ctrlr = sc.get_base();
+        let mut ctrlr = SubClass::get_base(&sc);
         let res: Resource = ctrlr.res.as_rust_type();
         let mut nvme_reg = res.as_register().unwrap();
         bus_write_4!(nvme_reg, u64::from(qpair.sq_tdbl_off), u32::from(id));
     }
 
     fn nvme_qpair_construct(
-        dev: Device,
+        dev: device_t,
         qpair: &mut nvme_qpair,
         num_entries: u32,
         num_trackers: u32,
     ) -> Result<()> {
         let sc = device_get_softc!(dev);
         let res = unsafe {
-            bindings::nvme_qpair_construct(
-                dev.as_ptr(),
-                qpair,
-                num_entries,
-                num_trackers,
-                todo!("sc"),
-            )
+            bindings::nvme_qpair_construct(dev, qpair, num_entries, num_trackers, todo!("sc"))
         };
         if res != 0 {
             return Err(ErrCode::from(res));
@@ -350,7 +347,7 @@ impl NvmeAnsDriver {
         Ok(())
     }
 
-    fn nvme_cq_done(dev: Device, qpair: &nvme_qpair, tr: &nvme_tracker) {
+    fn nvme_cq_done(dev: device_t, qpair: &nvme_qpair, tr: &nvme_tracker) {
         let sc = device_get_softc!(dev);
         let id = unsafe { (*tr.req).cmd.cid };
         let mut ans_qpair = &sc.adminq;
