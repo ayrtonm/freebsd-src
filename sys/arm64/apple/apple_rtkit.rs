@@ -29,12 +29,13 @@
 #![no_std]
 #![feature(macro_metavar_expr_concat)]
 
+use kpi::bindings::device_t;
 use kpi::bus::{Register, ResourceSpec};
-use kpi::cell::Checked;
-use kpi::device::{BusProbe, Device};
+use kpi::cell::Mutable;
+use kpi::device::BusProbe;
 use kpi::driver;
 use kpi::ofw::XRef;
-use rtkit::{PwrState, RTKit};
+use rtkit::{PwrState, RTKit, rtkit_boot};
 
 const CPU_CTRL: u64 = 0x44;
 const CPU_CTRL_RUN: u32 = 1 << 4;
@@ -47,15 +48,15 @@ const SPEC: [ResourceSpec; 2] = [
 
 #[derive(Debug)]
 pub struct AppleRTKitSoftc {
-    asc: Checked<Register>,
-    sram: Checked<Register>,
+    asc: Mutable<Register>,
+    sram: Mutable<Register>,
     rtkit: RTKit,
 }
 
 impl DeviceIf for AppleRTKitDriver {
     type Softc = AppleRTKitSoftc;
 
-    fn device_probe(dev: Device) -> Result<BusProbe> {
+    fn device_probe(dev: device_t) -> Result<BusProbe> {
         if !ofw_bus_status_okay(dev) {
             return Err(ENXIO);
         }
@@ -69,7 +70,7 @@ impl DeviceIf for AppleRTKitDriver {
         Ok(BUS_PROBE_SPECIFIC)
     }
 
-    fn device_attach(mut dev: Device) -> Result<()> {
+    fn device_attach(dev: device_t) -> Result<()> {
         let [asc_res, sram_res] = bus_alloc_resources(dev, SPEC).inspect_err(|e| {
             device_println!(dev, "could not allocate device resources {e}");
         })?;
@@ -79,8 +80,8 @@ impl DeviceIf for AppleRTKitDriver {
         let sram_reg = Register::new(sram_res).inspect_err(|e| {
             device_println!(dev, "SRAM does not have type SYS_RES_MEMORY {e}");
         })?;
-        let asc = Checked::new(asc_reg);
-        let sram = Checked::new(sram_reg);
+        let asc = Mutable::new(asc_reg);
+        let sram = Mutable::new(sram_reg);
 
         let node = ofw_bus_get_node(dev);
         let xref = OF_xref_from_node(node);
@@ -90,24 +91,18 @@ impl DeviceIf for AppleRTKitDriver {
         let rtkit =
             RTKit::new(dev).inspect_err(|e| device_println!(dev, "failed to create RTKit {e}"))?;
 
-        let sc = AppleRTKitSoftc {
-            asc,
-            sram,
-            rtkit,
-        };
-
+        let sc = AppleRTKitSoftc { asc, sram, rtkit };
         device_init_softc!(dev, sc);
-
         Ok(())
     }
 
-    fn device_detach(_dev: Device) -> Result<()> {
+    fn device_detach(_dev: device_t) -> Result<()> {
         unreachable!("apple RTKit helper cannot be detached")
     }
 }
 
 impl AppleRTKitDriver {
-    fn apple_rtkit_boot(client: Device, helper: XRef) -> Result<()> {
+    fn apple_rtkit_boot(client: device_t, helper: XRef) -> Result<()> {
         let dev = OF_device_from_xref(helper).inspect_err(|e| {
             device_println!(client, "could not get device from xref {e}");
         })?;
@@ -118,7 +113,7 @@ impl AppleRTKitDriver {
         let ctrl = bus_read_4!(asc, CPU_CTRL);
         bus_write_4!(asc, CPU_CTRL, ctrl | CPU_CTRL_RUN);
 
-        RTKit::boot(project!(&sc.rtkit)).inspect_err(|e| {
+        rtkit_boot(project!(sc->rtkit)).inspect_err(|e| {
             device_println!(dev, "failed to boot RTKit {e}");
         })?;
 

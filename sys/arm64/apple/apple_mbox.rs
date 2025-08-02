@@ -22,11 +22,10 @@
 
 use core::ffi::c_void;
 use core::mem::transmute;
-use core::ptr::null_mut;
-use kpi::bindings::{device_t, INTR_MPSAFE, INTR_TYPE_MISC};
-use kpi::bus::{Register, Resource};
-use kpi::cell::{Checked, OwnedRef, OwnedVar, OwnedPtr};
-use kpi::device::{BusProbe, Device};
+use kpi::bindings::{INTR_MPSAFE, INTR_TYPE_MISC, device_t};
+use kpi::bus::{Irq, Register};
+use kpi::cell::{Mutable, Ref};
+use kpi::device::BusProbe;
 use kpi::driver;
 
 const MBOX_A2I_CTRL: u64 = 0x110;
@@ -49,47 +48,46 @@ pub struct AppleMboxMsg {
     pub data1: u32,
 }
 
-#[derive(Debug)]
-struct AppleMboxClosure {
-    callback: RawAppleMboxRx,
-    arg: OwnedPtr,
-}
-
-impl AppleMboxClosure {
-    pub fn new<T>(callback: AppleMboxRx<T>, arg: &OwnedRef<T>) -> Self {
-        let callback = unsafe { transmute(callback) };
-        let arg = arg.erase_lifetime().erase_type();
-        Self {
-            callback,
-            arg,
-        }
-    }
-
-    pub fn invoke(&mut self, msg: AppleMboxMsg) -> Result<()> {
-        (self.callback)(self.arg.refcount_this(), msg)
-    }
-}
+//#[derive(Debug)]
+//struct AppleMboxClosure {
+//    callback: RawAppleMboxRx,
+//    arg: OwnedPtr,
+//}
+//
+//impl AppleMboxClosure {
+//    pub fn new<T>(callback: AppleMboxRx<T>, arg: OwnedPtr<T>) -> Self {
+//        let callback = unsafe { transmute(callback) };
+//        let arg = unsafe { transmute(arg) };
+//        Self { callback, arg }
+//    }
+//
+//    pub fn invoke(&mut self, msg: AppleMboxMsg) -> Result<()> {
+//        (self.callback)(self.arg.clone(), msg)
+//    }
+//}
 
 // This callback type's callsites are in rust so it doesn't need to be extern "C". If it were in C
 // it would need to go through the KPI crate which would enforce the extern "C" to avoid a compiler
 // error.
-pub type AppleMboxRx<T> = extern "C" fn(OwnedPtr<T, true>, AppleMboxMsg) -> Result<()>;
-type RawAppleMboxRx = extern "C" fn(OwnedPtr<(), true>, AppleMboxMsg) -> Result<()>;
+//pub type AppleMboxRx<T> = extern "C" fn(OwnedPtr<T>, AppleMboxMsg) -> Result<()>;
+//type RawAppleMboxRx = extern "C" fn(OwnedPtr, AppleMboxMsg) -> Result<()>;
+
+pub type AppleMboxRx<T> = fn(Ref<T>, AppleMboxMsg) -> Result<()>;
+type RawAppleMboxRx = fn(AppleMboxMsg) -> Result<()>;
 
 #[derive(Debug)]
 pub struct AppleMboxSoftc {
-    dev: Device,
-    irq: Resource,
-    intr: Checked<Intr>,
-    write_msg: Checked<WriteMsg>,
-    intrhand: *mut c_void,
+    dev: device_t,
+    irq: Irq,
+    intr: Mutable<Intr>,
+    write_msg: Mutable<WriteMsg>,
 }
 
 #[derive(Debug)]
 struct Intr {
     i2a_ctrl: Register,
     i2a_recv: Register,
-    closure: Option<AppleMboxClosure>,
+    //closure: Option<AppleMboxClosure>,
 }
 
 #[derive(Debug)]
@@ -101,7 +99,7 @@ struct WriteMsg {
 impl DeviceIf for AppleMboxDriver {
     type Softc = AppleMboxSoftc;
 
-    fn device_probe(dev: Device) -> Result<BusProbe> {
+    fn device_probe(dev: device_t) -> Result<BusProbe> {
         if !ofw_bus_status_okay(dev) {
             return Err(ENXIO);
         }
@@ -115,7 +113,7 @@ impl DeviceIf for AppleMboxDriver {
         Ok(BUS_PROBE_SPECIFIC)
     }
 
-    fn device_attach(dev: Device) -> Result<()> {
+    fn device_attach(dev: device_t) -> Result<()> {
         let node = ofw_bus_get_node(dev);
 
         let rid = ofw_bus_find_string_index(node, c"interrupt-names", c"recv-not-empty").map_err(
@@ -127,8 +125,12 @@ impl DeviceIf for AppleMboxDriver {
                 return ENXIO;
             },
         )?;
-        let irq = bus_alloc_resource_any(dev, SYS_RES_IRQ, rid, RF_ACTIVE).map_err(|e| {
+        let irq_res = bus_alloc_resource_any(dev, SYS_RES_IRQ, rid, RF_ACTIVE).map_err(|e| {
             device_println!(dev, "could not allocate irq resource {e}");
+            return ENXIO;
+        })?;
+        let irq = irq_res.as_irq().map_err(|e| {
+            device_println!(dev, "tried to create non-irq resource {e}");
             return ENXIO;
         })?;
         let mem = bus_alloc_resource_any(dev, SYS_RES_MEMORY, 0, RF_ACTIVE).map_err(|e| {
@@ -157,32 +159,30 @@ impl DeviceIf for AppleMboxDriver {
             return ENXIO;
         })?;
 
-        let intr = Checked::new(Intr {
+        let intr = Mutable::new(Intr {
             i2a_ctrl,
             i2a_recv,
-            closure: None,
+            //closure: None,
         });
 
-        let write_msg = Checked::new(WriteMsg { a2i_ctrl, a2i_send });
+        let write_msg = Mutable::new(WriteMsg { a2i_ctrl, a2i_send });
 
         let xref = OF_xref_from_node(node);
         OF_device_register_xref(xref, dev);
 
-        let _res = device_init_softc!(
+        device_init_softc!(
             dev,
             AppleMboxSoftc {
                 dev,
                 irq,
                 intr,
                 write_msg,
-                intrhand: null_mut(),
             }
         );
-
         Ok(())
     }
 
-    fn device_detach(_dev: Device) -> Result<()> {
+    fn device_detach(_dev: device_t) -> Result<()> {
         unreachable!("device cannot be detached")
     }
 }
@@ -190,7 +190,7 @@ impl DeviceIf for AppleMboxDriver {
 impl AppleMboxDriver {
     // Get a mailbox device_t from the client's mboxes devicetree property. The mailbox must've
     // previously registered its devicetree node xref which happens when this driver attaches.
-    pub fn get_mbox(&self, client: Device) -> Result<Device> {
+    pub fn get_mbox(&self, client: device_t) -> Result<device_t> {
         let client_node = ofw_bus_get_node(client);
         let mbox_xref = OF_getencprop_as_xref(client_node, c"mboxes")?;
         OF_device_from_xref(mbox_xref)
@@ -198,46 +198,54 @@ impl AppleMboxDriver {
 
     pub fn set_rx<T>(
         &self,
-        mbox: Device,
-        client: Device,
-        func: AppleMboxRx<T>,
-        arg: &OwnedRef<T>,
+        mbox: device_t,
+        client: device_t,
+        //func: AppleMboxRx<T>,
+        arg: Ref<T>,
     ) -> Result<()> {
         let sc = device_get_softc!(mbox);
 
-        // Make sure the callback argument will live as long as the client's softc
-        if arg.get_owner() != client.as_ptr() {
-            return Err(EDOOFUS);
-        }
+        let flags = INTR_MPSAFE | INTR_TYPE_MISC;
 
-        let mut intr = sc.intr.get_mut();
+        // Make sure the callback argument will live as long as the client's softc
+        //if arg.get_owner() != client {
+        //    return Err(EDOOFUS);
+        //}
+
+        //let mut intr = sc.intr.get_mut();
         //let func = unsafe { transmute(func) };
         //let func = monomorphize!(func);
         //let func = kpi::strip_type!(func);
         //intr.callback = Some(func);
         //intr.arg = arg.erase_lifetime().erase_generic();
-        intr.closure = Some(AppleMboxClosure::new(func, arg));
+        //intr.closure = Some(AppleMboxClosure::new(func, arg));
         //intr.arg = arg.get_var_ptr().cast::<c_void>();
         // Store a pointer to the argument's owner so we can rematerialize an OwnedRef out of a
         // thin pointer
-        drop(intr);
-
-        let flags = INTR_MPSAFE | INTR_TYPE_MISC;
+        //drop(intr);
 
         bus_setup_intr(
             mbox,
-            &sc.irq,
+            project!(sc->irq),
             flags,
             None,
             Some(apple_mbox_intr),
-            &sc,
-            project!(&sc->intrhand),
+            sc,
         )?;
+        //bus_setup_intr(
+        //    mbox,
+        //    &sc.irq,
+        //    flags,
+        //    None,
+        //    Some(apple_mbox_intr),
+        //    sc,
+        //    project!(sc->intrhand),
+        //)?;
 
         Ok(())
     }
 
-    pub fn write_msg(&self, mbox: Device, msg: AppleMboxMsg) -> Result<()> {
+    pub fn write_msg(&self, mbox: device_t, msg: AppleMboxMsg) -> Result<()> {
         let sc = device_get_softc!(mbox);
 
         let mut write_msg = sc.write_msg.get_mut();
@@ -256,7 +264,7 @@ impl AppleMboxDriver {
 
 // extern "C" doesn't preclude making this a method of AppleMboxDriver but making it standalone
 // makes the arguments to bus_setup_intr clearer
-extern "C" fn apple_mbox_intr(sc: &AppleMboxSoftc) {
+fn apple_mbox_intr(sc: Ref<AppleMboxSoftc>) {
     let mut intr = sc.intr.get_mut();
 
     while (bus_read_4!(&mut intr.i2a_ctrl, MBOX_I2A_CTRL) & MBOX_I2A_CTRL_EMPTY) == 0 {
@@ -264,7 +272,7 @@ extern "C" fn apple_mbox_intr(sc: &AppleMboxSoftc) {
             data0: bus_read_8!(&mut intr.i2a_recv, MBOX_I2A_RECV0),
             data1: bus_read_8!(&mut intr.i2a_recv, MBOX_I2A_RECV1) as u32,
         };
-        intr.closure.as_mut().unwrap().invoke(msg).unwrap();
+        //intr.closure.as_mut().unwrap().invoke(msg).unwrap();
     }
 }
 
