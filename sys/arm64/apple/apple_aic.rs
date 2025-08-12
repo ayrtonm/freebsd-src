@@ -37,11 +37,11 @@ use core::sync::atomic::AtomicU32;
 use kpi::bindings::{cpuset_t, device_t, intr_irqsrc, intr_polarity, intr_trigger, trapframe};
 use kpi::bus::{Filter, Register, Resource};
 use kpi::cell::Mutable;
-use kpi::cell::{Ref, SubClass};
+use kpi::cell::{CRef, SubClass};
 use kpi::device::BusProbe;
 use kpi::driver;
 use kpi::enum_c_macros;
-use kpi::intr::{IntrRoot, IrqSrc, MapData, Pic};
+use kpi::intr::{IntrRoot, IrqSrc, MapData};
 use kpi::ofw::OfwCompatData;
 
 type Box<T> = kpi::boxed::Box<T, M_DEVBUF>;
@@ -297,7 +297,7 @@ pub struct AppleIntSoftc {
     ndie: usize,
     nirqs: usize,
     ipimasks: Box<[AtomicU32]>,
-    pic: Pic,
+    //pic: Pic,
 }
 
 impl DeviceIf for AppleIntDriver {
@@ -387,7 +387,7 @@ impl DeviceIf for AppleIntDriver {
             ndie,
             nirqs,
             ipimasks,
-            pic: Pic::new(),
+            //pic: Pic::new(),
         };
         let sc = device_init_softc!(dev, sc);
         let name = device_get_nameunit(dev);
@@ -454,10 +454,10 @@ impl DeviceIf for AppleIntDriver {
 
         if let Err(e) = intr_pic_claim_root(
             dev,
-            project!(sc->pic),
+            //project!(sc->pic),
             xref,
             Self::apple_aic_irq,
-            sc,
+            sc.clone(),
             INTR_ROOT_IRQ,
         ) {
             device_println!(dev, "unable to set root interrupt controller {e}");
@@ -467,10 +467,10 @@ impl DeviceIf for AppleIntDriver {
 
         if let Err(e) = intr_pic_claim_root(
             dev,
-            project!(sc->pic),
+            //project!(sc->pic),
             xref,
             Self::apple_aic_fiq,
-            sc,
+            sc.clone(),
             INTR_ROOT_FIQ,
         ) {
             device_println!(dev, "unable to set root fiq controller {e}");
@@ -514,7 +514,7 @@ fn apple_aic_init_cpu() {
 }
 
 impl AppleIntDriver {
-    extern "C" fn apple_aic_irq(sc: &AppleIntSoftc) -> Filter {
+    extern "C" fn apple_aic_irq(sc: &'static AppleIntSoftc) -> Filter {
         aic!(sc.dev, "got interrupt request");
         let event = match &sc.event {
             Some(reg) => bus_read_4!(reg.get_mut(), 0),
@@ -544,7 +544,7 @@ impl AppleIntDriver {
         return FILTER_HANDLED;
     }
 
-    extern "C" fn apple_aic_fiq(sc: &AppleIntSoftc) -> Filter {
+    extern "C" fn apple_aic_fiq(sc: &'static AppleIntSoftc) -> Filter {
         //aic!(sc.dev, "got fast interrupt request");
         let tf = curthread!(td_intr_frame);
 
@@ -683,7 +683,7 @@ impl PicIf for AppleIntDriver {
     fn pic_map_intr(
         dev: device_t,
         data: MapData,
-        isrcp: &mut Option<Ref<AppleIrqSrc>>,
+        isrcp: &mut Option<CRef<AppleIrqSrc>>,
     ) -> Result<()> {
         let (kind, _flags) = get_fdt_intr_data(dev, &data)?;
 
@@ -797,7 +797,7 @@ impl PicIf for AppleIntDriver {
         }
     }
 
-    fn pic_ipi_setup(dev: device_t, ipi: u32, isrcp: &mut Option<Ref<AppleIrqSrc>>) -> Result<()> {
+    fn pic_ipi_setup(dev: device_t, ipi: u32, isrcp: &mut Option<CRef<AppleIrqSrc>>) -> Result<()> {
         let sc = device_get_softc!(dev);
         let ipi = ipi as usize;
         if ipi >= NUM_IPIS {

@@ -27,11 +27,12 @@
 #![no_std]
 #![feature(macro_metavar_expr_concat)]
 
+use core::cell::UnsafeCell;
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicU64, Ordering};
 use kpi::bindings::{SB_FLAG_NO_RANGES, device_t, intr_config_hook, simplebus_softc};
 use kpi::bus::Register;
-use kpi::cell::{Mutable, Ref, SubClass};
+use kpi::cell::{Mutable, CRef, SubClass};
 use kpi::device::{BusProbe, DeviceIf};
 use kpi::driver;
 use kpi::intr::ConfigHook;
@@ -50,10 +51,11 @@ fn smc_cmd(data: u64) -> u16 {
     (data & 0xff) as u16
 }
 
+pub type AppleSmcSoftc = SubClass<simplebus_softc, AppleSmcSoftcInternal>;
+
 #[repr(C)]
 #[derive(Debug)]
-pub struct AppleSmcSoftc {
-    //simplebus_sc: UnsafeCell<simplebus_softc>,
+pub struct AppleSmcSoftcInternal {
     dev: device_t,
     //gpiobus: device_t,
     //sram: Mutable<Register>,
@@ -63,10 +65,8 @@ pub struct AppleSmcSoftc {
     data: AtomicU64,
 }
 
-impl SimplebusIf for AppleSmcDriver {}
-
 impl DeviceIf for AppleSmcDriver {
-    type Softc = SubClass<simplebus_softc, AppleSmcSoftc>;
+    type Softc = AppleSmcSoftc;
 
     fn device_probe(dev: device_t) -> Result<BusProbe> {
         if !ofw_bus_status_okay(dev) {
@@ -86,7 +86,7 @@ impl DeviceIf for AppleSmcDriver {
 
         let rtkit =
             RTKit::new(dev).inspect_err(|e| device_println!(dev, "failed to create RTKit {e}"))?;
-        let smc_sc = AppleSmcSoftc {
+        let smc_sc = AppleSmcSoftcInternal {
             dev,
             rtkit,
             config_hook: ConfigHook::new(),
@@ -95,6 +95,8 @@ impl DeviceIf for AppleSmcDriver {
         //AppleSmcDriver::device_attach(dev)?;
         let sc = device_init_softc!(dev, SubClass::new_with_base(simplebus_sc, smc_sc));
 
+        sc.config_hook.init(AppleSmcDriver::start_config_hook, sc.clone());
+
         //sc.config_hook.init(Self::start_config_hook, sc);
         //let rid = ofw_bus_find_string_index(node, c"reg-names", c"sram")?;
         //sc.sram = bus_alloc_resource_any(dev, SYS_RES_MEMORY, rid, RF_ACTIVE)?;
@@ -102,32 +104,35 @@ impl DeviceIf for AppleSmcDriver {
         //sc.config_hook.func = Self::start_config_hook;
         //sc.config_hook.arg = sc.erase_lifetime();
 
-        AppleSmcDriver::simplebus_attach(dev).inspect_err(|e| {
-            device_println!(dev, "simplebus_attach failed {e}");
-        })?;
+        let res = unsafe { bindings::simplebus_attach(dev) };
+        if res != 0 {
+            device_println!(dev, "simplebus_attach failed {res}");
+            return Err(ENXIO);
+        };
         config_intrhook_establish(project!(sc->config_hook)).map_err(|e| {
             device_println!(dev, "failed to establish hook {e}");
-            return ENOMEM;
+            return ENXIO;
         })?;
 
         Ok(())
     }
 
     fn device_detach(dev: device_t) -> Result<()> {
-        simplebus_detach!(dev)
+        todo!("")
     }
 }
 
 impl AppleSmcDriver {
-    fn start_config_hook(sc: Ref<AppleSmcSoftc>) -> Result<()> {
+    fn start_config_hook(sc: &CRef<AppleSmcSoftc>) -> Result<()> {
+        device_println!(sc.dev, "started config hook");
         let dev = sc.dev;
         let node = ofw_bus_get_node(dev);
         rtkit_boot(project!(sc->rtkit)).inspect_err(|e| {
             device_println!(dev, "failed to boot RTKit {e}");
         })?;
-        sc.rtkit.start_endpoint(0x20, Self::rtkit_callback, sc)?;
+        sc.rtkit.start_endpoint(0x20, Self::rtkit_callback, sc.clone())?;
 
-        Self::send_cmd(sc, SmcCmd::MsgInit, 0, 0);
+        Self::send_cmd(&sc, SmcCmd::MsgInit, 0, 0);
         device_println!(dev, "waiting up to 5s for command response");
         tsleep(&sc.data, bindings::PWAIT, c"apple,smc", 5 * hz());
         device_println!(
@@ -136,11 +141,11 @@ impl AppleSmcDriver {
             sc.data.load(Ordering::Relaxed)
         );
 
-        config_intrhook_disestablish(project!(sc->config_hook));
+        config_intrhook_disestablish(&sc.config_hook);
         Ok(())
     }
 
-    extern "C" fn rtkit_callback(sc: Ref<AppleSmcSoftc>, data: u64) -> Result<()> {
+    fn rtkit_callback(sc: CRef<AppleSmcSoftc>, data: u64) -> Result<()> {
         if smc_cmd(data) == SmcCmd::Notif as u16 {
             Self::handle_notification(sc, data);
             return Ok(());
@@ -150,9 +155,9 @@ impl AppleSmcDriver {
         Ok(())
     }
 
-    fn handle_notification(sc: Ref<AppleSmcSoftc>, data: u64) {}
+    fn handle_notification(sc: CRef<AppleSmcSoftc>, data: u64) {}
 
-    fn send_cmd(sc: Ref<AppleSmcSoftc>, cmd: SmcCmd, key: u32, len: u16) {}
+    fn send_cmd(sc: &CRef<AppleSmcSoftc>, cmd: SmcCmd, key: u32, len: u16) {}
 
     fn apple_smc_pin_set(dev: device_t, pin: u32, val: u32) -> Result<()> {
         Ok(())
@@ -160,6 +165,7 @@ impl AppleSmcDriver {
 }
 
 driver!(apple_smc_driver, c"apple_smc", AppleSmcDriver, apple_smc_methods,
+    inherit from simplebus_driver,
     INTERFACES {
         device_probe apple_smc_probe,
         device_attach apple_smc_attach,
