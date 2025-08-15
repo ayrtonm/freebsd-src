@@ -559,7 +559,7 @@ impl AppleIntDriver {
         //device_println!(sc.dev, "cntp_ctl_el0 {reg:x?}");
         if (reg & CNTV_CTL_BITS) == (CNTV_CTL_ENABLE | CNTV_CTL_ISTATUS) {
             let isrc = &sc.fiq_srcs[bindings::AIC_TMR_HV_PHYS as usize];
-            //device_println!(sc.dev, "dispatch isrc for EL1 phys timer {:x?}", unsafe { SubClass::get_base_ref_unchecked(isrc) });
+            //device_println!(sc.dev, "dispatch isrc for EL1 phys timer {:x?}", isrc);
             intr_isrc_dispatch(isrc, tf);
         };
 
@@ -683,17 +683,17 @@ impl PicIf for AppleIntDriver {
     fn pic_map_intr(
         dev: device_t,
         data: MapData,
-        isrcp: &mut Option<CRef<AppleIrqSrc>>,
+        isrcp: &mut Option<&'static AppleIrqSrc>,
     ) -> Result<()> {
         let (kind, _flags) = get_fdt_intr_data(dev, &data)?;
 
-        let sc = device_get_softc!(dev);
+        let sc = device_leak_softc!(dev);
         match kind {
             AppleIntrKind::Irq { die, irq } => {
-                *isrcp = Some(project!(sc->irq_srcs[die][irq]));
+                *isrcp = Some(&sc.irq_srcs[die][irq]);
             }
             AppleIntrKind::Fiq(fiq) => {
-                *isrcp = Some(project!(sc->fiq_srcs[fiq as usize]));
+                *isrcp = Some(&sc.fiq_srcs[fiq as usize]);
             }
             AppleIntrKind::Ipi => (),
         }
@@ -797,19 +797,23 @@ impl PicIf for AppleIntDriver {
         }
     }
 
-    fn pic_ipi_setup(dev: device_t, ipi: u32, isrcp: &mut Option<CRef<AppleIrqSrc>>) -> Result<()> {
-        let sc = device_get_softc!(dev);
+    fn pic_ipi_setup(dev: device_t, ipi: u32, isrcp: &mut Option<&'static AppleIrqSrc>) -> Result<()> {
+        let sc = device_leak_softc!(dev);
         let ipi = ipi as usize;
         if ipi >= NUM_IPIS {
             panic!("ipi {ipi} too high");
         }
         let cpuid = pcpu_get!(pc_cpuid);
+        unsafe {
+            SubClass::allow_deref_base(&sc.ipi_srcs[ipi]);
+        }
         let base_isrc = SubClass::get_base(&sc.ipi_srcs[ipi]);
+        SubClass::forbid_deref_base(&sc.ipi_srcs[ipi]);
         CPU_SET(
             pcpu_get!(pc_cpuid),
             &base_isrc.isrc_cpu as *const cpuset_t as *mut cpuset_t,
         );
-        *isrcp = Some(project!(sc->ipi_srcs[ipi]));
+        *isrcp = Some(&sc.ipi_srcs[ipi]);
 
         Ok(())
     }
