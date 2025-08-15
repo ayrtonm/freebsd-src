@@ -118,8 +118,7 @@ rtkit_endpoint_is_valid(uint32_t endpoint)
 }
 
 static int
-rtkit_send(struct apple_mbox *mbox, uint32_t endpoint, uint8_t type,
-	uint64_t data)
+rtkit_send(struct apple_mbox *mbox, uint32_t endpoint, uint8_t type, uint64_t data)
 {
 	struct apple_mbox_msg msg;
 

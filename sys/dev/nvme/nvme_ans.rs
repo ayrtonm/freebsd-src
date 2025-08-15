@@ -55,7 +55,7 @@ use kpi::bus::{Register, Resource};
 use kpi::cell::{Mutable, SubClass};
 use kpi::device::BusProbe;
 use kpi::driver;
-use rtkit::{RTKit, rtkit_boot};
+use rtkit::{RTKit, rtkit_start};
 
 const ANS_CPU_CTRL: u64 = 0x0044;
 const ANS_CPU_CTRL_RUN: u32 = 1 << 4;
@@ -249,7 +249,7 @@ impl NvmeAnsDriver {
         let mut status = bus_read_4!(nvme_reg, ANS_BOOT_STATUS);
         if status != ANS_BOOT_STATUS_OK {
             device_println!(dev, "booting rtkit");
-            rtkit_boot(project!(sc->rtkit))?;
+            rtkit_start(project!(sc->rtkit))?;
         }
         for timo in 0..100000 {
             status = bus_read_4!(nvme_reg, ANS_BOOT_STATUS);

@@ -35,7 +35,7 @@ use kpi::cell::Mutable;
 use kpi::device::BusProbe;
 use kpi::driver;
 use kpi::ofw::XRef;
-use rtkit::{PwrState, RTKit, rtkit_boot};
+use rtkit::{PwrState, RTKit, rtkit_start};
 
 const CPU_CTRL: u64 = 0x44;
 const CPU_CTRL_RUN: u32 = 1 << 4;
@@ -113,13 +113,14 @@ impl AppleRTKitDriver {
         let ctrl = bus_read_4!(asc, CPU_CTRL);
         bus_write_4!(asc, CPU_CTRL, ctrl | CPU_CTRL_RUN);
 
-        rtkit_boot(project!(sc->rtkit)).inspect_err(|e| {
+        rtkit_start(project!(sc->rtkit)).inspect_err(|e| {
             device_println!(dev, "failed to boot RTKit {e}");
         })?;
 
-        sc.rtkit.set_iop(PwrState::On).inspect_err(|e| {
-            device_println!(dev, "failed to set IOP power state ON");
-        })?;
+        sc.rtkit.boot().unwrap();
+        //sc.rtkit.set_iop(PwrState::On).inspect_err(|e| {
+        //    device_println!(dev, "failed to set IOP power state ON");
+        //})?;
         sc.rtkit.set_ap(PwrState::On).inspect_err(|e| {
             device_println!(dev, "failed to set AP power state ON");
         })?;

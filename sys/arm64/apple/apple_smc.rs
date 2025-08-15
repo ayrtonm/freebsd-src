@@ -27,16 +27,20 @@
 #![no_std]
 #![feature(macro_metavar_expr_concat)]
 
+use apple_mbox::AppleMboxMsg;
 use core::cell::UnsafeCell;
-use core::ffi::c_void;
-use core::sync::atomic::{AtomicU64, Ordering};
-use kpi::bindings::{SB_FLAG_NO_RANGES, device_t, intr_config_hook, simplebus_softc};
+use core::ffi::{CStr, c_void};
+use core::ptr::null_mut;
+use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use kpi::bindings::{
+    SB_FLAG_NO_RANGES, bus_size_t, bus_space_handle_t, device_t, intr_config_hook, simplebus_softc,
+};
 use kpi::bus::Register;
-use kpi::cell::{Mutable, CRef, SubClass};
+use kpi::cell::{CRef, Mutable, SubClass};
 use kpi::device::{BusProbe, DeviceIf};
 use kpi::driver;
 use kpi::intr::ConfigHook;
-use rtkit::{RTKit, rtkit_boot};
+use rtkit::{Endpoint, PwrState, RTKit, rtkit_start};
 
 #[repr(u16)]
 #[derive(Copy, Clone, Debug)]
@@ -51,17 +55,30 @@ fn smc_cmd(data: u64) -> u16 {
     (data & 0xff) as u16
 }
 
+// I don't care about the null-terminator here but want to avoid &str because the UTF-8 requirement
+// means the conversion to bytes isn't always a 1 for 1 with the characters as written.
+fn smc_key(key: &CStr) -> u32 {
+    let key_bytes = key.to_bytes();
+    let s0 = key_bytes[0] as u32;
+    let s1 = key_bytes[1] as u32;
+    let s2 = key_bytes[2] as u32;
+    let s3 = key_bytes[3] as u32;
+    (s0 << 24) | (s1 << 16) | (s2 << 8) | s3
+}
+
+const SMC_EP: Endpoint = Endpoint::Other(0x20);
+
 pub type AppleSmcSoftc = SubClass<simplebus_softc, AppleSmcSoftcInternal>;
 
 #[repr(C)]
 #[derive(Debug)]
 pub struct AppleSmcSoftcInternal {
     dev: device_t,
-    //gpiobus: device_t,
-    //sram: Mutable<Register>,
+    gpiobus: Mutable<Option<device_t>>,
+    sram: Mutable<Register>,
     rtkit: RTKit,
     config_hook: ConfigHook,
-    //msgid: u8,
+    msgid: AtomicU8,
     data: AtomicU64,
 }
 
@@ -84,25 +101,31 @@ impl DeviceIf for AppleSmcDriver {
         simplebus_sc.dev = dev;
         simplebus_sc.flags |= SB_FLAG_NO_RANGES;
 
-        let rtkit =
+        let mut rtkit =
             RTKit::new(dev).inspect_err(|e| device_println!(dev, "failed to create RTKit {e}"))?;
+
+        rtkit.set_verbose();
+        let node = ofw_bus_get_node(dev);
+        let rid = ofw_bus_find_string_index(node, c"reg-names", c"sram")?;
+        let sram = Register::new(bus_alloc_resource_any(
+            dev,
+            SYS_RES_MEMORY,
+            rid,
+            RF_ACTIVE | RF_UNMAPPED,
+        )?)?;
+
         let smc_sc = AppleSmcSoftcInternal {
             dev,
+            gpiobus: Mutable::new(None),
+            sram: Mutable::new(sram),
             rtkit,
             config_hook: ConfigHook::new(),
+            msgid: AtomicU8::new(0),
             data: AtomicU64::new(0),
         };
-        //AppleSmcDriver::device_attach(dev)?;
         let sc = device_init_softc!(dev, SubClass::new_with_base(simplebus_sc, smc_sc));
 
-        sc.config_hook.init(AppleSmcDriver::start_config_hook, sc.clone());
-
-        //sc.config_hook.init(Self::start_config_hook, sc);
-        //let rid = ofw_bus_find_string_index(node, c"reg-names", c"sram")?;
-        //sc.sram = bus_alloc_resource_any(dev, SYS_RES_MEMORY, rid, RF_ACTIVE)?;
-
-        //sc.config_hook.func = Self::start_config_hook;
-        //sc.config_hook.arg = sc.erase_lifetime();
+        sc.config_hook.init(start_config_hook, sc.clone());
 
         let res = unsafe { bindings::simplebus_attach(dev) };
         if res != 0 {
@@ -123,44 +146,108 @@ impl DeviceIf for AppleSmcDriver {
 }
 
 impl AppleSmcDriver {
-    fn start_config_hook(sc: &CRef<AppleSmcSoftc>) -> Result<()> {
-        device_println!(sc.dev, "started config hook");
-        let dev = sc.dev;
-        let node = ofw_bus_get_node(dev);
-        rtkit_boot(project!(sc->rtkit)).inspect_err(|e| {
-            device_println!(dev, "failed to boot RTKit {e}");
-        })?;
-        sc.rtkit.start_endpoint(0x20, Self::rtkit_callback, sc.clone())?;
-
-        Self::send_cmd(&sc, SmcCmd::MsgInit, 0, 0);
-        device_println!(dev, "waiting up to 5s for command response");
-        tsleep(&sc.data, bindings::PWAIT, c"apple,smc", 5 * hz());
-        device_println!(
-            dev,
-            "got command response {:x?}",
-            sc.data.load(Ordering::Relaxed)
-        );
-
-        config_intrhook_disestablish(&sc.config_hook);
-        Ok(())
-    }
-
-    fn rtkit_callback(sc: CRef<AppleSmcSoftc>, data: u64) -> Result<()> {
-        if smc_cmd(data) == SmcCmd::Notif as u16 {
-            Self::handle_notification(sc, data);
-            return Ok(());
-        }
-        sc.data.store(data, Ordering::Relaxed);
-        wakeup(&sc.data);
-        Ok(())
-    }
-
-    fn handle_notification(sc: CRef<AppleSmcSoftc>, data: u64) {}
-
-    fn send_cmd(sc: &CRef<AppleSmcSoftc>, cmd: SmcCmd, key: u32, len: u16) {}
-
     fn apple_smc_pin_set(dev: device_t, pin: u32, val: u32) -> Result<()> {
-        Ok(())
+        todo!("")
+    }
+}
+fn start_config_hook(sc: &CRef<AppleSmcSoftc>) -> Result<()> {
+    let dev = sc.dev;
+    rtkit_start(project!(sc->rtkit)).inspect_err(|e| {
+        device_println!(dev, "failed to set up RTKit {e}");
+    })?;
+    sc.rtkit.boot().inspect_err(|e| {
+        device_println!(dev, "failed to boot RTKit {e}");
+    })?;
+    sc.rtkit
+        .start_endpoint(SMC_EP, smc_rtkit_callback, sc.clone())?;
+
+    send_cmd(&sc, SmcCmd::MsgInit, 0, 0);
+    device_println!(dev, "waiting up to 5s for command response");
+    tsleep(&sc.data, bindings::PWAIT, c"apple,smc", 5 * hz());
+    let data = sc.data.load(Ordering::Relaxed);
+    device_println!(dev, "got command response {data:x?}");
+
+    //let sc.sram = bus_alloc_resource_any(dev, SYS_RES_MEMORY, 1, RF_ACTIVE | RF_UNMAPPED).unwrap();
+
+    let mut handle = bus_space_handle_t::default();
+    unsafe { bindings::rman_set_bustag(sc.sram.get_mut().as_ptr(), &raw mut bindings::memmap_bus) };
+    let res = unsafe {
+        bindings::rust_bindings_bus_space_map(
+            &raw mut bindings::memmap_bus,
+            data,
+            0x4000,
+            bindings::BUS_SPACE_MAP_NONPOSTED,
+            &mut handle,
+        )
+    };
+    assert!(res == 0);
+    unsafe { bindings::rman_set_bushandle(sc.sram.get_mut().as_ptr(), handle) };
+
+    let mut node = OF_child(ofw_bus_get_node(dev));
+    while let Some(child) = node {
+        if !OF_hasprop(child, c"gpio-controller") {
+            node = OF_peer(child);
+            continue;
+        }
+        let xref = OF_getencprop_as_xref(child, c"phandle").unwrap();
+        OF_device_register_xref(xref, dev);
+        *sc.gpiobus.get_mut() = Some(gpiobus_attach_bus(dev).unwrap());
+        node = OF_peer(child);
+    }
+
+    device_println!(dev, "enabling notifications");
+    let ntap = 1;
+    write_key(sc, smc_key(c"NTAP"), &[ntap]).unwrap();
+    device_println!(dev, "enabled notifications");
+
+    config_intrhook_disestablish(&sc.config_hook);
+    Ok(())
+}
+
+fn smc_rtkit_callback(sc: CRef<AppleSmcSoftc>, data: u64) -> Result<()> {
+    device_println!(sc.dev, "apple SMC callback got data {data:?}");
+    if smc_cmd(data) == SmcCmd::Notif as u16 {
+        handle_notification(sc, data);
+        return Ok(());
+    }
+    sc.data.store(data, Ordering::Relaxed);
+    wakeup(&sc.data);
+    Ok(())
+}
+
+fn handle_notification(sc: CRef<AppleSmcSoftc>, data: u64) {}
+
+fn write_key(sc: &CRef<AppleSmcSoftc>, key: u32, data: &[u8]) -> Result<()> {
+    let len = data.len() as bus_size_t;
+    let sram = sc.sram.get_mut().as_ptr();
+    unsafe { bindings::rust_bindings_bus_write_region_1(sram, 0, data.as_ptr().cast_mut(), len) }
+    unsafe { bindings::rust_bindings_bus_barrier(sram, 0, len, bindings::BUS_SPACE_BARRIER_WRITE) };
+    send_cmd(sc, SmcCmd::WriteKey, key, len as u16)
+}
+
+fn send_cmd(sc: &CRef<AppleSmcSoftc>, cmd: SmcCmd, key: u32, len: u16) -> Result<()> {
+    let msgid = sc.msgid.fetch_add(1, Ordering::Relaxed);
+    sc.rtkit.send(SmcTxMsg::new(cmd, key, len, msgid))
+}
+
+pub struct SmcTxMsg(u64);
+
+impl SmcTxMsg {
+    pub fn new(cmd: SmcCmd, key: u32, len: u16, msgid: u8) -> Self {
+        let mut data = cmd as u16 as u64;
+        data |= (len as u64) << 16;
+        data |= (key as u64) << 32;
+        data |= u64::from(msgid & 0xf) << 12;
+        Self(data)
+    }
+}
+
+impl Into<AppleMboxMsg> for SmcTxMsg {
+    fn into(self) -> AppleMboxMsg {
+        AppleMboxMsg {
+            data0: self.0,
+            data1: SMC_EP.into(),
+        }
     }
 }
 
