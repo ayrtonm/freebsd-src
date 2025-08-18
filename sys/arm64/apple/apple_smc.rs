@@ -27,7 +27,6 @@
 #![no_std]
 #![feature(macro_metavar_expr_concat)]
 
-use apple_mbox::AppleMboxMsg;
 use core::cell::UnsafeCell;
 use core::ffi::{CStr, c_void};
 use core::ptr::null_mut;
@@ -40,6 +39,8 @@ use kpi::cell::{CRef, Mutable, SubClass};
 use kpi::device::{BusProbe, DeviceIf};
 use kpi::driver;
 use kpi::intr::ConfigHook;
+
+use apple_mbox::AppleMboxMsg;
 use rtkit::{Endpoint, PwrState, RTKit, rtkit_start};
 
 #[repr(u16)]
