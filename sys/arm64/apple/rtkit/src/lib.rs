@@ -25,6 +25,7 @@ use kpi::bindings;
 use kpi::bindings::{
     bus_addr_t, bus_dma_segment_t, bus_dma_tag_t, bus_dmamap_t, bus_size_t, device_t,
 };
+use kpi::boxed::Box;
 use kpi::cell::{CRef, CRefMetadata, Mutable, Ptr, RefMut};
 use kpi::prelude::*;
 use kpi::taskq::Task;
@@ -51,8 +52,6 @@ use requests::{
     BUFFER_REQUEST, BUFFER_SIZE_SHIFT, EpTxMsg, MgmtRxMsg, MgmtTxMsg, buffer_addr, buffer_size,
     mgmt_msg_type,
 };
-
-type Box<T> = kpi::boxed::Box<T, M_DEVBUF>;
 
 pub type RTKitRx<T> = fn(CRef<T>, u64) -> Result<()>;
 type RawRTKitRx = fn(*mut c_void, *mut CRefMetadata, u64) -> Result<()>;
@@ -185,7 +184,10 @@ impl RTKit {
                 self.send(ack)
             }
             MgmtRxMsg::IopPwrStateAck(pwr_state) => {
-                dbg!(self, "setting IOP power state in callback to {pwr_state:x?}");
+                dbg!(
+                    self,
+                    "setting IOP power state in callback to {pwr_state:x?}"
+                );
                 self.iop.store(pwr_state, Ordering::Relaxed);
                 wakeup(&self.iop);
                 Ok(())
@@ -285,7 +287,7 @@ fn rtkit_rx_callback(rtkit: &CRef<RTKit>, msg: AppleMboxMsg) -> Result<()> {
         rtkit: rtkit.clone(),
         msg,
     };
-    let mut task = Box::try_new(Task::new_with_ctx(ctx), M_NOWAIT).inspect_err(|e| {
+    let mut task = Box::try_new(Task::new_with_ctx(ctx), M_DEVBUF, M_NOWAIT).inspect_err(|e| {
         device_println!(rtkit.client, "failed to allocate memory for task {e}");
     })?;
     task.init_inline(rtkit_rx_task);
