@@ -35,6 +35,7 @@ use core::mem::MaybeUninit;
 use core::ops::DerefMut;
 use core::sync::atomic::AtomicU32;
 use kpi::bindings::{cpuset_t, device_t, intr_irqsrc, intr_polarity, intr_trigger, trapframe};
+use kpi::boxed::Box;
 use kpi::bus::{Filter, Register, Resource};
 use kpi::cell::Mutable;
 use kpi::cell::{CRef, SubClass};
@@ -43,9 +44,7 @@ use kpi::driver;
 use kpi::enum_c_macros;
 use kpi::intr::{IntrRoot, IrqSrc, MapData};
 use kpi::ofw::OfwCompatData;
-
-type Box<T> = kpi::boxed::Box<T, M_DEVBUF>;
-type Vec<T, M> = kpi::vec::Vec<T, M>;
+use kpi::vec::Vec;
 
 const AIC_INFO: u64 = 0x0004;
 
@@ -339,18 +338,20 @@ impl DeviceIf for AppleIntDriver {
         device_println!(dev, "Found {nirqs} interrupts, {ndie} die");
 
         // Create an empty Vec with space for up to `ndie` elements
-        let mut ndie_vec = Vec::try_with_capacity(ndie, M_WAITOK | M_ZERO).map_err(|e| {
-            device_println!(dev, "failed to allocate memory for irqs {e}");
-            return ENXIO;
-        })?;
+        let mut ndie_vec =
+            Vec::try_with_capacity(ndie, M_DEVBUF, M_WAITOK | M_ZERO).map_err(|e| {
+                device_println!(dev, "failed to allocate memory for irqs {e}");
+                return ENXIO;
+            })?;
 
         // Start populating `ndie_vec`
         for die in 0..ndie {
             // Create an empty Vec with space for up to `nirqs` elements
-            let mut nirqs_vec = Vec::try_with_capacity(nirqs, M_WAITOK | M_ZERO).map_err(|e| {
-                device_println!(dev, "failed to allocate memory for irqs {e}");
-                return ENXIO;
-            })?;
+            let mut nirqs_vec = Vec::try_with_capacity(nirqs, M_DEVBUF, M_WAITOK | M_ZERO)
+                .map_err(|e| {
+                    device_println!(dev, "failed to allocate memory for irqs {e}");
+                    return ENXIO;
+                })?;
             // Populate `nirqs_vec`
             for irq in 0..nirqs {
                 let isrc = new_irq_src(AppleIntrKind::Irq { die, irq });
@@ -368,7 +369,7 @@ impl DeviceIf for AppleIntDriver {
         let ipi_srcs = array::from_fn(|_| new_irq_src(AppleIntrKind::Ipi));
 
         let num_masks = mp_maxid() + 1;
-        let mut ipimasks = Vec::try_with_capacity(num_masks, M_WAITOK | M_ZERO)?;
+        let mut ipimasks = Vec::try_with_capacity(num_masks, M_DEVBUF, M_WAITOK | M_ZERO)?;
         for i in 0..num_masks {
             ipimasks.push(AtomicU32::new(0));
         }
@@ -797,7 +798,11 @@ impl PicIf for AppleIntDriver {
         }
     }
 
-    fn pic_ipi_setup(dev: device_t, ipi: u32, isrcp: &mut Option<&'static AppleIrqSrc>) -> Result<()> {
+    fn pic_ipi_setup(
+        dev: device_t,
+        ipi: u32,
+        isrcp: &mut Option<&'static AppleIrqSrc>,
+    ) -> Result<()> {
         let sc = device_leak_softc!(dev);
         let ipi = ipi as usize;
         if ipi >= NUM_IPIS {
