@@ -143,6 +143,7 @@ CFLAGS += -mgeneral-regs-only
 CFLAGS += -ffixed-x18
 # Build with BTI+PAC
 CFLAGS += -mbranch-protection=standard
+#CFLAGS.clang+=	-flto=thin
 .if ${LINKER_FEATURES:Mbti-report}
 LDFLAGS += -Wl,-zbti-report=error
 .endif
