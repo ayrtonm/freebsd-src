@@ -8,6 +8,10 @@ include		"std.apple"
 makeoptions	NO_MODULES
 makeoptions	WITHOUT_MODULES="hyperv"
 
+# For when LTO is enabled
+makeoptions	WITHOUT_DTRACE=1
+makeoptions	WITHOUT_CTF=1
+
 #options		DIAGNOSTIC
 #options		BOOTVERBOSE=1
 #options		VERBOSE_SYSINIT=1
