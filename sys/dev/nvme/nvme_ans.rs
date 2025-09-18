@@ -113,7 +113,6 @@ struct NvmeAnsQpair {
 }
 
 pub struct NvmeAnsSoftc {
-    //ctrlr: UnsafeCell<nvme_controller>,
     ans: Mutable<Register>,
     sart: phandle_t,
     rtkit: RTKit,
@@ -239,17 +238,17 @@ impl DeviceIf for NvmeAnsDriver {
 impl NvmeAnsDriver {
     fn nvme_delayed_attach(dev: device_t) -> Result<()> {
         let sc = device_get_softc!(dev);
-        let mut ctrlr = SubClass::get_base(&sc);
         let mut ans = sc.ans.get_mut();
         let mut ctrl = bus_read_4!(ans, ANS_CPU_CTRL);
         bus_write_4!(ans, ANS_CPU_CTRL, ctrl | ANS_CPU_CTRL_RUN);
 
-        let res: Resource = ctrlr.res.as_rust_type();
+        let res: Resource = base!(sc->res).as_rust_type();
         let mut nvme_reg = res.as_register()?;
         let mut status = bus_read_4!(nvme_reg, ANS_BOOT_STATUS);
         if status != ANS_BOOT_STATUS_OK {
             device_println!(dev, "booting rtkit");
-            rtkit_start(project!(sc->rtkit))?;
+            let sc_rtkit = sc.clone();
+            rtkit_start(project!(sc_rtkit->rtkit))?;
         }
         for timo in 0..100000 {
             status = bus_read_4!(nvme_reg, ANS_BOOT_STATUS);
@@ -289,8 +288,7 @@ impl NvmeAnsDriver {
 
     fn nvme_enable(dev: device_t) -> Result<()> {
         let sc = device_get_softc!(dev);
-        let mut ctrlr = SubClass::get_base(&sc);
-        let res: Resource = ctrlr.res.as_rust_type();
+        let res: Resource = base!(sc->res).as_rust_type();
         let mut nvme_reg = res.as_register()?;
         bus_write_4!(
             nvme_reg,
@@ -316,8 +314,7 @@ impl NvmeAnsDriver {
         let id = unsafe { (*tr.req).cmd.cid };
         let cmd = unsafe { qpair.cmd.add(usize::from(id)) };
 
-        let mut ctrlr = SubClass::get_base(&sc);
-        let res: Resource = ctrlr.res.as_rust_type();
+        let res: Resource = base!(sc->res).as_rust_type();
         let mut nvme_reg = res.as_register().unwrap();
         bus_write_4!(nvme_reg, u64::from(qpair.sq_tdbl_off), u32::from(id));
     }

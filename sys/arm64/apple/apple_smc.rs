@@ -35,10 +35,11 @@ use kpi::bindings::{
     SB_FLAG_NO_RANGES, bus_size_t, bus_space_handle_t, device_t, intr_config_hook, simplebus_softc,
 };
 use kpi::bus::Register;
-use kpi::cell::{CRef, Mutable, SubClass};
+use kpi::cell::{Mutable, SubClass};
 use kpi::device::{BusProbe, DeviceIf};
 use kpi::driver;
 use kpi::intr::ConfigHook;
+use kpi::ptr::{CPtr, RefCounted};
 
 use apple_mbox::AppleMboxMsg;
 use rtkit::{Endpoint, PwrState, RTKit, rtkit_start};
@@ -151,9 +152,16 @@ impl AppleSmcDriver {
         todo!("")
     }
 }
-fn start_config_hook(sc: &CRef<AppleSmcSoftc>) -> Result<()> {
+
+extern "C" fn start_config_hook(sc: &RefCounted<AppleSmcSoftc>) {
+    start_config_hook_impl(sc).unwrap();
+}
+
+extern "C" fn start_config_hook_impl(sc: &RefCounted<AppleSmcSoftc>) -> Result<()> {
     let dev = sc.dev;
-    rtkit_start(project!(sc->rtkit)).inspect_err(|e| {
+    let sc = CPtr::new(sc);
+    let sc_rtkit = sc.clone();
+    rtkit_start(project!(sc_rtkit->rtkit)).inspect_err(|e| {
         device_println!(dev, "failed to set up RTKit {e}");
     })?;
     sc.rtkit.boot().inspect_err(|e| {
@@ -198,14 +206,14 @@ fn start_config_hook(sc: &CRef<AppleSmcSoftc>) -> Result<()> {
 
     device_println!(dev, "enabling notifications");
     let ntap = 1;
-    write_key(sc, smc_key(c"NTAP"), &[ntap]).unwrap();
+    write_key(&sc, smc_key(c"NTAP"), &[ntap]).unwrap();
     device_println!(dev, "enabled notifications");
 
     config_intrhook_disestablish(&sc.config_hook);
     Ok(())
 }
 
-fn smc_rtkit_callback(sc: CRef<AppleSmcSoftc>, data: u64) -> Result<()> {
+fn smc_rtkit_callback(sc: CPtr<AppleSmcSoftc>, data: u64) -> Result<()> {
     device_println!(sc.dev, "apple SMC callback got data {data:?}");
     if smc_cmd(data) == SmcCmd::Notif as u16 {
         handle_notification(sc, data);
@@ -216,9 +224,9 @@ fn smc_rtkit_callback(sc: CRef<AppleSmcSoftc>, data: u64) -> Result<()> {
     Ok(())
 }
 
-fn handle_notification(sc: CRef<AppleSmcSoftc>, data: u64) {}
+fn handle_notification(sc: CPtr<AppleSmcSoftc>, data: u64) {}
 
-fn write_key(sc: &CRef<AppleSmcSoftc>, key: u32, data: &[u8]) -> Result<()> {
+fn write_key(sc: &AppleSmcSoftc, key: u32, data: &[u8]) -> Result<()> {
     let len = data.len() as bus_size_t;
     let sram = sc.sram.get_mut().as_ptr();
     unsafe { bindings::rust_bindings_bus_write_region_1(sram, 0, data.as_ptr().cast_mut(), len) }
@@ -226,7 +234,7 @@ fn write_key(sc: &CRef<AppleSmcSoftc>, key: u32, data: &[u8]) -> Result<()> {
     send_cmd(sc, SmcCmd::WriteKey, key, len as u16)
 }
 
-fn send_cmd(sc: &CRef<AppleSmcSoftc>, cmd: SmcCmd, key: u32, len: u16) -> Result<()> {
+fn send_cmd(sc: &AppleSmcSoftc, cmd: SmcCmd, key: u32, len: u16) -> Result<()> {
     let msgid = sc.msgid.fetch_add(1, Ordering::Relaxed);
     sc.rtkit.send(SmcTxMsg::new(cmd, key, len, msgid))
 }

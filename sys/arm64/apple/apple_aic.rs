@@ -37,13 +37,13 @@ use core::sync::atomic::AtomicU32;
 use kpi::bindings::{cpuset_t, device_t, intr_irqsrc, intr_polarity, intr_trigger, trapframe};
 use kpi::boxed::Box;
 use kpi::bus::{Filter, Register, Resource};
-use kpi::cell::Mutable;
-use kpi::cell::{CRef, SubClass};
+use kpi::cell::{Mutable, SubClass};
 use kpi::device::BusProbe;
 use kpi::driver;
 use kpi::enum_c_macros;
 use kpi::intr::{IntrRoot, IrqSrc, MapData};
 use kpi::ofw::OfwCompatData;
+use kpi::ptr::Owns;
 use kpi::vec::Vec;
 
 const AIC_INFO: u64 = 0x0004;
@@ -390,11 +390,11 @@ impl DeviceIf for AppleIntDriver {
             ipimasks,
             //pic: Pic::new(),
         };
-        let sc = device_init_softc!(dev, sc);
+        let sc = Owns::leak_ref(device_init_softc!(dev, sc));
         let name = device_get_nameunit(dev);
         for die in 0..sc.ndie {
             for irq in 0..sc.nirqs {
-                let isrc = project!(sc->irq_srcs[die][irq]);
+                let isrc = &sc.irq_srcs[die][irq];
                 if let Err(e) = intr_isrc_register(
                     isrc,
                     sc.dev,
@@ -410,7 +410,7 @@ impl DeviceIf for AppleIntDriver {
             }
         }
         for fiq in 0..NUM_FIQS {
-            let isrc = project!(sc->fiq_srcs[fiq]);
+            let isrc = &sc.fiq_srcs[fiq];
             if let Err(e) = intr_isrc_register(
                 isrc,
                 sc.dev,
@@ -426,7 +426,7 @@ impl DeviceIf for AppleIntDriver {
         }
 
         for ipi in 0..NUM_IPIS {
-            let isrc = project!(sc->ipi_srcs[ipi]);
+            let isrc = &sc.ipi_srcs[ipi];
             if let Err(e) = intr_isrc_register(
                 isrc,
                 sc.dev,
@@ -455,7 +455,6 @@ impl DeviceIf for AppleIntDriver {
 
         if let Err(e) = intr_pic_claim_root(
             dev,
-            //project!(sc->pic),
             xref,
             Self::apple_aic_irq,
             sc.clone(),
@@ -468,7 +467,6 @@ impl DeviceIf for AppleIntDriver {
 
         if let Err(e) = intr_pic_claim_root(
             dev,
-            //project!(sc->pic),
             xref,
             Self::apple_aic_fiq,
             sc.clone(),
@@ -662,17 +660,17 @@ impl PicIf for AppleIntDriver {
             );
             return Err(EINVAL);
         }
-        let base_isrc = SubClass::get_base(isrc);
-        if base_isrc.isrc_flags & bindings::INTR_ISRCF_PPI as u32 != 0 {
+        let isrc_flags = base!(isrc->isrc_flags);
+        if isrc_flags & bindings::INTR_ISRCF_PPI as u32 != 0 {
             let cpuid = pcpu_get!(pc_cpuid);
             CPU_SET(
                 cpuid,
-                &base_isrc.isrc_cpu as *const cpuset_t as *mut cpuset_t,
+                base!(&isrc->isrc_cpu),
             );
         }
         if sc.cfg.version == 1 {
             if let AppleIntrKind::Irq { die, irq } = isrc.kind {
-                assert!(base_isrc.isrc_flags == 0);
+                assert!(isrc_flags == 0);
                 todo!("")
                 //aic_next_cpu = intr_irq_next_cpu(aic_next_cpu, &all_cpus);
                 //bus_write_4!(sc.mem AIC_
@@ -688,7 +686,7 @@ impl PicIf for AppleIntDriver {
     ) -> Result<()> {
         let (kind, _flags) = get_fdt_intr_data(dev, &data)?;
 
-        let sc = device_leak_softc!(dev);
+        let sc = Owns::leak_ref(device_get_softc!(dev));
         match kind {
             AppleIntrKind::Irq { die, irq } => {
                 *isrcp = Some(&sc.irq_srcs[die][irq]);
@@ -803,20 +801,16 @@ impl PicIf for AppleIntDriver {
         ipi: u32,
         isrcp: &mut Option<&'static AppleIrqSrc>,
     ) -> Result<()> {
-        let sc = device_leak_softc!(dev);
+        let sc = Owns::leak_ref(device_get_softc!(dev));
         let ipi = ipi as usize;
         if ipi >= NUM_IPIS {
             panic!("ipi {ipi} too high");
         }
         let cpuid = pcpu_get!(pc_cpuid);
-        unsafe {
-            SubClass::allow_deref_base(&sc.ipi_srcs[ipi]);
-        }
-        let base_isrc = SubClass::get_base(&sc.ipi_srcs[ipi]);
-        SubClass::forbid_deref_base(&sc.ipi_srcs[ipi]);
+        let isrc = &sc.ipi_srcs[ipi];
         CPU_SET(
             pcpu_get!(pc_cpuid),
-            &base_isrc.isrc_cpu as *const cpuset_t as *mut cpuset_t,
+            base!(&isrc->isrc_cpu),
         );
         *isrcp = Some(&sc.ipi_srcs[ipi]);
 
