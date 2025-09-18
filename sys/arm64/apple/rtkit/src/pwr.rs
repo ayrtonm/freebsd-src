@@ -18,6 +18,7 @@
 use crate::RTKit;
 use kpi::prelude::*;
 
+use crate::MgmtTxMsg;
 use crate::bindings;
 use crate::bindings::{
     bus_addr_t, bus_dma_segment_t, bus_dma_tag_t, bus_dmamap_t, bus_size_t, device_t,
@@ -26,10 +27,8 @@ use core::ffi::{c_int, c_void};
 use core::mem::transmute;
 use core::ptr::null_mut;
 use core::sync::atomic::{AtomicU16, AtomicU64, Ordering};
-use kpi::cell::{CRef, CRefMetadata, Mutable, Ptr, RefMut};
+use kpi::cell::{Mutable, RefMut};
 use kpi::prelude::*;
-use kpi::taskq::Task;
-use crate::MgmtTxMsg;
 
 #[repr(u16)]
 #[derive(Debug)]
@@ -65,7 +64,10 @@ impl RTKit {
         if self.iop.load(Ordering::Relaxed) != (pwr_state & 0xff) {
             dbg!(self, "sleep since IOP pwr state didn't change");
             let _ = tsleep(&self.iop, bindings::PWAIT, c"ioppwr", 5 * hz()).inspect_err(|e| {
-                device_println!(self.client, "timed out waiting for IOP power state change {e:?}");
+                device_println!(
+                    self.client,
+                    "timed out waiting for IOP power state change {e:?}"
+                );
             });
             Ok(())
         } else {

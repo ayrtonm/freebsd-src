@@ -15,6 +15,8 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+use crate::requests::{BUFFER_SIZE_SHIFT, EpTxMsg, buffer_addr, buffer_size};
+use crate::{Endpoint, RTKit};
 use core::ffi::{c_int, c_void};
 use core::mem::transmute;
 use core::ptr::null_mut;
@@ -23,11 +25,8 @@ use kpi::bindings;
 use kpi::bindings::{
     bus_addr_t, bus_dma_segment_t, bus_dma_tag_t, bus_dmamap_t, bus_size_t, device_t,
 };
-use kpi::cell::{CRef, CRefMetadata, Mutable, Ptr, RefMut};
+use kpi::cell::{Mutable, RefMut};
 use kpi::prelude::*;
-use kpi::taskq::Task;
-use crate::{RTKit, Endpoint};
-use crate::requests::{BUFFER_SIZE_SHIFT, EpTxMsg, buffer_addr, buffer_size};
 
 #[derive(Debug, Default)]
 pub struct RTKitBuffer {
@@ -36,11 +35,11 @@ pub struct RTKitBuffer {
     kva: *mut c_void,
     tag: bus_dma_tag_t,
     map: bus_dmamap_t,
-    state: Option<CRef<RTKit>>,
+    state: Option<&'static RTKit>,
 }
 
 pub fn handle_buffer_req(
-    rtkit: CRef<RTKit>,
+    rtkit: &'static RTKit,
     ep: Endpoint,
     data0: u64,
     get_buffer: fn(&RTKit) -> RefMut<RTKitBuffer>,
@@ -51,7 +50,7 @@ pub fn handle_buffer_req(
         "RTKit endpoint {ep:?} requested {} byte buffer",
         size << bindings::PAGE_SHIFT_4K
     );
-    rtkit_alloc(&rtkit, size << bindings::PAGE_SHIFT_4K, get_buffer)?;
+    rtkit_alloc(rtkit, size << bindings::PAGE_SHIFT_4K, get_buffer)?;
 
     let data = (size << BUFFER_SIZE_SHIFT) | buffer_addr(get_buffer(&rtkit).addr);
     rtkit.send(EpTxMsg::BufferReq { ep, data })
@@ -78,7 +77,7 @@ extern "C" fn rtkit_dmamap_cb(
 }
 
 fn rtkit_alloc(
-    rtkit: &CRef<RTKit>,
+    rtkit: &'static RTKit,
     req_size: bus_size_t,
     get_buffer: fn(&RTKit) -> RefMut<RTKitBuffer>,
 ) -> Result<()> {
@@ -108,7 +107,7 @@ fn rtkit_alloc(
     buffer.size = req_size;
     buffer.addr = 0;
     buffer.state = Some(rtkit.clone());
-    //let buffer_cref: CRef<RTKitBuffer> = rtkit.project(|rtk| get_buffer(rtk));
+    //let buffer_cref: ProjectedCPtr<RTKitBuffer> = rtkit.project(|rtk| get_buffer(rtk));
     let rc = bus_dmamap_load(
         buffer.tag,
         buffer.map,
@@ -130,4 +129,3 @@ fn rtkit_alloc(
     }
     Ok(())
 }
-

@@ -15,9 +15,9 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+use core::ffi::c_void;
 use core::sync::atomic::{AtomicU64, Ordering};
 use kpi::cell::Sleepable;
-use core::ffi::c_void;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum Endpoint {
@@ -38,7 +38,6 @@ const RTKIT_EP_DEBUG: u32 = 3;
 const RTKIT_EP_IOREPORT: u32 = 4;
 const RTKIT_EP_OSLOG: u32 = 8;
 const RTKIT_EP_TRACEKIT: u32 = 10;
-
 
 impl Endpoint {
     pub fn new(ep: u32) -> Self {

@@ -26,8 +26,9 @@ use kpi::bindings::{
     bus_addr_t, bus_dma_segment_t, bus_dma_tag_t, bus_dmamap_t, bus_size_t, device_t,
 };
 use kpi::boxed::Box;
-use kpi::cell::{CRef, CRefMetadata, Mutable, Ptr, RefMut};
+use kpi::cell::{Mutable, RefMut};
 use kpi::prelude::*;
+use kpi::ptr::{CPtr, Owns, ProjectedCPtr, RefCountData};
 use kpi::taskq::Task;
 
 use apple_mbox::{AppleMboxMsg, apple_mbox_driver};
@@ -53,14 +54,14 @@ use requests::{
     mgmt_msg_type,
 };
 
-pub type RTKitRx<T> = fn(CRef<T>, u64) -> Result<()>;
-type RawRTKitRx = fn(*mut c_void, *mut CRefMetadata, u64) -> Result<()>;
+pub type RTKitRx<T> = fn(CPtr<T>, u64) -> Result<()>;
+type RawRTKitRx = fn(*mut c_void, *mut RefCountData, u64) -> Result<()>;
 
 #[derive(Debug)]
 struct RTKitCallback {
     func: RawRTKitRx,
     arg: *mut c_void,
-    metadata: *mut CRefMetadata,
+    metadata: *mut RefCountData,
 }
 
 #[repr(C)]
@@ -84,7 +85,7 @@ pub struct RTKit {
 
 #[derive(Debug)]
 struct RTKitTaskCtx {
-    rtkit: CRef<RTKit>,
+    rtkit: &'static RTKit,
     msg: AppleMboxMsg,
 }
 
@@ -121,7 +122,7 @@ impl RTKit {
         Ok(())
     }
 
-    pub fn start_endpoint<T>(&self, ep: Endpoint, func: RTKitRx<T>, arg: CRef<T>) -> Result<()> {
+    pub fn start_endpoint<T>(&self, ep: Endpoint, func: RTKitRx<T>, arg: CPtr<T>) -> Result<()> {
         dbg!(self, "starting endpoint {ep:x?}");
         let _ = tsleep(&self.ep_map, bindings::PWAIT, c"ep_map", 5 * hz()).inspect_err(|e| {
             device_println!(
@@ -139,12 +140,12 @@ impl RTKit {
         }
         let ep_num: u32 = ep.into();
         let ep_callback = &mut self.callbacks.get_mut()[32 - (ep_num as usize)];
-        let leaked_ref = unsafe { arg.leak_ref() };
-        *ep_callback = Some(RTKitCallback {
-            func: unsafe { transmute::<RTKitRx<T>, RawRTKitRx>(func) },
-            arg: leaked_ref.0.cast::<c_void>(),
-            metadata: leaked_ref.1,
-        });
+        //let leaked_ref = Owns::leak_ref(arg);
+        //*ep_callback = Some(RTKitCallback {
+        //    func: unsafe { transmute::<RTKitRx<T>, RawRTKitRx>(func) },
+        //    arg: leaked_ref.0.cast::<c_void>(),
+        //    metadata: leaked_ref.1,
+        //});
         let msg = MgmtTxMsg::StartEp { ep };
         self.send(msg)
     }
@@ -237,7 +238,7 @@ impl RTKit {
     }
 }
 
-fn handle_crashlog(rtkit: CRef<RTKit>, data0: u64) -> Result<()> {
+fn handle_crashlog(rtkit: &'static RTKit, data0: u64) -> Result<()> {
     let ty = mgmt_msg_type(data0);
     if ty != BUFFER_REQUEST {
         device_println!(
@@ -255,7 +256,7 @@ fn handle_crashlog(rtkit: CRef<RTKit>, data0: u64) -> Result<()> {
     Ok(())
 }
 
-fn handle_ioreport(rtkit: CRef<RTKit>, data0: u64) -> Result<()> {
+fn handle_ioreport(rtkit: &'static RTKit, data0: u64) -> Result<()> {
     const IOREPORT_UNKNOWN1: u8 = 8;
     const IOREPORT_UNKNOWN2: u8 = 12;
     let ty = mgmt_msg_type(data0);
@@ -278,26 +279,23 @@ fn handle_ioreport(rtkit: CRef<RTKit>, data0: u64) -> Result<()> {
     Ok(())
 }
 
-pub fn rtkit_start(rtkit: CRef<RTKit>) -> Result<()> {
+pub fn rtkit_start(rtkit: ProjectedCPtr<RTKit>) -> Result<()> {
     apple_mbox_driver.set_rx(rtkit.mbox, rtkit.client, rtkit_rx_callback, rtkit)
 }
 
-fn rtkit_rx_callback(rtkit: &CRef<RTKit>, msg: AppleMboxMsg) -> Result<()> {
-    let ctx = RTKitTaskCtx {
-        rtkit: rtkit.clone(),
-        msg,
-    };
-    let mut task = Box::try_new(Task::new_with_ctx(ctx), M_DEVBUF, M_NOWAIT).inspect_err(|e| {
-        device_println!(rtkit.client, "failed to allocate memory for task {e}");
-    })?;
-    task.init_inline(rtkit_rx_task);
+fn rtkit_rx_callback(rtkit: &'static RTKit, msg: AppleMboxMsg) -> Result<()> {
+    let ctx = RTKitTaskCtx { rtkit, msg };
+    let mut task =
+        Box::try_new(Task::new(rtkit_rx_task, ctx), M_DEVBUF, M_NOWAIT).inspect_err(|e| {
+            device_println!(rtkit.client, "failed to allocate memory for task {e}");
+        })?;
     taskqueue_enqueue(taskqueue_thread(), task).inspect_err(|e| {
         device_println!(rtkit.client, "failed to enqueue task {e}");
     })
 }
 
 fn rtkit_rx_task(ctx: &RTKitTaskCtx, pending: u32) -> Result<()> {
-    let rtkit = ctx.rtkit.clone();
+    let rtkit = ctx.rtkit;
     let ep = Endpoint::new(ctx.msg.data1);
     match ep {
         Endpoint::Mgmt => rtkit.handle_mgmt(ctx.msg.data0),

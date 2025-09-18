@@ -17,6 +17,7 @@
 
 use kpi::prelude::*;
 
+use crate::endpoints::Endpoint;
 use apple_mbox::AppleMboxMsg;
 use core::ffi::{c_int, c_void};
 use core::mem::transmute;
@@ -26,10 +27,8 @@ use kpi::bindings;
 use kpi::bindings::{
     bus_addr_t, bus_dma_segment_t, bus_dma_tag_t, bus_dmamap_t, bus_size_t, device_t,
 };
-use kpi::cell::{CRef, CRefMetadata, Mutable, Ptr, RefMut};
+use kpi::cell::{Mutable, RefMut};
 use kpi::prelude::*;
-use kpi::taskq::Task;
-use crate::endpoints::Endpoint;
 
 #[derive(Debug, Copy, Clone)]
 pub enum MgmtRxMsg {
@@ -85,24 +84,25 @@ impl Into<AppleMboxMsg> for MgmtTxMsg {
             Self::IopPwrState { pwr_state } => mgmt_iop_pwr_state(pwr_state),
             Self::ApPwrState { pwr_state } => mgmt_ap_pwr_state(pwr_state),
             Self::EpMap { base, last } => {
-                let res = (u64::from(base) << EP_MAP_BASE_SHIFT) | ((MGMT_EP_MAP as u64) << MSG_TYPE_SHIFT);
+                let res = (u64::from(base) << EP_MAP_BASE_SHIFT)
+                    | ((MGMT_EP_MAP as u64) << MSG_TYPE_SHIFT);
                 if last {
                     res | (1 << EP_MAP_LAST_SHIFT)
                 } else {
                     res | EP_MAP_MORE
                 }
-            },
+            }
             Self::StartEp { ep } => {
                 let ep: u32 = ep.into();
                 let mut res = u64::from(ep) << START_EP_SHIFT;
                 res |= START_EP_START;
                 res |= u64::from(MGMT_START_EP) << MSG_TYPE_SHIFT;
                 res
-            },
+            }
         };
         AppleMboxMsg {
             data0,
-            data1: Endpoint::Mgmt.into()
+            data1: Endpoint::Mgmt.into(),
         }
     }
 }
@@ -111,7 +111,6 @@ impl Into<AppleMboxMsg> for MgmtTxMsg {
 pub enum EpTxMsg {
     BufferReq { ep: Endpoint, data: u64 },
 }
-
 
 impl Into<AppleMboxMsg> for EpTxMsg {
     fn into(self) -> AppleMboxMsg {
@@ -126,7 +125,10 @@ impl Into<AppleMboxMsg> for EpTxMsg {
                 (res, ep)
             }
         };
-        AppleMboxMsg { data0, data1: ep.into() }
+        AppleMboxMsg {
+            data0,
+            data1: ep.into(),
+        }
     }
 }
 

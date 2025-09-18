@@ -24,9 +24,10 @@ use core::ffi::c_void;
 use core::mem::transmute;
 use kpi::bindings::{INTR_MPSAFE, INTR_TYPE_MISC, device_t};
 use kpi::bus::{Irq, Register};
-use kpi::cell::{CRef, CRefMetadata, Mutable};
+use kpi::cell::Mutable;
 use kpi::device::BusProbe;
 use kpi::driver;
+use kpi::ptr::{RefCounted, Owns, CPtr, ProjectedCPtr, RefCountData};
 
 const MBOX_A2I_CTRL: u64 = 0x110;
 const MBOX_A2I_CTRL_FULL: u32 = 1 << 16;
@@ -48,8 +49,8 @@ pub struct AppleMboxMsg {
     pub data1: u32,
 }
 
-pub type AppleMboxRx<T> = fn(&CRef<T>, AppleMboxMsg) -> Result<()>;
-type RawAppleMboxRx = fn(*mut c_void, *mut c_void, *mut CRefMetadata, AppleMboxMsg) -> Result<()>;
+pub type AppleMboxRx<T> = fn(&'static T, AppleMboxMsg) -> Result<()>;
+type RawAppleMboxRx = fn(*mut c_void, *const c_void, AppleMboxMsg) -> Result<()>;
 
 #[derive(Debug)]
 pub struct AppleMboxSoftc {
@@ -63,8 +64,7 @@ pub struct AppleMboxSoftc {
 struct AppleMboxCallback {
     user_func: *mut c_void,
     invoke: RawAppleMboxRx,
-    arg: *mut c_void,
-    metadata: *mut CRefMetadata,
+    arg: *const c_void,
 }
 
 #[derive(Debug)]
@@ -188,45 +188,38 @@ impl AppleMboxDriver {
         mbox: device_t,
         client: device_t,
         func: AppleMboxRx<T>,
-        arg: CRef<T>,
+        arg: ProjectedCPtr<T>,
     ) -> Result<()> {
-        fn invoke_user_func<T>(
+
+        fn invoke_user_func<T: 'static>(
             user_func: *mut c_void,
-            arg: *mut c_void,
-            metadata: *mut CRefMetadata,
+            arg: *const c_void,
             msg: AppleMboxMsg,
         ) -> Result<()> {
-            let t_ptr = unsafe { arg.cast::<T>() };
-            let arg_cref = unsafe { CRef::new(t_ptr, metadata) };
+            let arg = unsafe { arg.cast::<T>().as_ref().unwrap() };
             let user_func = unsafe { transmute::<*mut c_void, AppleMboxRx<T>>(user_func) };
-            let res = user_func(&arg_cref, msg);
-            unsafe { arg_cref.leak_ref() };
-            res
+            user_func(arg, msg)
         }
 
         let sc = device_get_softc!(mbox);
 
-        let mut intr = sc.intr.get_mut();
         let user_func = unsafe { transmute::<AppleMboxRx<T>, *mut c_void>(func) };
-        // TODO: Add a way to release the ref eventually. We save the metadata anyway to recreate a
-        // &CRef<T> to create new references as necessary in the callback.
-        let leaked_arg = unsafe { arg.leak_ref() };
-        intr.callback = Some(AppleMboxCallback {
+        let arg_ptr = Owns::leak_ref(arg) as *const T;
+
+        sc.intr.get_mut().callback = Some(AppleMboxCallback {
             user_func,
             invoke: invoke_user_func::<T>,
-            arg: leaked_arg.0.cast::<c_void>(),
-            metadata: leaked_arg.1,
+            arg: arg_ptr.cast::<c_void>(),
         });
-        drop(intr);
 
         let flags = INTR_MPSAFE | INTR_TYPE_MISC;
         bus_setup_intr(
             mbox,
-            project!(sc->irq),
+            &sc.irq,
             flags,
             None,
             Some(AppleMboxDriver::handle_intr),
-            sc,
+            sc.clone(),
         )
     }
 
@@ -246,7 +239,7 @@ impl AppleMboxDriver {
         Ok(())
     }
 
-    fn handle_intr(sc: &CRef<AppleMboxSoftc>) {
+    extern "C" fn handle_intr(sc: &RefCounted<AppleMboxSoftc>) {
         let mut intr = sc.intr.get_mut();
 
         while (bus_read_4!(&mut intr.i2a_ctrl, MBOX_I2A_CTRL) & MBOX_I2A_CTRL_EMPTY) == 0 {
@@ -255,7 +248,7 @@ impl AppleMboxDriver {
                 data1: bus_read_8!(&mut intr.i2a_recv, MBOX_I2A_RECV1) as u32,
             };
             let callback = intr.callback.as_mut().unwrap();
-            (callback.invoke)(callback.user_func, callback.arg, callback.metadata, msg).unwrap();
+            (callback.invoke)(callback.user_func, callback.arg, msg).unwrap();
         }
     }
 }

@@ -113,7 +113,8 @@ impl AppleRTKitDriver {
         let ctrl = bus_read_4!(asc, CPU_CTRL);
         bus_write_4!(asc, CPU_CTRL, ctrl | CPU_CTRL_RUN);
 
-        rtkit_start(project!(sc->rtkit)).inspect_err(|e| {
+        let sc_rtkit = sc.clone();
+        rtkit_start(project!(sc_rtkit->rtkit)).inspect_err(|e| {
             device_println!(dev, "failed to boot RTKit {e}");
         })?;
 
