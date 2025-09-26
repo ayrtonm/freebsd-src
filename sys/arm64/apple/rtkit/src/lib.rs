@@ -28,7 +28,7 @@ use kpi::bindings::{
 use kpi::boxed::Box;
 use kpi::cell::{Mutable, RefMut};
 use kpi::prelude::*;
-use kpi::ptr::{CPtr, Owns, ProjectedCPtr, RefCountData};
+use kpi::ptr::{Ptr, OwnedPtr, ProjPtr, RefCountData};
 use kpi::taskq::Task;
 
 use apple_mbox::{AppleMboxMsg, apple_mbox_driver};
@@ -54,7 +54,7 @@ use requests::{
     mgmt_msg_type,
 };
 
-pub type RTKitRx<T> = fn(CPtr<T>, u64) -> Result<()>;
+pub type RTKitRx<T> = fn(Ptr<T>, u64) -> Result<()>;
 type RawRTKitRx = fn(*mut c_void, *mut RefCountData, u64) -> Result<()>;
 
 #[derive(Debug)]
@@ -122,7 +122,7 @@ impl RTKit {
         Ok(())
     }
 
-    pub fn start_endpoint<T>(&self, ep: Endpoint, func: RTKitRx<T>, arg: CPtr<T>) -> Result<()> {
+    pub fn start_endpoint<T>(&self, ep: Endpoint, func: RTKitRx<T>, arg: Ptr<T>) -> Result<()> {
         dbg!(self, "starting endpoint {ep:x?}");
         let _ = tsleep(&self.ep_map, bindings::PWAIT, c"ep_map", 5 * hz()).inspect_err(|e| {
             device_println!(
@@ -140,7 +140,7 @@ impl RTKit {
         }
         let ep_num: u32 = ep.into();
         let ep_callback = &mut self.callbacks.get_mut()[32 - (ep_num as usize)];
-        //let leaked_ref = Owns::leak_ref(arg);
+        //let leaked_ref = OwnedPtr::leak_ref(arg);
         //*ep_callback = Some(RTKitCallback {
         //    func: unsafe { transmute::<RTKitRx<T>, RawRTKitRx>(func) },
         //    arg: leaked_ref.0.cast::<c_void>(),
@@ -279,7 +279,7 @@ fn handle_ioreport(rtkit: &'static RTKit, data0: u64) -> Result<()> {
     Ok(())
 }
 
-pub fn rtkit_start(rtkit: ProjectedCPtr<RTKit>) -> Result<()> {
+pub fn rtkit_start(rtkit: ProjPtr<RTKit>) -> Result<()> {
     apple_mbox_driver.set_rx(rtkit.mbox, rtkit.client, rtkit_rx_callback, rtkit)
 }
 

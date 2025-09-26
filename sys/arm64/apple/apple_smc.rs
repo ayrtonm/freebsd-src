@@ -39,7 +39,7 @@ use kpi::cell::{Mutable, SubClass};
 use kpi::device::{BusProbe, DeviceIf};
 use kpi::driver;
 use kpi::intr::ConfigHook;
-use kpi::ptr::{CPtr, RefCounted};
+use kpi::ptr::{Ptr, RefCounted};
 
 use apple_mbox::AppleMboxMsg;
 use rtkit::{Endpoint, PwrState, RTKit, rtkit_start};
@@ -159,7 +159,7 @@ extern "C" fn start_config_hook(sc: &RefCounted<AppleSmcSoftc>) {
 
 extern "C" fn start_config_hook_impl(sc: &RefCounted<AppleSmcSoftc>) -> Result<()> {
     let dev = sc.dev;
-    let sc = CPtr::new(sc);
+    let sc = Ptr::new(sc);
     let sc_rtkit = sc.clone();
     rtkit_start(project!(sc_rtkit->rtkit)).inspect_err(|e| {
         device_println!(dev, "failed to set up RTKit {e}");
@@ -213,7 +213,7 @@ extern "C" fn start_config_hook_impl(sc: &RefCounted<AppleSmcSoftc>) -> Result<(
     Ok(())
 }
 
-fn smc_rtkit_callback(sc: CPtr<AppleSmcSoftc>, data: u64) -> Result<()> {
+fn smc_rtkit_callback(sc: Ptr<AppleSmcSoftc>, data: u64) -> Result<()> {
     device_println!(sc.dev, "apple SMC callback got data {data:?}");
     if smc_cmd(data) == SmcCmd::Notif as u16 {
         handle_notification(sc, data);
@@ -224,7 +224,7 @@ fn smc_rtkit_callback(sc: CPtr<AppleSmcSoftc>, data: u64) -> Result<()> {
     Ok(())
 }
 
-fn handle_notification(sc: CPtr<AppleSmcSoftc>, data: u64) {}
+fn handle_notification(sc: Ptr<AppleSmcSoftc>, data: u64) {}
 
 fn write_key(sc: &AppleSmcSoftc, key: u32, data: &[u8]) -> Result<()> {
     let len = data.len() as bus_size_t;
