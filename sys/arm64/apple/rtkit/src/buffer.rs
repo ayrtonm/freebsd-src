@@ -107,7 +107,7 @@ fn rtkit_alloc(
     buffer.size = req_size;
     buffer.addr = 0;
     buffer.state = Some(rtkit.clone());
-    //let buffer_cref: ProjectedCPtr<RTKitBuffer> = rtkit.project(|rtk| get_buffer(rtk));
+    //let buffer_cref: ProjPtr<RTKitBuffer> = rtkit.project(|rtk| get_buffer(rtk));
     let rc = bus_dmamap_load(
         buffer.tag,
         buffer.map,

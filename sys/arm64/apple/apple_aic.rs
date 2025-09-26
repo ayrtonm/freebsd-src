@@ -43,7 +43,7 @@ use kpi::driver;
 use kpi::enum_c_macros;
 use kpi::intr::{IntrRoot, IrqSrc, MapData};
 use kpi::ofw::OfwCompatData;
-use kpi::ptr::Owns;
+use kpi::ptr::OwnedPtr;
 use kpi::vec::Vec;
 
 const AIC_INFO: u64 = 0x0004;
@@ -390,7 +390,7 @@ impl DeviceIf for AppleIntDriver {
             ipimasks,
             //pic: Pic::new(),
         };
-        let sc = Owns::leak_ref(device_init_softc!(dev, sc));
+        let sc = OwnedPtr::leak(device_init_softc!(dev, sc));
         let name = device_get_nameunit(dev);
         for die in 0..sc.ndie {
             for irq in 0..sc.nirqs {
@@ -686,7 +686,7 @@ impl PicIf for AppleIntDriver {
     ) -> Result<()> {
         let (kind, _flags) = get_fdt_intr_data(dev, &data)?;
 
-        let sc = Owns::leak_ref(device_get_softc!(dev));
+        let sc = OwnedPtr::leak(device_get_softc!(dev));
         match kind {
             AppleIntrKind::Irq { die, irq } => {
                 *isrcp = Some(&sc.irq_srcs[die][irq]);
@@ -801,7 +801,7 @@ impl PicIf for AppleIntDriver {
         ipi: u32,
         isrcp: &mut Option<&'static AppleIrqSrc>,
     ) -> Result<()> {
-        let sc = Owns::leak_ref(device_get_softc!(dev));
+        let sc = OwnedPtr::leak(device_get_softc!(dev));
         let ipi = ipi as usize;
         if ipi >= NUM_IPIS {
             panic!("ipi {ipi} too high");

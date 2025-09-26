@@ -27,7 +27,7 @@ use kpi::bus::{Irq, Register};
 use kpi::cell::Mutable;
 use kpi::device::BusProbe;
 use kpi::driver;
-use kpi::ptr::{RefCounted, Owns, CPtr, ProjectedCPtr, RefCountData};
+use kpi::ptr::{RefCounted, OwnedPtr, Ptr, ProjPtr, RefCountData};
 
 const MBOX_A2I_CTRL: u64 = 0x110;
 const MBOX_A2I_CTRL_FULL: u32 = 1 << 16;
@@ -188,7 +188,7 @@ impl AppleMboxDriver {
         mbox: device_t,
         client: device_t,
         func: AppleMboxRx<T>,
-        arg: ProjectedCPtr<T>,
+        arg: ProjPtr<T>,
     ) -> Result<()> {
 
         fn invoke_user_func<T: 'static>(
@@ -204,7 +204,7 @@ impl AppleMboxDriver {
         let sc = device_get_softc!(mbox);
 
         let user_func = unsafe { transmute::<AppleMboxRx<T>, *mut c_void>(func) };
-        let arg_ptr = Owns::leak_ref(arg) as *const T;
+        let arg_ptr = OwnedPtr::leak(arg) as *const T;
 
         sc.intr.get_mut().callback = Some(AppleMboxCallback {
             user_func,
