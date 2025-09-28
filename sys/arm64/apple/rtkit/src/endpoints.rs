@@ -64,7 +64,7 @@ impl Into<u32> for Endpoint {
             Endpoint::IOReport => RTKIT_EP_IOREPORT,
             Endpoint::OsLog => RTKIT_EP_OSLOG,
             Endpoint::TraceKit => RTKIT_EP_TRACEKIT,
-            Endpoint::Other(another_ep) => 1 << another_ep,
+            Endpoint::Other(another_ep) => another_ep,
         }
     }
 }
@@ -86,7 +86,7 @@ impl EpMap {
     pub fn contains(&self, ep: Endpoint) -> bool {
         let ep: u32 = ep.into();
         let ep_bitset = self.0.load(Ordering::Relaxed);
-        ep_bitset & u64::from(ep) != 0
+        ep_bitset & u64::from(1u32 << ep) != 0
     }
 
     pub fn insert(&self, new_bitset: u64) -> u64 {

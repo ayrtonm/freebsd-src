@@ -230,6 +230,7 @@ impl AppleMboxDriver {
 
         let mut ctrl = &mut write_msg.a2i_ctrl;
         if (bus_read_4!(ctrl, MBOX_A2I_CTRL) & MBOX_A2I_CTRL_FULL) != 0 {
+            device_println!(sc.dev, "mailbox full");
             return Err(EBUSY);
         }
 

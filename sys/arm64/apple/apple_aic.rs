@@ -290,12 +290,13 @@ pub struct AppleIntSoftc {
     cfg: &'static AppleIntData,
     mem: Mutable<Register>,
     event: Option<Mutable<Register>>,
-    irq_srcs: Box<[Box<[AppleIrqSrc]>]>,
+    //irq_srcs: Box<[Box<[AppleIrqSrc]>]>,
+    irq_srcs: Vec<Vec<AppleIrqSrc>>,
     fiq_srcs: [AppleIrqSrc; NUM_FIQS],
     ipi_srcs: [AppleIrqSrc; NUM_IPIS],
     ndie: usize,
     nirqs: usize,
-    ipimasks: Box<[AtomicU32]>,
+    ipimasks: Vec<AtomicU32>,//Box<[AtomicU32]>,
     //pic: Pic,
 }
 
@@ -359,12 +360,12 @@ impl DeviceIf for AppleIntDriver {
                 nirqs_vec.push(isrc);
             }
             // `nirqs_vec`'s size won't change so turn it into a slice. into_boxed_slice() drops excess capacity which is why this is called after `nirqs_vec` is populated.
-            let nirqs_slice = nirqs_vec.into_boxed_slice();
+            let nirqs_slice = nirqs_vec;//.into_boxed_slice();
             // Populate this die's entry in `ndie_vec`. This cannot fail since we preallocated `ndie` entries
             ndie_vec.push(nirqs_slice);
         }
         // `ndie_vec`'s size won't change so turn it into a slice
-        let irq_srcs = ndie_vec.into_boxed_slice();
+        let irq_srcs = ndie_vec;//.into_boxed_slice();
         let fiq_srcs = AppleFiqKind::all_fiqs().map(|fiq| new_irq_src(AppleIntrKind::Fiq(fiq)));
         let ipi_srcs = array::from_fn(|_| new_irq_src(AppleIntrKind::Ipi));
 
@@ -373,7 +374,7 @@ impl DeviceIf for AppleIntDriver {
         for i in 0..num_masks {
             ipimasks.push(AtomicU32::new(0));
         }
-        let ipimasks = ipimasks.into_boxed_slice();
+        let ipimasks = ipimasks;//.into_boxed_slice();
         if cfg.version == 1 {
             todo!("set cpuids");
         }
