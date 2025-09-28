@@ -33,9 +33,12 @@ use kpi::prelude::*;
 #[repr(u16)]
 #[derive(Debug)]
 pub enum PwrState {
+    Off = 0x0000,
     Sleep = 0x0001,
+    Idle = 0x0201,
     Quiesced = 0x0010,
     On = 0x0020,
+    Init = 0x0220,
 }
 
 impl Into<u16> for PwrState {

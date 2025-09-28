@@ -114,6 +114,13 @@ impl RTKit {
         self.verbose = true;
     }
 
+    pub fn wake(&self) -> Result<()> {
+        self.set_iop(PwrState::Init).inspect_err(|e| {
+            device_println!(self.client, "failed to set IOP power state INIT");
+        })?;
+        Ok(())
+    }
+
     pub fn boot(&self) -> Result<()> {
         dbg!(self, "setting IOP power state ON from rtkit_boot");
         let _ = self.set_iop(PwrState::On).inspect_err(|e| {
@@ -151,6 +158,7 @@ impl RTKit {
     }
 
     pub fn send<T: Into<AppleMboxMsg>>(&self, msg: T) -> Result<()> {
+        wmb!();
         apple_mbox_driver.write_msg(self.mbox, msg.into())
     }
 
@@ -201,7 +209,7 @@ impl RTKit {
             MgmtRxMsg::EpMap { base, bitmap, last } => {
                 dbg!(self, "recv'ed ep map req {msg:x?}");
 
-                let new_bits = u64::from(bitmap) << (base * 32);
+                let new_bits = u64::from(bitmap) << u64::from(base * 32);
                 let new_bitmap = self.ep_map.insert(new_bits);
                 let reply = MgmtTxMsg::EpMap { base, last };
                 self.send(reply)?;
@@ -284,6 +292,7 @@ pub fn rtkit_start(rtkit: ProjPtr<RTKit>) -> Result<()> {
 }
 
 fn rtkit_rx_callback(rtkit: &'static RTKit, msg: AppleMboxMsg) -> Result<()> {
+    rmb!();
     let ctx = RTKitTaskCtx { rtkit, msg };
     let mut task =
         Box::try_new(Task::new(rtkit_rx_task, ctx), M_DEVBUF, M_NOWAIT).inspect_err(|e| {
