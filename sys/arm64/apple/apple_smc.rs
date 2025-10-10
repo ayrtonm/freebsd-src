@@ -35,7 +35,8 @@ use kpi::bindings::{
     SB_FLAG_NO_RANGES, bus_size_t, bus_space_handle_t, device_t, intr_config_hook, simplebus_softc,
 };
 use kpi::bus::Register;
-use kpi::cell::{Mutable, SubClass};
+use kpi::cell::Mutable;
+use kpi::ffi::SubClass;
 use kpi::device::{BusProbe, DeviceIf};
 use kpi::driver;
 use kpi::intr::ConfigHook;
@@ -200,7 +201,7 @@ extern "C" fn start_config_hook_impl(sc: &RefCounted<AppleSmcSoftc>) -> Result<(
         }
         let xref = OF_getencprop_as_xref(child, c"phandle").unwrap();
         OF_device_register_xref(xref, dev);
-        *sc.gpiobus.get_mut() = Some(gpiobus_attach_bus(dev).unwrap());
+        *sc.gpiobus.get_mut() = Some(gpiobus_add_bus(dev).unwrap());
         node = OF_peer(child);
     }
 
@@ -210,6 +211,7 @@ extern "C" fn start_config_hook_impl(sc: &RefCounted<AppleSmcSoftc>) -> Result<(
     device_println!(dev, "enabled notifications");
 
     config_intrhook_disestablish(&sc.config_hook);
+    unsafe { bindings::bus_attach_children(dev) };
     Ok(())
 }
 

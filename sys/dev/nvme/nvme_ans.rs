@@ -52,7 +52,8 @@ use kpi::bindings::{
     device_t, nvme_controller, nvme_qpair, nvme_registers, nvme_tracker, phandle_t,
 };
 use kpi::bus::{Register, Resource};
-use kpi::cell::{Mutable, SubClass};
+use kpi::ffi::SubClass;
+use kpi::cell::Mutable;
 use kpi::device::BusProbe;
 use kpi::driver;
 use rtkit::{RTKit, rtkit_start};
@@ -242,7 +243,8 @@ impl NvmeAnsDriver {
         let mut ctrl = bus_read_4!(ans, ANS_CPU_CTRL);
         bus_write_4!(ans, ANS_CPU_CTRL, ctrl | ANS_CPU_CTRL_RUN);
 
-        let res: Resource = base!(sc->res).as_rust_type();
+        // SAFETY: TODO: No other thread should be concurrently modifying this field
+        let res: Resource = unsafe { base!(sc->res).as_rust_type() };
         let mut nvme_reg = res.as_register()?;
         let mut status = bus_read_4!(nvme_reg, ANS_BOOT_STATUS);
         if status != ANS_BOOT_STATUS_OK {
@@ -288,7 +290,8 @@ impl NvmeAnsDriver {
 
     fn nvme_enable(dev: device_t) -> Result<()> {
         let sc = device_get_softc!(dev);
-        let res: Resource = base!(sc->res).as_rust_type();
+        // SAFETY: TODO: No other thread should be concurrently modifying this field
+        let res: Resource = unsafe { base!(sc->res).as_rust_type() };
         let mut nvme_reg = res.as_register()?;
         bus_write_4!(
             nvme_reg,
@@ -314,7 +317,8 @@ impl NvmeAnsDriver {
         let id = unsafe { (*tr.req).cmd.cid };
         let cmd = unsafe { qpair.cmd.add(usize::from(id)) };
 
-        let res: Resource = base!(sc->res).as_rust_type();
+        // SAFETY: TODO: No other thread should be concurrently modifying this field
+        let res: Resource = unsafe { base!(sc->res).as_rust_type() };
         let mut nvme_reg = res.as_register().unwrap();
         bus_write_4!(nvme_reg, u64::from(qpair.sq_tdbl_off), u32::from(id));
     }

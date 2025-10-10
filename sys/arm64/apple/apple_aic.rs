@@ -37,10 +37,10 @@ use core::sync::atomic::AtomicU32;
 use kpi::bindings::{cpuset_t, device_t, intr_irqsrc, intr_polarity, intr_trigger, trapframe};
 use kpi::boxed::Box;
 use kpi::bus::{Filter, Register, Resource};
-use kpi::cell::{Mutable, SubClass};
+use kpi::ffi::SubClass;
+use kpi::cell::Mutable;
 use kpi::device::BusProbe;
 use kpi::driver;
-use kpi::enum_c_macros;
 use kpi::intr::{IntrRoot, IrqSrc, MapData};
 use kpi::ofw::OfwCompatData;
 use kpi::ptr::OwnedPtr;
@@ -243,10 +243,9 @@ pub struct AppleIrqSrcFields {
     trig: intr_trigger,
 }
 
-enum_c_macros! {
-    #[repr(i32)]
+kpi::gen_enum! {
     #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-    pub enum AppleFiqKind {
+    enum AppleFiqKind {
         AIC_TMR_HV_PHYS,
         AIC_TMR_HV_VIRT,
         AIC_TMR_GUEST_PHYS,
@@ -255,6 +254,17 @@ enum_c_macros! {
         AIC_CPU_PMU_P,
     }
 }
+
+//#[repr(i32)]
+//#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+//pub enum AppleFiqKind {
+//    AIC_TMR_HV_PHYS = bindings::AIC_TMR_HV_PHYS ,
+//    AIC_TMR_HV_VIRT = bindings::AIC_TMR_HV_VIRT ,
+//    AIC_TMR_GUEST_PHYS = bindings::AIC_TMR_GUEST_PHYS ,
+//    AIC_TMR_GUEST_VIRT = bindings::AIC_TMR_GUEST_VIRT ,
+//    AIC_CPU_PMU_E = bindings::AIC_CPU_PMU_E ,
+//    AIC_CPU_PMU_P = bindings::AIC_CPU_PMU_P ,
+//}
 
 impl AppleFiqKind {
     fn all_fiqs() -> [AppleFiqKind; NUM_FIQS] {
@@ -661,7 +671,8 @@ impl PicIf for AppleIntDriver {
             );
             return Err(EINVAL);
         }
-        let isrc_flags = base!(isrc->isrc_flags);
+        // SAFETY: No other thread is concurrently modifying this field
+        let isrc_flags = unsafe { base!(isrc->isrc_flags) };
         if isrc_flags & bindings::INTR_ISRCF_PPI as u32 != 0 {
             let cpuid = pcpu_get!(pc_cpuid);
             CPU_SET(
@@ -794,6 +805,7 @@ impl PicIf for AppleIntDriver {
                 let cpuid = pcpu_get!(pc_cpuid);
                 todo!("")
             }
+            invalid_root => unreachable!(""),
         }
     }
 
