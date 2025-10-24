@@ -53,7 +53,7 @@ struct devsw *devsw[] = {
 #ifdef EFI_ZFS_BOOT
 	&zfs_dev,
 #endif
-#if defined(LOADER_MD_SUPPORT)
+#ifdef MD_IMAGE_SIZE
 	&md_dev,
 #endif
 #ifdef LOADER_FDT_SUPPORT

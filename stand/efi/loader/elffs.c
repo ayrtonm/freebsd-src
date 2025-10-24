@@ -52,20 +52,20 @@ static int	elf_readdir(struct open_file *fd, struct dirent *d);
 struct fs_ops elffs_fsops = {
 
 	"elffs",
-	elf_open,
-	elf_close,
-	elf_read,
-	null_write,
-	elf_seek,
-	elf_stat,
-	elf_readdir
+	.fo_open = elf_open,
+	.fo_close = elf_close,
+	.fo_read = elf_read,
+	.fo_write = null_write,
+	.fo_seek = elf_seek,
+	.fo_stat = elf_stat,
+	.fo_readdir = elf_readdir
 };
 
 static int
 elf_open(const char *path, struct open_file *fd)
 {
 	char buf[512];
-	Elf64_Ehdr *hdr;
+	Elf64_Ehdr *hdr __attribute__((unused));
 	struct elf_file *f;
 	size_t rsize;
 	int err;
