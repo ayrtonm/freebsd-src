@@ -26,9 +26,9 @@ use kpi::bindings::{
     bus_addr_t, bus_dma_segment_t, bus_dma_tag_t, bus_dmamap_t, bus_size_t, device_t,
 };
 use kpi::boxed::Box;
-use kpi::cell::{Mutable, RefMut};
+use kpi::ffi::{FatPtr, OwnedPtr, Ptr, RefCountData};
 use kpi::prelude::*;
-use kpi::ptr::{Ptr, OwnedPtr, ProjPtr, RefCountData};
+use kpi::sync::{Mutable, RefMut};
 use kpi::taskq::Task;
 
 use apple_mbox::{AppleMboxMsg, apple_mbox_driver};
@@ -287,7 +287,7 @@ fn handle_ioreport(rtkit: &'static RTKit, data0: u64) -> Result<()> {
     Ok(())
 }
 
-pub fn rtkit_start(rtkit: ProjPtr<RTKit>) -> Result<()> {
+pub fn rtkit_start(rtkit: FatPtr<RTKit>) -> Result<()> {
     apple_mbox_driver.set_rx(rtkit.mbox, rtkit.client, rtkit_rx_callback, rtkit)
 }
 

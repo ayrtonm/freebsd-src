@@ -31,10 +31,10 @@
 
 use kpi::bindings::device_t;
 use kpi::bus::{Register, ResourceSpec};
-use kpi::cell::Mutable;
 use kpi::device::BusProbe;
 use kpi::driver;
 use kpi::ofw::XRef;
+use kpi::sync::Mutable;
 use rtkit::{PwrState, RTKit, rtkit_start};
 
 const CPU_CTRL: u64 = 0x44;
@@ -70,7 +70,7 @@ impl DeviceIf for AppleRTKitDriver {
         Ok(BUS_PROBE_SPECIFIC)
     }
 
-    fn device_attach(dev: device_t) -> Result<()> {
+    fn device_attach(uninit_sc: &mut Uninit<AppleRTKitSoftc>, dev: device_t) -> Result<()> {
         let [asc_res, sram_res] = bus_alloc_resources(dev, SPEC).inspect_err(|e| {
             device_println!(dev, "could not allocate device resources {e}");
         })?;
@@ -92,11 +92,11 @@ impl DeviceIf for AppleRTKitDriver {
             RTKit::new(dev).inspect_err(|e| device_println!(dev, "failed to create RTKit {e}"))?;
 
         let sc = AppleRTKitSoftc { asc, sram, rtkit };
-        device_init_softc!(dev, sc);
+        uninit_sc.init(sc);
         Ok(())
     }
 
-    fn device_detach(_dev: device_t) -> Result<()> {
+    fn device_detach(_sc: &RefCounted<AppleRTKitSoftc>, _dev: device_t) -> Result<()> {
         unreachable!("apple RTKit helper cannot be detached")
     }
 }

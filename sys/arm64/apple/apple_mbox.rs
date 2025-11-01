@@ -24,10 +24,10 @@ use core::ffi::c_void;
 use core::mem::transmute;
 use kpi::bindings::{INTR_MPSAFE, INTR_TYPE_MISC, device_t};
 use kpi::bus::{Irq, Register};
-use kpi::cell::Mutable;
 use kpi::device::BusProbe;
 use kpi::driver;
-use kpi::ptr::{RefCounted, OwnedPtr, Ptr, ProjPtr, RefCountData};
+use kpi::ffi::{FatPtr, OwnedPtr, Ptr, RefCountData, RefCounted};
+use kpi::sync::Mutable;
 
 const MBOX_A2I_CTRL: u64 = 0x110;
 const MBOX_A2I_CTRL_FULL: u32 = 1 << 16;
@@ -97,7 +97,7 @@ impl DeviceIf for AppleMboxDriver {
         Ok(BUS_PROBE_SPECIFIC)
     }
 
-    fn device_attach(dev: device_t) -> Result<()> {
+    fn device_attach(uninit_sc: &mut Uninit<AppleMboxSoftc>, dev: device_t) -> Result<()> {
         let node = ofw_bus_get_node(dev);
 
         let rid = ofw_bus_find_string_index(node, c"interrupt-names", c"recv-not-empty").map_err(
@@ -154,19 +154,16 @@ impl DeviceIf for AppleMboxDriver {
         let xref = OF_xref_from_node(node);
         OF_device_register_xref(xref, dev);
 
-        device_init_softc!(
+        uninit_sc.init(AppleMboxSoftc {
             dev,
-            AppleMboxSoftc {
-                dev,
-                irq,
-                intr,
-                write_msg,
-            }
-        );
+            irq,
+            intr,
+            write_msg,
+        });
         Ok(())
     }
 
-    fn device_detach(_dev: device_t) -> Result<()> {
+    fn device_detach(_sc: &RefCounted<AppleMboxSoftc>, _dev: device_t) -> Result<()> {
         unreachable!("device cannot be detached")
     }
 }
@@ -188,9 +185,8 @@ impl AppleMboxDriver {
         mbox: device_t,
         client: device_t,
         func: AppleMboxRx<T>,
-        arg: ProjPtr<T>,
+        arg: FatPtr<T>,
     ) -> Result<()> {
-
         fn invoke_user_func<T: 'static>(
             user_func: *mut c_void,
             arg: *const c_void,

@@ -27,8 +27,8 @@ use kpi::bindings;
 use kpi::bindings::{
     bus_addr_t, bus_dma_segment_t, bus_dma_tag_t, bus_dmamap_t, bus_size_t, device_t,
 };
-use kpi::cell::{Mutable, RefMut};
 use kpi::prelude::*;
+use kpi::sync::{Mutable, RefMut};
 
 #[derive(Debug, Copy, Clone)]
 pub enum MgmtRxMsg {

@@ -46,16 +46,15 @@
 
 use core::cell::UnsafeCell;
 use core::ffi::c_void;
-use kpi::ErrCode;
 use kpi::bindings::{
     INTR_MPSAFE, INTR_TYPE_MISC, QUIRK_ANS, bus_addr_t, bus_dma_tag_t, bus_dmamap_t, bus_size_t,
     device_t, nvme_controller, nvme_qpair, nvme_registers, nvme_tracker, phandle_t,
 };
 use kpi::bus::{Register, Resource};
-use kpi::ffi::SubClass;
-use kpi::cell::Mutable;
 use kpi::device::BusProbe;
-use kpi::driver;
+use kpi::ffi::SubClass;
+use kpi::sync::Mutable;
+use kpi::{ErrCode, driver};
 use rtkit::{RTKit, rtkit_start};
 
 const ANS_CPU_CTRL: u64 = 0x0044;
@@ -113,7 +112,9 @@ struct NvmeAnsQpair {
     is_admin: bool,
 }
 
-pub struct NvmeAnsSoftc {
+pub type NvmeAnsSoftc = SubClass<nvme_controller, NvmeAnsSoftcInternal>;
+
+pub struct NvmeAnsSoftcInternal {
     ans: Mutable<Register>,
     sart: phandle_t,
     rtkit: RTKit,
@@ -122,7 +123,7 @@ pub struct NvmeAnsSoftc {
 }
 
 impl DeviceIf for NvmeAnsDriver {
-    type Softc = SubClass<nvme_controller, NvmeAnsSoftc>;
+    type Softc = NvmeAnsSoftc;
 
     fn device_probe(dev: device_t) -> Result<BusProbe> {
         if !ofw_bus_status_okay(dev) {
@@ -135,7 +136,7 @@ impl DeviceIf for NvmeAnsDriver {
         Ok(BUS_PROBE_DEFAULT)
     }
 
-    fn device_attach(dev: device_t) -> Result<()> {
+    fn device_attach(uninit_sc: &mut Uninit<NvmeAnsSoftc>, dev: device_t) -> Result<()> {
         let node = ofw_bus_get_node(dev);
 
         let ans_id = ofw_bus_find_string_index(node, c"reg-names", c"ans").map_err(|e| {
@@ -188,7 +189,7 @@ impl DeviceIf for NvmeAnsDriver {
         })?;
         let adminq = Mutable::new(NvmeAnsQpair::default());
         let ioq = Mutable::new(NvmeAnsQpair::default());
-        let sc = NvmeAnsSoftc {
+        let sc = NvmeAnsSoftcInternal {
             //ctrlr: UnsafeCell::new(ctrlr),
             ans,
             sart,
@@ -196,7 +197,7 @@ impl DeviceIf for NvmeAnsDriver {
             adminq,
             ioq,
         };
-        let sc = device_init_softc!(dev, SubClass::new_with_base(ctrlr, sc));
+        let sc = uninit_sc.init(SubClass::new_with_base(ctrlr, sc));
         let ctrlr = SubClass::as_base_ptr(&sc);
         let error = unsafe {
             bindings::bus_setup_intr(
@@ -223,22 +224,17 @@ impl DeviceIf for NvmeAnsDriver {
 
     // FIXME: this is silly since the original version just set nvme_detach in the method table. I
     // should find a way to do that
-    fn device_detach(dev: device_t) -> Result<()> {
+    fn device_detach(sc: &RefCounted<NvmeAnsSoftc>, dev: device_t) -> Result<()> {
         let res = unsafe { bindings::nvme_detach(dev) };
         if res != 0 {
             return Err(ErrCode::from(res));
         }
         Ok(())
     }
-
-    fn device_shutdown(dev: device_t) -> Result<()> {
-        todo!("")
-    }
 }
 
 impl NvmeAnsDriver {
-    fn nvme_delayed_attach(dev: device_t) -> Result<()> {
-        let sc = device_get_softc!(dev);
+    fn nvme_delayed_attach(sc: &RefCounted<NvmeAnsSoftc>, dev: device_t) -> Result<()> {
         let mut ans = sc.ans.get_mut();
         let mut ctrl = bus_read_4!(ans, ANS_CPU_CTRL);
         bus_write_4!(ans, ANS_CPU_CTRL, ctrl | ANS_CPU_CTRL_RUN);
@@ -288,8 +284,7 @@ impl NvmeAnsDriver {
         Ok(todo!(""))
     }
 
-    fn nvme_enable(dev: device_t) -> Result<()> {
-        let sc = device_get_softc!(dev);
+    fn nvme_enable(sc: &RefCounted<NvmeAnsSoftc>, dev: device_t) -> Result<()> {
         // SAFETY: TODO: No other thread should be concurrently modifying this field
         let res: Resource = unsafe { base!(sc->res).as_rust_type() };
         let mut nvme_reg = res.as_register()?;
@@ -302,13 +297,22 @@ impl NvmeAnsDriver {
         Ok(())
     }
 
-    fn nvme_sq_enter(dev: device_t, qpair: *mut nvme_qpair, tr: &nvme_tracker) -> u32 {
+    fn nvme_sq_enter(
+        sc: &RefCounted<NvmeAnsSoftc>,
+        dev: device_t,
+        qpair: *mut nvme_qpair,
+        tr: &nvme_tracker,
+    ) -> u32 {
         let id = unsafe { (*tr.req).cmd.cid };
         u32::from(id)
     }
 
-    fn nvme_sq_leave(dev: device_t, qpair: &nvme_qpair, tr: &nvme_tracker) {
-        let sc = device_get_softc!(dev);
+    fn nvme_sq_leave(
+        sc: &RefCounted<NvmeAnsSoftc>,
+        dev: device_t,
+        qpair: &nvme_qpair,
+        tr: &nvme_tracker,
+    ) {
         let mut ans_qpair = &sc.adminq;
         if qpair.id != 0 {
             ans_qpair = &sc.ioq;
@@ -324,12 +328,12 @@ impl NvmeAnsDriver {
     }
 
     fn nvme_qpair_construct(
+        sc: &RefCounted<NvmeAnsSoftc>,
         dev: device_t,
         qpair: &mut nvme_qpair,
         num_entries: u32,
         num_trackers: u32,
     ) -> Result<()> {
-        let sc = device_get_softc!(dev);
         let res = unsafe {
             bindings::nvme_qpair_construct(dev, qpair, num_entries, num_trackers, todo!("sc"))
         };
@@ -348,8 +352,12 @@ impl NvmeAnsDriver {
         Ok(())
     }
 
-    fn nvme_cq_done(dev: device_t, qpair: &nvme_qpair, tr: &nvme_tracker) {
-        let sc = device_get_softc!(dev);
+    fn nvme_cq_done(
+        sc: &RefCounted<NvmeAnsSoftc>,
+        dev: device_t,
+        qpair: &nvme_qpair,
+        tr: &nvme_tracker,
+    ) {
         let id = unsafe { (*tr.req).cmd.cid };
         let mut ans_qpair = &sc.adminq;
         if qpair.id != 0 {

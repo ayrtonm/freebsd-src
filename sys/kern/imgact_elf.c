@@ -2711,7 +2711,7 @@ __elfN(note_procstat_auxv)(void *arg, struct sbuf *sb, size_t *sizep)
 {
 	struct proc *p;
 	size_t size;
-	int structsize;
+	int structsize = 0;
 
 	p = arg;
 	if (sb == NULL) {

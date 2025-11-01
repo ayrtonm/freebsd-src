@@ -17,7 +17,7 @@
 
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicU64, Ordering};
-use kpi::cell::Sleepable;
+use kpi::misc::Sleepable;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum Endpoint {

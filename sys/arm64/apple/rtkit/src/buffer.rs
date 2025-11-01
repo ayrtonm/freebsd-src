@@ -25,8 +25,8 @@ use kpi::bindings;
 use kpi::bindings::{
     bus_addr_t, bus_dma_segment_t, bus_dma_tag_t, bus_dmamap_t, bus_size_t, device_t,
 };
-use kpi::cell::{Mutable, RefMut};
 use kpi::prelude::*;
+use kpi::sync::{Mutable, RefMut};
 
 #[derive(Debug, Default)]
 pub struct RTKitBuffer {
@@ -107,7 +107,7 @@ fn rtkit_alloc(
     buffer.size = req_size;
     buffer.addr = 0;
     buffer.state = Some(rtkit.clone());
-    //let buffer_cref: ProjPtr<RTKitBuffer> = rtkit.project(|rtk| get_buffer(rtk));
+    //let buffer_cref: FatPtr<RTKitBuffer> = rtkit.project(|rtk| get_buffer(rtk));
     let rc = bus_dmamap_load(
         buffer.tag,
         buffer.map,

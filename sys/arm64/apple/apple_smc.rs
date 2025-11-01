@@ -35,12 +35,11 @@ use kpi::bindings::{
     SB_FLAG_NO_RANGES, bus_size_t, bus_space_handle_t, device_t, intr_config_hook, simplebus_softc,
 };
 use kpi::bus::Register;
-use kpi::cell::Mutable;
-use kpi::ffi::SubClass;
 use kpi::device::{BusProbe, DeviceIf};
 use kpi::driver;
+use kpi::ffi::{Ptr, RefCounted, SubClass};
 use kpi::intr::ConfigHook;
-use kpi::ptr::{Ptr, RefCounted};
+use kpi::sync::Mutable;
 
 use apple_mbox::AppleMboxMsg;
 use rtkit::{Endpoint, PwrState, RTKit, rtkit_start};
@@ -99,7 +98,7 @@ impl DeviceIf for AppleSmcDriver {
         return Ok(BUS_PROBE_DEFAULT);
     }
 
-    fn device_attach(dev: device_t) -> Result<()> {
+    fn device_attach(uninit_sc: &mut Uninit<AppleSmcSoftc>, dev: device_t) -> Result<()> {
         let mut simplebus_sc = simplebus_softc::default();
         simplebus_sc.dev = dev;
         simplebus_sc.flags |= SB_FLAG_NO_RANGES;
@@ -126,9 +125,9 @@ impl DeviceIf for AppleSmcDriver {
             msgid: AtomicU8::new(0),
             data: AtomicU64::new(0),
         };
-        let sc = device_init_softc!(dev, SubClass::new_with_base(simplebus_sc, smc_sc));
+        let sc = uninit_sc.init(SubClass::new_with_base(simplebus_sc, smc_sc));
 
-        sc.config_hook.init(start_config_hook, sc.clone());
+        sc.config_hook.init(start_config_hook, sc.grab_ref());
 
         let res = unsafe { bindings::simplebus_attach(dev) };
         if res != 0 {
@@ -143,7 +142,7 @@ impl DeviceIf for AppleSmcDriver {
         Ok(())
     }
 
-    fn device_detach(dev: device_t) -> Result<()> {
+    fn device_detach(sc: &RefCounted<AppleSmcSoftc>, dev: device_t) -> Result<()> {
         todo!("")
     }
 }
