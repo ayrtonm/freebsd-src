@@ -42,7 +42,7 @@ NO_WDEPRECATED_NON_PROTOTYPE=	-Wno-deprecated-non-prototype
 # some incentive to fix them eventually.
 CWARNEXTRA?=	-Wno-error=tautological-compare -Wno-error=empty-body \
 		-Wno-error=parentheses-equality -Wno-error=unused-function \
-		-Wno-error=pointer-sign -Wno-error=format -Wno-error=default-const-init-field-unsafe -Wno-error=uninitialized-const-pointer
+		-Wno-error=pointer-sign -Wno-error=format
 CWARNEXTRA+=	-Wno-error=shift-negative-value
 CWARNEXTRA+=	-Wno-address-of-packed-member
 .endif	# clang
