@@ -135,6 +135,7 @@ struct files_name {
 #define BEFORE_DEPEND	4
 #define NOWERROR	16
 #define NO_CTFCONVERT	32
+#define SINGLE_RS	64
 
 struct device {
 	int	d_done;			/* processed */
