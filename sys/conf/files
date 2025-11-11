@@ -3201,6 +3201,7 @@ dev/sound/pcm/mixer.c		optional sound
 dev/sound/pcm/mixer_if.m	optional sound
 dev/sound/pcm/sndstat.c		optional sound
 dev/sound/pcm/sound.c		optional sound
+dev/sound/pcm/sound.rs		optional sound
 dev/sound/pcm/vchan.c		optional sound
 dev/sound/usb/uaudio.c		optional snd_uaudio usb
 dev/sound/usb/uaudio_pcm.c	optional snd_uaudio usb
@@ -3509,6 +3510,13 @@ dev/virtio/p9fs/virtio_p9fs.c		optional	virtio_p9fs
 dev/virtio/random/virtio_random.c	optional	virtio_random
 dev/virtio/scmi/virtio_scmi.c		optional	virtio_scmi
 dev/virtio/scsi/virtio_scsi.c		optional	virtio_scsi
+dev/virtio/virtio.rs		optional	virtio_rust
+dev/virtio/sound/virtio_snd.c		optional	virtio_snd virtio_rust
+dev/virtio/sound/virtio_snd.rs		optional	virtio_snd virtio_rust \
+	dependency	"libvirtio.rlib libsound.rlib"
+dev/virtio/fs/virtio_fs.c		optional	virtio_fs virtio_rust
+dev/virtio/fs/virtio_fs.rs		optional	virtio_fs virtio_rust \
+	dependency	"libvirtio.rlib"
 dev/vkbd/vkbd.c			optional vkbd
 dev/vmgenc/vmgenc_acpi.c	optional acpi
 dev/vmware/vmxnet3/if_vmx.c		optional vmx
