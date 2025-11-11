@@ -379,6 +379,10 @@ int	sound_oss_card_info(oss_card_info *);
 				(((e) << AFMT_EXTCHANNEL_SHIFT) &	\
 				AFMT_EXTCHANNEL_MASK))
 
+static uint32_t snd_format(uint32_t f, uint32_t c, uint32_t e) {
+    return SND_FORMAT(f, c, e);
+}
+
 #define AFMT_U8_NE	AFMT_U8
 #define AFMT_S8_NE	AFMT_S8
 
