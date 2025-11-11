@@ -1246,7 +1246,8 @@ apple_pcie_attach(device_t dev)
 
 	/* Done. */
 	device_add_child(dev, "pci", -1);
-	return (bus_generic_attach(dev));
+	bus_attach_children(dev);
+	return (0);
 }
 
 /*
