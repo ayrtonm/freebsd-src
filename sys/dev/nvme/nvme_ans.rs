@@ -42,20 +42,23 @@
  */
 
 #![no_std]
-#![feature(macro_metavar_expr_concat)]
 
-use core::cell::UnsafeCell;
 use core::ffi::c_void;
+use kpi::kobj::{AsRustType, AsCType};
 use kpi::bindings::{
     INTR_MPSAFE, INTR_TYPE_MISC, QUIRK_ANS, bus_addr_t, bus_dma_tag_t, bus_dmamap_t, bus_size_t,
     device_t, nvme_controller, nvme_qpair, nvme_registers, nvme_tracker, phandle_t,
 };
 use kpi::bus::{Register, Resource};
-use kpi::device::BusProbe;
+use kpi::device::{BusProbe, DeviceIf};
 use kpi::ffi::SubClass;
+use kpi::prelude::*;
 use kpi::sync::Mutable;
+use kpi::base;
 use kpi::{ErrCode, driver};
-use rtkit::{RTKit, rtkit_start};
+use kpi::sync::arc::{Arc, ArcRef, UninitArc};
+use nvme::NvmeIf;
+use rtkit::RTKit;
 
 const ANS_CPU_CTRL: u64 = 0x0044;
 const ANS_CPU_CTRL_RUN: u32 = 1 << 4;
@@ -112,12 +115,15 @@ struct NvmeAnsQpair {
     is_admin: bool,
 }
 
+unsafe impl Sync for NvmeAnsQpair {}
+unsafe impl Send for NvmeAnsQpair {}
+
 pub type NvmeAnsSoftc = SubClass<nvme_controller, NvmeAnsSoftcInternal>;
 
 pub struct NvmeAnsSoftcInternal {
     ans: Mutable<Register>,
     sart: phandle_t,
-    rtkit: RTKit,
+    rtkit: Arc<RTKit>,
     adminq: Mutable<NvmeAnsQpair>,
     ioq: Mutable<NvmeAnsQpair>,
 }
@@ -136,7 +142,7 @@ impl DeviceIf for NvmeAnsDriver {
         Ok(BUS_PROBE_DEFAULT)
     }
 
-    fn device_attach(uninit_sc: &mut Uninit<NvmeAnsSoftc>, dev: device_t) -> Result<()> {
+    fn device_attach(uninit_sc: UninitArc<NvmeAnsSoftc>, dev: device_t) -> Result<()> {
         let node = ofw_bus_get_node(dev);
 
         let ans_id = ofw_bus_find_string_index(node, c"reg-names", c"ans").map_err(|e| {
@@ -187,6 +193,7 @@ impl DeviceIf for NvmeAnsDriver {
             device_println!(dev, "error initializing rtkit {e}");
             ENXIO
         })?;
+        let rtkit = Arc::new(rtkit, M_DEVBUF, M_WAITOK);
         let adminq = Mutable::new(NvmeAnsQpair::default());
         let ioq = Mutable::new(NvmeAnsQpair::default());
         let sc = NvmeAnsSoftcInternal {
@@ -224,7 +231,7 @@ impl DeviceIf for NvmeAnsDriver {
 
     // FIXME: this is silly since the original version just set nvme_detach in the method table. I
     // should find a way to do that
-    fn device_detach(sc: &RefCounted<NvmeAnsSoftc>, dev: device_t) -> Result<()> {
+    fn device_detach(sc: Arc<NvmeAnsSoftc>, dev: device_t) -> Result<()> {
         let res = unsafe { bindings::nvme_detach(dev) };
         if res != 0 {
             return Err(ErrCode::from(res));
@@ -234,7 +241,20 @@ impl DeviceIf for NvmeAnsDriver {
 }
 
 impl NvmeAnsDriver {
-    fn nvme_delayed_attach(sc: &RefCounted<NvmeAnsSoftc>, dev: device_t) -> Result<()> {
+    fn alloc_qpair(dev: device_t, id: u32) -> Result<NvmeAnsQpair> {
+        let is_admin = id == 0;
+        Ok(todo!(""))
+    }
+}
+
+fn nvme_ans_qpair_to_tcb() {}
+
+impl NvmeIf for NvmeAnsDriver {
+    fn nvme_delayed_attach(
+        sc: ArcRef<NvmeAnsSoftc>,
+        dev: device_t,
+        ctrlr: *mut nvme_controller,
+    ) -> Result<()> {
         let mut ans = sc.ans.get_mut();
         let mut ctrl = bus_read_4!(ans, ANS_CPU_CTRL);
         bus_write_4!(ans, ANS_CPU_CTRL, ctrl | ANS_CPU_CTRL_RUN);
@@ -246,7 +266,7 @@ impl NvmeAnsDriver {
         if status != ANS_BOOT_STATUS_OK {
             device_println!(dev, "booting rtkit");
             let sc_rtkit = sc.clone();
-            rtkit_start(project!(sc_rtkit->rtkit))?;
+            //rtkit_start(project!(sc_rtkit->rtkit))?;
         }
         for timo in 0..100000 {
             status = bus_read_4!(nvme_reg, ANS_BOOT_STATUS);
@@ -279,26 +299,20 @@ impl NvmeAnsDriver {
         Ok(())
     }
 
-    fn alloc_qpair(dev: device_t, id: u32) -> Result<NvmeAnsQpair> {
-        let is_admin = id == 0;
-        Ok(todo!(""))
-    }
-
-    fn nvme_enable(sc: &RefCounted<NvmeAnsSoftc>, dev: device_t) -> Result<()> {
+    fn nvme_enable(sc: ArcRef<NvmeAnsSoftc>, dev: device_t) {
         // SAFETY: TODO: No other thread should be concurrently modifying this field
         let res: Resource = unsafe { base!(sc->res).as_rust_type() };
-        let mut nvme_reg = res.as_register()?;
+        let mut nvme_reg = res.as_register().unwrap();
         bus_write_4!(
             nvme_reg,
             ANS_NVMMU_NUM,
             (ANS_NVMMU_TCB_SIZE / ANS_NVMMU_TCB_PITCH) - 1
         );
         bus_write_4!(nvme_reg, ANS_MODESEL_REG, 0);
-        Ok(())
     }
 
     fn nvme_sq_enter(
-        sc: &RefCounted<NvmeAnsSoftc>,
+        sc: ArcRef<NvmeAnsSoftc>,
         dev: device_t,
         qpair: *mut nvme_qpair,
         tr: &nvme_tracker,
@@ -308,7 +322,7 @@ impl NvmeAnsDriver {
     }
 
     fn nvme_sq_leave(
-        sc: &RefCounted<NvmeAnsSoftc>,
+        sc: ArcRef<NvmeAnsSoftc>,
         dev: device_t,
         qpair: &nvme_qpair,
         tr: &nvme_tracker,
@@ -328,11 +342,12 @@ impl NvmeAnsDriver {
     }
 
     fn nvme_qpair_construct(
-        sc: &RefCounted<NvmeAnsSoftc>,
+        sc: ArcRef<NvmeAnsSoftc>,
         dev: device_t,
         qpair: &mut nvme_qpair,
         num_entries: u32,
         num_trackers: u32,
+        ctrlr: *mut nvme_controller,
     ) -> Result<()> {
         let res = unsafe {
             bindings::nvme_qpair_construct(dev, qpair, num_entries, num_trackers, todo!("sc"))
@@ -353,7 +368,7 @@ impl NvmeAnsDriver {
     }
 
     fn nvme_cq_done(
-        sc: &RefCounted<NvmeAnsSoftc>,
+        sc: ArcRef<NvmeAnsSoftc>,
         dev: device_t,
         qpair: &nvme_qpair,
         tr: &nvme_tracker,
@@ -368,10 +383,8 @@ impl NvmeAnsDriver {
     }
 }
 
-fn nvme_ans_qpair_to_tcb() {}
-
-driver!(nvme_ans_driver, c"nvme", NvmeAnsDriver, nvme_ans_methods,
-    INTERFACES {
+driver!(nvme_ans_driver, c"nvme", NvmeAnsDriver,
+    nvme_ans_methods = {
         /* Device interface */
         device_probe nvme_ans_probe,
         device_attach nvme_ans_attach,
@@ -386,4 +399,5 @@ driver!(nvme_ans_driver, c"nvme", NvmeAnsDriver, nvme_ans_methods,
         nvme_cq_done nvme_ans_cq_done,
         nvme_qpair_construct nvme_ans_qpair_construct,
     }
+    with interfaces from { nvme };
 );

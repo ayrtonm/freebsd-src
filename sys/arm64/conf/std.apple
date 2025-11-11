@@ -8,6 +8,7 @@ options 	SOC_APPLE_T8103
 options 	FDT
 options		IOMMU
 
+#device		nvme_rust
 #device		nvme_ans
 #device		dockchannel
 device		powerdom

@@ -566,6 +566,30 @@ arm64/apple/apple_pinctrl.c			optional soc_apple_t8103 fdt
 arm64/apple/apple_wdog.c			optional soc_apple_t8103 fdt
 arm64/apple/exynos_uart.c			optional soc_apple_t8103 fdt
 
+arm64/apple/apple_sart.c	optional soc_apple_t8103 fdt
+arm64/apple/apple_aic.rs			optional soc_apple_t8103 fdt
+arm64/apple/apple_mbox.rs			optional soc_apple_t8103 fdt
+
+arm64/apple/rtkit/rtkit.rs		optional soc_apple_t8103 \
+	dependency	"libapple_mbox.rlib"
+
+arm64/apple/apple_rtkit.rs			optional soc_apple_t8103 fdt \
+	dependency	"librtkit.rlib"
+
+#arm64/apple/apple_smc.rs			optional soc_apple_t8103 fdt \
+#	dependency	"librtkit.rlib libapple_mbox.rlib"
+#
+#dev/nvme/nvme.rs		optional fdt nvme_rust
+#dev/nvme/nvme_ans.rs		optional soc_apple_t8103 fdt nvme_ans nvme_rust \
+#	dependency	"librtkit.rlib libnvme.rlib"
+
+#arm64/apple/apple_rust_modules.c	optional soc_apple_t8103 fdt \
+#	dependency	"libapple_smc.rlib libapple_rtkit.rlib libapple_mbox.rlib libnvme_ans.rlib"
+
+#dev/dockchannel/dockchannel.c		optional soc_apple_t8103 fdt dockchannel
+#dev/dockchannel/dockchannel_hid.c		optional soc_apple_t8103 fdt dockchannel
+
+
 # Broadcom
 arm64/broadcom/brcmmdio/mdio_mux_iproc.c		optional soc_brcm_ns2 fdt
 arm64/broadcom/brcmmdio/mdio_nexus_iproc.c		optional soc_brcm_ns2 fdt
