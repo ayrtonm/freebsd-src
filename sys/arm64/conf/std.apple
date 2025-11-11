@@ -2,9 +2,24 @@
 # Apple SoC support
 #
 
+# SoC support
 options 	SOC_APPLE_T8103
+options		ARM64_16K_PAGES
 
-#options 	IOMMU
 options 	FDT
+options		IOMMU
 
-device	bge
+device		fdt_rust
+device		nvme_rust
+device		nvme_ans
+device		dockchannel
+device		hid_rust
+device		dwc3
+
+device		powerdom
+#options		BOOTVERBOSE=1
+#options		VERBOSE_SYSINIT=1
+device		virtio
+device		virtio_mmio
+device		virtio_p9fs
+device		p9fs
