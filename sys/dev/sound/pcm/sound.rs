@@ -1,0 +1,501 @@
+/*-
+ * SPDX-License-Identifier: BSD-2-Clause
+ *
+ * Copyright (c) 2025 Ayrton Muñoz
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+ * SUCH DAMAGE.
+ */
+
+/* Bindings for PCM sound. */
+
+#![no_std]
+
+use core::ffi::{CStr, c_int, c_void};
+use core::marker::PhantomData;
+use core::ops::Range;
+use kpi::bindings::{
+    device_t, kobj, kobj_t, oss_mixer_enuminfo, pcm_channel, pcmchan_caps, snd_dbuf, snd_mixer,
+    snddev_info,
+};
+use kpi::boxed::Box;
+use kpi::collections::Appendable;
+use kpi::device::{DeviceIf, Device};
+use kpi::ffi::{Ptr, SubClass, SubClassOf, Loan};
+use kpi::kobj::{AsRustType, KobjClass, KobjLayout};
+use core::ptr;
+use kpi::prelude::*;
+use kpi::sync::Checked;
+use kpi::vec::Vec;
+use core::pin::Pin;
+use kpi::{ErrCode, base, define_interface, gen_newtype};
+use core::ops::Deref;
+
+pub type Hz = u32;
+pub type PcmSoftc<T> = SubClass<snddev_info, T>;
+
+#[derive(Debug, Default, PartialEq, Eq, Copy, Clone)]
+pub struct PcmTrig(i32);
+
+impl AsRustType<'_,PcmTrig> for c_int {
+    fn as_rust_type(&self) -> PcmTrig {
+        PcmTrig(*self)
+    }
+}
+
+#[derive(Debug, Default, PartialEq, Eq, Copy, Clone)]
+pub struct PcmDir(i32);
+
+unsafe impl Sync for PcmDir {}
+unsafe impl Send for PcmDir {}
+
+impl AsRustType<'_, PcmDir> for c_int {
+    fn as_rust_type(&self) -> PcmDir {
+        PcmDir(*self)
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct PcmChannelCaps {
+    inner: pcmchan_caps,
+    fmtlist: Vec<SndFormat>,
+}
+
+impl PcmChannelCaps {
+    pub fn new(minspeed: u32, maxspeed: u32, fmtlist: Vec<SndFormat>) -> Result<Self> {
+        if fmtlist[fmtlist.len() - 1] != 0 {
+            return Err(EINVAL);
+        }
+        Ok(Self {
+            inner: pcmchan_caps {
+                minspeed,
+                maxspeed,
+                fmtlist: fmtlist.as_ptr().cast::<u32>().cast_mut(),
+                caps: 0,
+            },
+            fmtlist,
+        })
+    }
+
+    pub fn as_ptr(&self) -> *mut pcmchan_caps {
+        (&raw const self.inner).cast_mut()
+    }
+
+    pub fn get_minspeed(&self) -> u32 {
+        self.inner.minspeed
+    }
+
+    pub fn get_maxspeed(&self) -> u32 {
+        self.inner.maxspeed
+    }
+
+    pub fn get_fmtlist(&self) -> &[SndFormat] {
+        self.fmtlist.as_slice()
+    }
+}
+
+unsafe impl Send for PcmChannelCaps {}
+unsafe impl Sync for PcmChannelCaps {}
+
+#[derive(Default)]
+pub struct PcmChannel(Ptr<pcm_channel>);
+
+impl PcmChannel {
+    pub fn as_ptr(&self) -> *mut pcm_channel {
+        self.0.as_ptr()
+    }
+}
+
+impl AsRustType<'_, PcmChannel> for *mut pcm_channel {
+    fn as_rust_type(&self) -> PcmChannel {
+        PcmChannel(Ptr::new(*self))
+    }
+}
+
+pub type SndFormat = u32;
+
+#[derive(Debug, Default)]
+pub struct SndDbuf {
+    dbuf: *mut snd_dbuf,
+    raw_buf: Vec<u8>,
+    taken: Checked<Option<u32>>,
+}
+
+impl Drop for SndDbuf {
+    fn drop(&mut self) {
+        // If there exists a SndDbufSlice we can't drop raw_buf. Leaking memory is an option by
+        // calling forget so make the default panic
+        assert!(self.taken.get_mut().is_some());
+    }
+}
+
+impl AsRustType<'_, SndDbuf> for *mut snd_dbuf {
+    fn as_rust_type(&self) -> SndDbuf {
+        SndDbuf {
+            dbuf: *self,
+            raw_buf: Vec::new(),
+            taken: Checked::new(None),
+        }
+    }
+}
+
+/// A proxy for a slice of the raw_buf in SndDbuf
+///
+/// SndDbuf ensures that it will not access or drop the slice in raw_buf while there exists a
+/// SndDbufSlice.
+pub struct SndDbufSlice {
+    offset: u32,
+    ptr: *mut u8,
+    len: usize,
+}
+
+// SAFETY: SndDbuf ensures it won't access or drop the memory represented by SndDbufSlice for its
+// lifetime so it has unique access to it.
+unsafe impl Appendable for SndDbufSlice {
+    fn get_vaddr_range(&mut self) -> (*mut c_void, usize) {
+        let ptr = self.ptr.cast::<c_void>();
+        let len = self.len;
+        (ptr, len)
+    }
+}
+
+impl SndDbuf {
+    /// Gives unique access to a slice of the raw_buf in SndDbuf
+    ///
+    /// The slice starts at offset and has the length of the block size. This is the only way to
+    /// create a SndDbufSlice. Only one slice may be taken at a time and the caller must use
+    /// SndDbuf::replace to put the slice back before grabbing another one.
+    pub fn take(&self, offset: u32) -> Result<SndDbufSlice> {
+        let mut taken = self.taken.get_mut();
+        if taken.is_some() {
+            return Err(EDOOFUS);
+        }
+        *taken = Some(offset);
+        let ptr = unsafe { self.raw_buf.as_ptr().byte_add(offset as usize).cast_mut() };
+        let len = self.block_size() as usize;
+        Ok(SndDbufSlice { offset, ptr, len })
+    }
+
+    pub fn replace(&self, slice: SndDbufSlice) -> Result<()> {
+        let mut taken = self.taken.get_mut();
+        match *taken {
+            Some(taken) => {
+                if slice.offset != taken {
+                    return Err(EDOOFUS);
+                }
+            }
+            None => {
+                return Err(EDOOFUS);
+            }
+        }
+        *taken = None;
+        Ok(())
+    }
+
+    pub fn block_size(&self) -> u32 {
+        unsafe { (*self.dbuf).blksz }
+    }
+
+    pub fn buffer_size(&self) -> u32 {
+        unsafe { (*self.dbuf).bufsize }
+    }
+}
+
+unsafe impl Sync for SndDbuf {}
+unsafe impl Send for SndDbuf {}
+unsafe impl Sync for SndDbufSlice {}
+unsafe impl Send for SndDbufSlice {}
+
+#[allow(unused_variables)]
+pub trait ChannelIf: KobjClass + KobjLayout<Layout = kobj> {
+    type Channel: 'static + Sync;
+
+    type Driver: DeviceIf<Softc: SubClassOf<snddev_info>>;
+
+    fn get_channel(sc: Loan<<Self::Driver as DeviceIf>::Softc>, idx: usize) -> Pin<&Self::Channel>;
+
+    fn channel_init(
+        sc: Loan<<Self::Driver as DeviceIf>::Softc>,
+        devinfo: Pin<&Self::Channel>,
+        buf: SndDbuf,
+        c: PcmChannel,
+        dir: PcmDir,
+    ) {
+        unimplemented!()
+    }
+    fn channel_free(_: kobj_t, ch: Pin<&Self::Channel>) -> Result<()> {
+        unimplemented!()
+    }
+    fn channel_setformat(_: kobj_t, ch: Pin<&Self::Channel>, format: u32) -> Result<()> {
+        unimplemented!()
+    }
+    fn channel_setspeed(_: kobj_t, ch: Pin<&Self::Channel>, speed: Hz) -> Hz {
+        unimplemented!()
+    }
+    fn channel_setblocksize(_: kobj_t, ch: Pin<&Self::Channel>, blocksize: u32) -> u32 {
+        unimplemented!()
+    }
+    fn channel_trigger(_: kobj_t, ch: Pin<&Self::Channel>, go: PcmTrig) -> Result<()> {
+        unimplemented!()
+    }
+    fn channel_getptr(_: kobj_t, ch: Pin<&Self::Channel>) -> u32 {
+        unimplemented!()
+    }
+    fn channel_getcaps(_: kobj_t, ch: Pin<&Self::Channel>) -> *mut pcmchan_caps {
+        unimplemented!()
+    }
+}
+
+// Copy whatever the fuck MIXER_DECLARE is doing...
+pub const MIXER_KOBJ_SIZE: usize = 512 + size_of::<kobj>() + size_of::<oss_mixer_enuminfo>();
+
+pub trait MixerIf: KobjClass + KobjLayout<Layout = [u8; MIXER_KOBJ_SIZE]> {
+    type Driver: DeviceIf<Softc: SubClassOf<snddev_info>>;
+
+    fn mixer_reinit(m: *mut snd_mixer) -> Result<()> {
+        panic!("not supported")
+    }
+    fn mixer_init(m: *mut snd_mixer) -> Result<()> {
+        unimplemented!()
+    }
+    fn mixer_set(
+        m: *mut snd_mixer,
+        dev: u32,
+        left: u32,
+        right: u32,
+    ) -> Result<()> {
+        unimplemented!()
+    }
+    fn mixer_setrecsrc(m: *mut snd_mixer, src: u32) -> u32 {
+        unimplemented!()
+    }
+    fn mixer_uninit(m: *mut snd_mixer) -> Result<()> {
+        unimplemented!()
+    }
+}
+
+define_interface! {
+    in ChannelIf
+    fn channel_init(obj: kobj_t, devinfo: *mut void, b: *mut snd_dbuf, c: *mut pcm_channel, dir: int) -> *mut void,
+        with desc channel_init_desc
+        and typedef channel_init_t,
+        with init glue {
+            let obj: kobj_t = obj;
+            let c: PcmChannel = c;
+            let chan_ptr: *mut pcm_channel = c.as_ptr();
+            let dev_ptr = unsafe { (*chan_ptr).dev };
+            let void_ptr = unsafe { bindings::device_get_softc(dev_ptr) };
+            type Driver = <SelfType as ChannelIf>::Driver;
+            type Softc = <Driver as kpi::kobj::KobjLayout>::Layout;
+            let sc_ptr = void_ptr.cast::<Softc>();
+            let sc_ref = unsafe { sc_ptr.as_ref().unwrap() };
+            let obj = unsafe { kpi::ffi::Loan::from_raw(sc_ref) };
+        },
+        with drop glue {
+            return core::ptr::from_ref(devinfo.get_ref()).cast::<c_void>().cast_mut();
+        },
+        is infallible;
+    fn channel_setformat(obj: kobj_t, ch: *mut void, format: u32) -> int,
+        with desc channel_setformat_desc
+        and typedef channel_setformat_t;
+    fn channel_setspeed(obj: kobj_t, ch: *mut void, speed: u32) -> u32,
+        with desc channel_setspeed_desc
+        and typedef channel_setspeed_t,
+        is infallible;
+    fn channel_setblocksize(obj: kobj_t, ch: *mut void, blocksize: u32) -> u32,
+        with desc channel_setblocksize_desc
+        and typedef channel_setblocksize_t,
+        is infallible;
+    fn channel_trigger(obj: kobj_t, ch: *mut void, go: int) -> int,
+        with desc channel_trigger_desc
+        and typedef channel_trigger_t;
+    fn channel_getptr(obj: kobj_t, ch: *mut void) -> u32,
+        with desc channel_getptr_desc
+        and typedef channel_getptr_t,
+        is infallible;
+    fn channel_getcaps(obj: kobj_t, ch: *mut void) -> *mut pcmchan_caps,
+        with desc channel_getcaps_desc
+        and typedef channel_getcaps_t,
+        is infallible;
+    fn channel_free(obj: kobj_t, ch: *mut void) -> int,
+        with desc channel_free_desc
+        and typedef channel_free_t;
+}
+
+define_interface! {
+    in MixerIf
+    fn mixer_reinit(m: *mut snd_mixer) -> c_int,
+        with desc mixer_reinit_desc
+        and typedef mixer_reinit_t;
+    fn mixer_init(m: *mut snd_mixer) -> c_int,
+        with desc mixer_init_desc
+        and typedef mixer_init_t;
+    fn mixer_uninit(m: *mut snd_mixer) -> c_int,
+        with desc mixer_uninit_desc
+        and typedef mixer_uninit_t;
+    fn mixer_set(m: *mut snd_mixer, dev: u_int, left: u_int, right: u_int) -> c_int,
+        with desc mixer_set_desc
+        and typedef mixer_set_t;
+    fn mixer_setrecsrc(m: *mut snd_mixer, src: u32) -> u32,
+        with desc mixer_setrecsrc_desc
+        and typedef mixer_setrecsrc_t,
+        is infallible;
+}
+
+pub mod prelude {
+    use super::*;
+
+    gen_newtype! {
+        PcmDir as i32,
+        PCMDIR_PLAY,
+        PCMDIR_REC,
+    }
+
+    gen_newtype! {
+        PcmTrig as i32,
+        PCMTRIG_START,
+        PCMTRIG_STOP,
+        PCMTRIG_ABORT,
+        PCMTRIG_EMLDMAWR,
+        PCMTRIG_EMLDMARD,
+    }
+
+    pub fn pcm_getflags<T>(sc: Loan<PcmSoftc<T>>) -> u32 {
+        let dev = sc.device();
+        unsafe { bindings::pcm_getflags(dev.as_ptr()) }
+    }
+
+    pub fn pcm_setflags<T>(sc: Loan<PcmSoftc<T>>, flags: u32) {
+        let dev = sc.device();
+        unsafe { bindings::pcm_setflags(dev.as_ptr(), flags) }
+    }
+
+    pub fn pcm_init<T>(sc: Loan<PcmSoftc<T>>) -> Result<()> {
+        let dev = sc.device();
+        let base_sc = base!(&sc);
+        unsafe { bindings::pcm_init(dev.as_ptr(), base_sc.cast::<c_void>()) };
+        Ok(())
+    }
+
+    pub fn pcm_addchan<C: ChannelIf>(
+        sc: Loan<<C::Driver as DeviceIf>::Softc>,
+        dir: PcmDir,
+        chan_class: &'static C,
+        idx: usize,
+    ) -> Result<()> {
+        let dev = sc.device();
+        let dir = dir.0;
+        let class = C::get_class();
+        let arg = ptr::from_ref(C::get_channel(sc, idx).get_ref());
+        let res = unsafe {
+            bindings::pcm_addchan(dev.as_ptr(), dir, class, arg.cast_mut().cast::<c_void>())
+        };
+        if res != 0 {
+            return Err(ErrCode::from(res));
+        }
+        Ok(())
+    }
+
+    pub fn pcm_register<T>(sc: Loan<PcmSoftc<T>>, name: &'static CStr) -> Result<()> {
+        let dev = sc.device();
+        let res = unsafe { bindings::pcm_register(dev.as_ptr(), name.as_ptr().cast_mut()) };
+        if res != 0 {
+            return Err(ErrCode::from(res));
+        }
+        Ok(())
+    }
+
+    pub fn pcm_getbuffersize<T>(sc: Loan<PcmSoftc<T>>, size: Range<u32>, default: u32) -> usize {
+        let dev = sc.device();
+        let dev_ptr = dev.as_ptr();
+        let min_sz = size.start;
+        let max_sz = size.end;
+        let res = unsafe { bindings::pcm_getbuffersize(dev_ptr, min_sz, default, max_sz) };
+        res as usize
+    }
+
+    pub fn snd_format(f: i32, c: u32, e: u32) -> SndFormat {
+        unsafe { bindings::snd_format(f as u32, c, e) }
+    }
+
+    pub fn sndbuf_resize(buf: &SndDbuf, block_count: usize, block_size: u32) -> Result<()> {
+        let res = unsafe {
+            bindings::sndbuf_resize(
+                buf.dbuf,
+                block_count.try_into().unwrap(),
+                block_size.try_into().unwrap(),
+            )
+        };
+        if res != 0 {
+            return Err(ErrCode::from(res));
+        }
+        Ok(())
+    }
+
+    pub fn sndbuf_setup(buf: &mut SndDbuf, mut raw_buf: Vec<u8>) -> Result<()> {
+        raw_buf.fill_to_capacity(0u8);
+        let res = unsafe {
+            bindings::sndbuf_setup(
+                buf.dbuf,
+                raw_buf.as_ptr().cast_mut().cast::<c_void>(),
+                raw_buf.capacity().try_into().unwrap(),
+            )
+        };
+        if res != 0 {
+            return Err(ErrCode::from(res));
+        }
+        buf.raw_buf = raw_buf;
+        Ok(())
+    }
+
+    pub fn chn_intr<D: DeviceIf>(chan: &PcmChannel) {
+        unsafe { bindings::chn_intr(chan.0.as_ptr()) }
+    }
+
+    // devinfo passed to mixer_init must have the same type that the mixer will use to access it
+    pub fn mixer_init<M: MixerIf>(
+        sc: Loan<<M::Driver as DeviceIf>::Softc>,
+        mixer_class: &'static M,
+    ) -> Result<()> {
+        let dev = sc.device();
+        let arg = ptr::from_ref(sc.deref());
+        let class = M::get_class();
+        let res =
+            unsafe { bindings::mixer_init(dev.as_ptr(), class, arg.cast::<c_void>().cast_mut()) };
+        if res != 0 {
+            return Err(ErrCode::from(res));
+        }
+        Ok(())
+    }
+
+    // This calls channel_free for each channel and mixer_uninit, the former triggers calls to the
+    // rust channel_free impl which drops each channel's Arc and the latter triggers calls to the rust mixer_uninit
+    // release the refcount in Mixer
+    pub fn pcm_unregister<T>(sc: Loan<PcmSoftc<T>>) -> Result<()> {
+        let dev = sc.device();
+        let res = unsafe { bindings::pcm_unregister(dev.as_ptr()) };
+        if res != 0 {
+            return Err(ErrCode::from(res));
+        }
+        Ok(())
+    }
+}
