@@ -8,7 +8,13 @@ options 	SOC_APPLE_T8103
 options 	FDT
 options		IOMMU
 
-#device		nvme_ans
-#device		dockchannel
-device		powerdom
+device		fdt_rust
+device		nvme_rust
+device		nvme_ans
+device		dockchannel
+device		hid_rust
 #device		dwc3
+
+device		powerdom
+options		BOOTVERBOSE=1
+#options		VERBOSE_SYSINIT=1

@@ -57,11 +57,13 @@ __FBSDID("$FreeBSD$");
 #include <dev/ofw/ofw_bus_subr.h>
 
 //#include <arm64/apple/apple_mbox.h>
-#include <arm64/apple/rtkit.h>
+//#include <arm64/apple/rtkit.h>
 
 #include "nvme_private.h"
 #include "nvme_if.h"
+#include "nvme_ans.h"
 
+#if 0
 #define	ANS_CPU_CTRL		0x0044
 #define	ANS_CPU_CTRL_RUN	(1 << 4)
 
@@ -165,8 +167,6 @@ static int	nvme_ans_sart_map(void *, bus_addr_t, bus_size_t);
 
 static int nvme_ans_delayed_attach(device_t dev, struct nvme_controller *ctrlr);
 static void nvme_ans_enable(device_t dev);
-static uint32_t nvme_ans_sq_enter(device_t dev, struct nvme_qpair *qpair,
-	struct nvme_tracker *tr);
 static void nvme_ans_sq_leave(device_t dev, struct nvme_qpair *qpair,
 	struct nvme_tracker *tr);
 static void nvme_ans_cq_done(device_t dev, struct nvme_qpair *qpair,
@@ -478,17 +478,17 @@ nvme_ans_enable(device_t dev)
 	NVME_WRITE_4(ctrlr, ANS_MODESEL_REG, 0);
 }
 
+static struct nvme_ans_nvmmu_tcb *
+nvme_ans_qpair_to_tcb(struct nvme_ans_qpair *ans_qpair, struct nvme_tracker *tr)
+{
+	return (struct nvme_ans_nvmmu_tcb *)(((char *)ans_qpair->kva) + (tr->req->cmd.cid * ANS_NVMMU_TCB_PITCH));
+}
+
 static uint32_t
 nvme_ans_sq_enter(device_t dev, struct nvme_qpair *qpair,
 	struct nvme_tracker *tr)
 {
 	return tr->req->cmd.cid;
-}
-
-static struct nvme_ans_nvmmu_tcb *
-nvme_ans_qpair_to_tcb(struct nvme_ans_qpair *ans_qpair, struct nvme_tracker *tr)
-{
-	return (struct nvme_ans_nvmmu_tcb *)(((char *)ans_qpair->kva) + (tr->req->cmd.cid * ANS_NVMMU_TCB_PITCH));
 }
 
 static void
@@ -568,3 +568,4 @@ static int nvme_ans_qpair_construct(device_t dev, struct nvme_qpair *qpair,
 	}
 	return 0;
 }
+#endif

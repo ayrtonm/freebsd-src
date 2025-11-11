@@ -1048,7 +1048,7 @@ nvme_qpair_sq_leave(struct nvme_qpair *qpair, struct nvme_tracker *tr)
 
 	bus_dmamap_sync(qpair->dma_tag, qpair->queuemem_map,
 	    BUS_DMASYNC_PREREAD | BUS_DMASYNC_PREWRITE);
-	bus_write_4(ctrlr->resource, qpair->sq_tdbl_off, qpair->sq_tail);
+	bus_write_4(qpair->ctrlr->resource, qpair->sq_tdbl_off, qpair->sq_tail);
 }
 
 /*
