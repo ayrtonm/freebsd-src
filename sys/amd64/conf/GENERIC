@@ -339,6 +339,7 @@ device		umass			# Disks/Mass storage - Requires scbus and da
 
 # Sound support
 device		sound			# Generic sound driver (required)
+device		sound_rust		# Rust sound support
 device		snd_cmi			# CMedia CMI8338/CMI8738
 device		snd_csa			# Crystal Semiconductor CS461x/428x
 device		snd_emu10kx		# Creative SoundBlaster Live! and Audigy
@@ -359,6 +360,8 @@ device		vtnet			# VirtIO Ethernet device
 device		virtio_blk		# VirtIO Block device
 device		virtio_scsi		# VirtIO SCSI device
 device		virtio_balloon		# VirtIO Memory Balloon device
+device		virtio_rust		# Rust VirtIO support
+device		virtio_snd		# VirtIO Sound device
 
 # Linux KVM paravirtualization support
 device		kvm_clock		# KVM paravirtual clock driver
