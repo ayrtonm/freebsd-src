@@ -388,6 +388,7 @@ read_file(char *fname)
 	configword wd;
 	char *rfile, *compilewith, *depends, *clean, *fnamebuf, *warning;
 	const char *objprefix;
+	const char *extension;
 	int compile, match, nreqs, std, filetype, negate,
 	    imp_rule, no_ctfconvert, no_obj, before_depend, nowerror;
 
@@ -586,6 +587,7 @@ nextparam:
 			errout("%s: what is %s optional on?\n",
 			       fname, rfile);
 		tp = new_fent();
+		extension = rfile + strlen(rfile) - 3;
 		tp->f_fn = rfile;
 		tp->f_type = filetype;
 		if (filetype == LOCAL)
@@ -602,6 +604,9 @@ nextparam:
 			tp->f_flags |= BEFORE_DEPEND;
 		if (nowerror)
 			tp->f_flags |= NOWERROR;
+		if (strcasecmp(extension, ".rs") == 0) {
+			tp->f_flags |= SINGLE_RS;
+		}
 		tp->f_compilewith = compilewith;
 		tp->f_depends = depends;
 		tp->f_clean = clean;
@@ -671,6 +676,8 @@ do_objs(FILE *fp)
 	STAILQ_FOREACH(tp, &ftab, f_next) {
 		if (tp->f_flags & NO_OBJ)
 			continue;
+		if (tp->f_flags & SINGLE_RS)
+			continue;
 		sp = tail(tp->f_fn);
 		cp = sp + (len = strlen(sp)) - 1;
 		och = *cp;
@@ -686,6 +693,18 @@ do_objs(FILE *fp)
 	}
 	if (lpos != 8)
 		putc('\n', fp);
+
+	fprintf(fp, "\nRLIBS=");
+	STAILQ_FOREACH(tp, &ftab, f_next) {
+		if (!(tp->f_flags & SINGLE_RS))
+			continue;
+        sp = tail(tp->f_fn);
+        cp = sp + (len = strlen(sp)) - 1;
+        *cp = 'l'; /* the 'l' in .rlib */
+		/* TODO: Integrate f_objprefix? */
+		fprintf(fp, "lib%sib ", sp);
+    }
+	putc('\n', fp);
 }
 
 static void
@@ -742,7 +761,7 @@ tail(char *fn)
 static void
 do_rules(FILE *f)
 {
-	char *cp, *np, och;
+	char *cp, *np, ochr;
 	struct file_list *ftp;
 	char *compilewith;
 	char cmd[128];
@@ -751,7 +770,10 @@ do_rules(FILE *f)
 		if (ftp->f_warn)
 			fprintf(stderr, "WARNING: %s\n", ftp->f_warn);
 		cp = (np = ftp->f_fn) + strlen(ftp->f_fn) - 1;
-		och = *cp;
+		if (ftp->f_flags & SINGLE_RS) {
+			cp--;
+		}
+		ochr = *cp;
 		if (ftp->f_flags & NO_IMPLCT_RULE) {
 			if (ftp->f_depends)
 				fprintf(f, "%s%s: %s\n",
@@ -761,22 +783,28 @@ do_rules(FILE *f)
 		}
 		else {
 			*cp = '\0';
-			if (och == 'o') {
+			if (ochr == 'o') {
 				fprintf(f, "%s%so:\n\t-cp %s%so .\n\n",
 					ftp->f_objprefix, tail(np),
 					ftp->f_srcprefix, np);
 				continue;
 			}
-			if (ftp->f_depends) {
+            if (ftp->f_flags & SINGLE_RS) {
+				/* TODO: Integrate f_objprefix? */
+				fprintf(f, "lib%srlib: %s%srs ${RUST_DEFAULT_DEP} %s\n",
+					tail(np), ftp->f_srcprefix, np,
+					ftp->f_depends ? ftp->f_depends : "");
+            }
+			else if (ftp->f_depends) {
 				fprintf(f, "%s%so: %s%s%c %s\n",
 					ftp->f_objprefix, tail(np),
-					ftp->f_srcprefix, np, och,
+					ftp->f_srcprefix, np, ochr,
 					ftp->f_depends);
 			}
 			else {
 				fprintf(f, "%s%so: %s%s%c\n",
 					ftp->f_objprefix, tail(np),
-					ftp->f_srcprefix, np, och);
+					ftp->f_srcprefix, np, ochr);
 			}
 		}
 		compilewith = ftp->f_compilewith;
@@ -794,18 +822,18 @@ do_rules(FILE *f)
 			}
 			snprintf(cmd, sizeof(cmd),
 			    "${%s_%c%s}", ftype,
-			    toupper(och),
+			    toupper(ochr),
 			    ftp->f_flags & NOWERROR ? "_NOWERROR" : "");
 			compilewith = cmd;
 		}
-		*cp = och;
+		*cp = ochr;
 		if (strlen(ftp->f_objprefix))
 			fprintf(f, "\t%s %s%s\n", compilewith,
 			    ftp->f_srcprefix, np);
 		else
 			fprintf(f, "\t%s\n", compilewith);
 
-		if (!(ftp->f_flags & NO_CTFCONVERT))
+		if (!(ftp->f_flags & NO_CTFCONVERT) && !(ftp->f_flags & SINGLE_RS))
 			fprintf(f, "\t${NORMAL_CTFCONVERT}\n\n");
 		else
 			fprintf(f, "\n");
