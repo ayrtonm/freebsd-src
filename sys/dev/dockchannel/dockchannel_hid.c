@@ -65,6 +65,7 @@
 #include "dockchannel.h"
 #include "hid_if.h"
 
+#if 0
 #define	CONFIG_TX_THRESH	0x0
 #define	CONFIG_RX_THRESH	0x4
 
@@ -1115,6 +1116,7 @@ static driver_t dockchannel_hid_driver = {
 	.methods = dockchannel_hid_methods,
 	.size = sizeof(struct dockchannel_hid_softc),
 };
+#endif
 DRIVER_MODULE(dockchannel_hid, dockchannel, dockchannel_hid_driver, 0, 0);
 MODULE_DEPEND(dockchannel_hid, hid, 1, 1, 1);
 MODULE_DEPEND(dockchannel_hid, hidbus, 1, 1, 1);
