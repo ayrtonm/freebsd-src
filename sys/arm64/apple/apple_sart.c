@@ -36,6 +36,7 @@
 #include <dev/ofw/ofw_bus_subr.h>
 
 #include <machine/bus.h>
+#include "apple_bindings.h"
 
 #define SART2_CONFIG(idx)	(0x0000 + 4 * (idx))
 #define  SART2_CONFIG_FLAGS_MASK	0xff000000

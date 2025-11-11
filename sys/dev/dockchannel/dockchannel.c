@@ -58,6 +58,7 @@
 #include "dockchannel.h"
 #include "pic_if.h"
 
+#if 0
 #define IRQ_MASK	0x0000
 #define IRQ_STAT	0x0004
 
@@ -385,4 +386,5 @@ static device_method_t dockchannel_methods[] = {
 DEFINE_CLASS_1(dockchannel, dockchannel_driver, dockchannel_methods,
     sizeof(struct dockchannel_softc), simplebus_driver);
 
+#endif
 DRIVER_MODULE(dockchannel, simplebus, dockchannel_driver, 0, 0);
