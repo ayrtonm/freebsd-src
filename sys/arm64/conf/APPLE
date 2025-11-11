@@ -1,0 +1,9 @@
+cpu		ARM64
+ident		APPLE
+
+include		"std.arm64"
+include		"std.dev"
+include		"std.apple"
+
+makeoptions	NO_MODULES
+makeoptions	WITHOUT_MODULES="hyperv"
