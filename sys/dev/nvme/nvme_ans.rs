@@ -234,7 +234,7 @@ impl DeviceIf for NvmeAnsDriver {
 }
 
 impl NvmeAnsDriver {
-    fn nvme_delayed_attach(sc: &RefCounted<NvmeAnsSoftc>, dev: device_t) -> Result<()> {
+    fn nvme_delayed_attach(sc: &RefCounted<NvmeAnsSoftc>, dev: device_t, ctrlr: *mut nvme_controller) -> Result<()> {
         let mut ans = sc.ans.get_mut();
         let mut ctrl = bus_read_4!(ans, ANS_CPU_CTRL);
         bus_write_4!(ans, ANS_CPU_CTRL, ctrl | ANS_CPU_CTRL_RUN);
@@ -333,6 +333,7 @@ impl NvmeAnsDriver {
         qpair: &mut nvme_qpair,
         num_entries: u32,
         num_trackers: u32,
+        ctrlr: *mut nvme_controller,
     ) -> Result<()> {
         let res = unsafe {
             bindings::nvme_qpair_construct(dev, qpair, num_entries, num_trackers, todo!("sc"))
