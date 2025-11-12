@@ -102,6 +102,7 @@
 #define	AIC_MAXCPUS		32
 #define	AIC_MAXDIES		4
 
+#if 0
 static struct ofw_compat_data compat_data[] = {
 	{ "apple,aic",				1 },
 	{ NULL,					0 }
@@ -773,8 +774,12 @@ static device_method_t apple_aic_methods[] = {
 	DEVMETHOD_END
 };
 
-static DEFINE_CLASS_0(aic, apple_aic_driver, apple_aic_methods,
+DEFINE_CLASS_0(aic, apple_aic_driver, apple_aic_methods,
     sizeof(struct apple_aic_softc));
+
+#else // if 0
+extern driver_t apple_aic_driver;
+#endif
 
 EARLY_DRIVER_MODULE(aic, simplebus, apple_aic_driver, 0, 0,
     BUS_PASS_INTERRUPT + BUS_PASS_ORDER_MIDDLE);
