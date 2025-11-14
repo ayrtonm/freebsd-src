@@ -31,12 +31,18 @@
 #![no_std]
 #![feature(macro_metavar_expr_concat)]
 
-use core::ffi::{c_int, c_void};
+use core::ffi::c_void;
+use core::ptr::null_mut;
+use kpi::bindings::VIRTIO_F_VERSION_1;
+use kpi::boxed::Box;
+use kpi::bus::dma::BusDmaMap;
 use kpi::driver;
-use kpi::sync::Mutable;
+use kpi::intr::ConfigHook;
+use kpi::vec::Vec;
 use virtio::{
     ConfigSpace, VqAllocInfo, VqPtr, read_device_config, virtio_alloc_virtqueues,
     virtio_finalize_features, virtio_negotiate_features, virtio_setup_intr, virtqueue_enable_intr,
+    virtqueue_enqueue, virtqueue_full, virtqueue_poll,
 };
 
 #[repr(u16)]
@@ -69,6 +75,10 @@ enum ControlMsg {
 }
 
 const NUM_VQUEUES: usize = 4;
+const CONTROLQ: usize = 0;
+const EVENTQ: usize = 1;
+const TXQ: usize = 2;
+const RXQ: usize = 3;
 const VIRITO_SND_F_CTLS: u64 = 0;
 
 #[repr(C)]
@@ -161,17 +171,21 @@ pub struct VtSoundSoftc {
     chmaps: u32,
     controls: Option<u32>,
 
-    vq_info: Mutable<[VqAllocInfo; NUM_VQUEUES]>,
-    controlq: VqPtr,
     eventq: VqPtr,
+    controlq: VqPtr,
     txq: VqPtr,
     rxq: VqPtr,
+    hook: ConfigHook,
 }
 
-extern "C" fn vtsnd_control_vq_intr(sc: *mut c_void) {}
-extern "C" fn vtsnd_event_vq_intr(sc: *mut c_void) {}
-extern "C" fn vtsnd_tx_vq_intr(sc: *mut c_void) {}
-extern "C" fn vtsnd_rx_vq_intr(sc: *mut c_void) {}
+extern "C" fn vtsnd_deferred_attach(sc: &RefCounted<VtSoundSoftc>) {
+    let cookiep = virtqueue_poll(sc.controlq);
+    config_intrhook_disestablish(&sc.hook);
+}
+
+extern "C" fn vtsnd_event_vq_intr(sc: &RefCounted<VtSoundSoftc>) {
+    while !virtqueue_full(sc.eventq) {}
+}
 
 impl DeviceIf for VtSoundDriver {
     type Softc = VtSoundSoftc;
@@ -184,64 +198,171 @@ impl DeviceIf for VtSoundDriver {
         Ok(BusProbe(res))
     }
 
-    fn device_attach(uninit_sc: &mut Uninit<VtSoundSoftc>, dev: device_t) -> Result<()> {
-        let features = 0;
+    fn device_attach(uninit_sc: UninitPtr<VtSoundSoftc>, dev: device_t) -> Result<()> {
+        let features = VIRTIO_F_VERSION_1 as u64;
         let negotiated_features = virtio_negotiate_features(dev, features);
         virtio_finalize_features(dev)?;
 
-        let jacks = read_device_config!(dev, VtSoundConfig, jacks);
-        let streams = read_device_config!(dev, VtSoundConfig, streams);
-        let chmaps = read_device_config!(dev, VtSoundConfig, chmaps);
-        // virtio 1.3 spec 5.14.5.1: The driver MUST NOT read the controls field if
-        // VIRITO_SND_F_CTLS has not been negotiated
-        let has_controls = negotiated_features & (1 << VIRITO_SND_F_CTLS) != 0;
-        let controls = if has_controls {
-            Some(read_device_config!(dev, VtSoundConfig, controls))
-        } else {
-            None
-        };
+        let hook = ConfigHook::try_new(M_DEVBUF, M_NOWAIT)?;
 
-        let vq_info = Default::default();
-
-        let sc = VtSoundSoftc {
+        let mut sc = uninit_sc.init(VtSoundSoftc {
             dev,
             negotiated_features,
-
-            jacks,
-            streams,
-            chmaps,
-            controls,
-
-            vq_info: Mutable::new(vq_info),
-            controlq: VqPtr::null(),
+            jacks: 0,
+            streams: 0,
+            chmaps: 0,
+            controls: None,
             eventq: VqPtr::null(),
+            controlq: VqPtr::null(),
             txq: VqPtr::null(),
             rxq: VqPtr::null(),
-        };
-        let sc = uninit_sc.init(sc);
+            hook,
+        });
 
-        let mut dmat = bus_dma_tag_create(bus_get_dma_tag(sc.dev)).build()?;
+        let hook_ctx = sc.weak_ref();
+        config_intrhook_establish(&mut sc.hook, vtsnd_deferred_attach, hook_ctx)?;
 
-        let dma_map = bus_dmamap_create(dmat, None)?;
+        let mut vq_info = [const { VqAllocInfo::new() }; NUM_VQUEUES];
+        let event_vq_ctx = sc.weak_ref();
+        vq_info[EVENTQ].init_with_callback(dev, b"event", 0, vtsnd_event_vq_intr, event_vq_ctx);
+        vq_info[CONTROLQ].init(dev, b"control", 0);
+        vq_info[TXQ].init(dev, b"tx", 0);
+        vq_info[RXQ].init(dev, b"rx", 0);
 
-        let mut vq_info = sc.vq_info.get_mut();
-        vq_info[0].vqai_name = [0; 32]; //c"foo control".as_ptr();
-        vq_info[0].vqai_maxindirsz = 0;
-        vq_info[0].vqai_intr = Some(vtsnd_control_vq_intr);
-        vq_info[0].vqai_intr_arg = core::ptr::null_mut(); //sc.grab_ref();
-        vq_info[0].vqai_vq = (&raw const sc.controlq)
-            .cast_mut()
-            .cast::<*mut bindings::virtqueue>();
+        let vqs = virtio_alloc_virtqueues(dev, &mut vq_info)?;
+        sc.eventq = vqs[EVENTQ];
+        sc.controlq = vqs[CONTROLQ];
+        sc.txq = vqs[TXQ];
+        sc.rxq = vqs[RXQ];
 
-        virtio_alloc_virtqueues(dev, &mut *vq_info)?;
+        let streams = read_device_config!(dev, VtSoundConfig, streams);
+        sc.streams = streams;
 
-        // TODO: populate the event vqueue with empty buffers
+        let mut list = sglist_alloc(2, M_NOWAIT)?;
+        let req = Box::try_new(
+            VtSoundQueryInfo {
+                hdr: VtSoundHdr {
+                    code: u32::from(ControlMsg::PcmInfo as u16),
+                },
+                start_id: 0,
+                count: streams,
+                size: size_of::<VtSoundPcmInfo>().try_into().unwrap(),
+            },
+            M_DEVBUF,
+            M_NOWAIT,
+        )?;
+        let resp_size = size_of::<VtSoundHdr>() + ((req.count * req.size) as usize);
+        let mut resp: Vec<u8> = Vec::try_with_capacity(resp_size, M_DEVBUF, M_NOWAIT)?;
+        let req_in_list = sglist_append(&mut list, req)?;
+        let resp_in_list = sglist_append(&mut list, resp)?;
+        virtqueue_enqueue(
+            sc.controlq,
+            (&raw const *sc).cast::<c_void>().cast_mut(),
+            &mut list,
+            1,
+            1,
+        )?;
 
         virtio_setup_intr(dev, INTR_TYPE_MISC)?;
-        virtqueue_enable_intr(sc.controlq)?;
 
         Ok(())
+        //let jacks = read_device_config!(dev, VtSoundConfig, jacks);
     }
+    //fn device_attach(uninit_sc: UninitPtr<VtSoundSoftc>, dev: device_t) -> Result<()> {
+    //    let features = 0;
+    //    let negotiated_features = virtio_negotiate_features(dev, features);
+    //    virtio_finalize_features(dev)?;
+
+    //    let jacks = read_device_config!(dev, VtSoundConfig, jacks);
+    //    let streams = read_device_config!(dev, VtSoundConfig, streams);
+    //    let chmaps = read_device_config!(dev, VtSoundConfig, chmaps);
+    //    // virtio 1.3 spec 5.14.5.1: The driver MUST NOT read the controls field if
+    //    // VIRITO_SND_F_CTLS has not been negotiated
+    //    let has_controls = negotiated_features & (1 << VIRITO_SND_F_CTLS) != 0;
+    //    let controls = if has_controls {
+    //        Some(read_device_config!(dev, VtSoundConfig, controls))
+    //    } else {
+    //        None
+    //    };
+
+    //    let sc = VtSoundSoftc {
+    //        dev,
+    //        negotiated_features,
+
+    //        jacks,
+    //        streams,
+    //        chmaps,
+    //        controls,
+
+    //        eventq: VqPtr::null(),
+    //        controlq: VqPtr::null(),
+    //        txq: VqPtr::null(),
+    //        rxq: VqPtr::null(),
+    //        hook: ConfigHook::try_new(M_DEVBUF, M_NOWAIT)?,
+    //    };
+    //    let mut sc = uninit_sc.init(sc);
+
+    //    let hook_ctx = sc.weak_ref();
+    //    config_intrhook_establish(&mut sc.hook, vtsnd_deferred_attach, hook_ctx)?;
+
+    //    let mut list = sglist_alloc(1, M_NOWAIT)?;
+    //    let req = VtSoundQueryInfo {
+    //        hdr: VtSoundHdr {
+    //            code: u32::from(ControlMsg::PcmInfo as u16),
+    //        },
+    //        start_id: 0,
+    //        count: streams,
+    //        size: size_of::<VtSoundPcmInfo>().try_into().unwrap(),
+    //    };
+    //    let req = Box::try_new(req, M_DEVBUF, M_NOWAIT)?;
+    //    sglist_append(&mut list, req)?;
+
+    //    let mut vq_info = [const { VqAllocInfo::new() }; NUM_VQUEUES];
+
+    //    vq_info[CONTROLQ].init(dev, b"control", 0);
+
+    //    let event_vq_ctx = sc.weak_ref();
+    //    vq_info[EVENTQ].init_with_callback(dev, b"event", 0, vtsnd_event_vq_intr, event_vq_ctx);
+
+    //    vq_info[TXQ].init(dev, b"tx", 0);
+    //    vq_info[RXQ].init(dev, b"rx", 0);
+
+    //    let vqs = virtio_alloc_virtqueues(dev, &mut vq_info)?;
+
+    //    sc.controlq = vqs[CONTROLQ];
+    //    sc.eventq = vqs[EVENTQ];
+    //    sc.txq = vqs[TXQ];
+    //    sc.rxq = vqs[RXQ];
+
+    //    let dma_tag = bus_dma_tag_create(bus_get_dma_tag(dev)).build()?;
+
+    //    //virtqueue_enqueue(
+    //    //    sc.controlq,
+    //    //    null_mut(),
+    //    //    &mut list,
+    //    //    0,
+    //    //    1, /* num_writable */
+    //    //)?;
+
+    //    //let mut dmat = bus_dma_tag_create(bus_get_dma_tag(sc.dev)).build()?;
+
+    //    //let dma_map = bus_dmamap_create(dmat, None)?;
+
+    //    struct Event {
+    //        dma_map: BusDmaMap,
+    //    }
+    //    // TODO: populate the event vqueue with empty buffers
+    //    let dma_map = bus_dmamap_create(dma_tag, None)?;
+    //    let evt = Box::try_new(Event { dma_map }, M_DEVBUF, M_NOWAIT)?;
+
+    //    //virtqueue_enqueue(sc.eventq, null_mut(), &mut list,
+
+    //    virtio_setup_intr(dev, INTR_TYPE_MISC)?;
+
+    //    virtqueue_enable_intr(sc.eventq)?;
+
+    //    Ok(())
+    //}
 
     fn device_detach(_sc: &RefCounted<VtSoundSoftc>, _dev: device_t) -> Result<()> {
         todo!("")

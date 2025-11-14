@@ -30,34 +30,80 @@
 
 #![no_std]
 use core::ffi::c_void;
-use core::ops::{Deref, DerefMut};
-use kpi::bindings::device_t;
-use kpi::ffi::SyncPtr;
+use core::mem::transmute;
+use core::ptr::null_mut;
+use core::slice;
+use kpi::bindings::{device_t, virtqueue, virtqueue_intr_t, vq_alloc_info};
+use kpi::collections::ScatterList;
+use kpi::ffi::{Ptr, RefCounted, SharedPtr, SyncPtr};
 use kpi::intr::IntrType;
+use kpi::prelude::*;
 use kpi::{ErrCode, Result, bindings};
 
 pub type VirtioFeatures = u64;
 
+type VqFunc<T> = extern "C" fn(&RefCounted<T>);
+pub type VqCallback<T> = (VqFunc<T>, Ptr<T>);
+
 #[repr(C)]
 #[derive(Debug, Default)]
-pub struct VqAllocInfo(bindings::vq_alloc_info);
-
-impl Deref for VqAllocInfo {
-    type Target = bindings::vq_alloc_info;
-    fn deref(&self) -> &<Self as Deref>::Target {
-        &self.0
-    }
+pub struct VqAllocInfo {
+    info: vq_alloc_info,
 }
 
-impl DerefMut for VqAllocInfo {
-    fn deref_mut(&mut self) -> &mut <Self as Deref>::Target {
-        &mut self.0
+impl VqAllocInfo {
+    pub const fn new() -> Self {
+        Self {
+            info: vq_alloc_info {
+                vqai_name: [0; 32],
+                vqai_maxindirsz: 0,
+                vqai_intr: None,
+                vqai_intr_arg: null_mut(),
+                vqai_vq: null_mut(),
+            },
+        }
+    }
+
+    pub fn init(&mut self, dev: device_t, vq_name: &[u8], max_indirect_size: usize) {
+        let devname = device_get_nameunit(dev);
+        let prefix_len = devname.len();
+        let prefix_dst = unsafe {
+            slice::from_raw_parts_mut(self.info.vqai_name.as_mut_ptr().cast::<u8>(), prefix_len)
+        };
+        prefix_dst.copy_from_slice(devname.as_bytes());
+        let name_dst = unsafe {
+            slice::from_raw_parts_mut(
+                self.info
+                    .vqai_name
+                    .as_mut_ptr()
+                    .cast::<u8>()
+                    .byte_add(prefix_len),
+                vq_name.len(),
+            )
+        };
+        name_dst.copy_from_slice(vq_name);
+        self.info.vqai_maxindirsz = max_indirect_size.try_into().unwrap();
+    }
+
+    pub fn init_with_callback<T, P: SharedPtr<T>>(
+        &mut self,
+        dev: device_t,
+        vq_name: &[u8],
+        max_indirect_size: usize,
+        func: VqFunc<T>,
+        arg: P,
+    ) {
+        self.init(dev, vq_name, max_indirect_size);
+        self.info.vqai_intr =
+            unsafe { transmute::<Option<VqFunc<T>>, virtqueue_intr_t>(Some(func)) };
+        let (arg_ptr, _metadata_ptr) = SharedPtr::into_raw_parts(arg);
+        self.info.vqai_intr_arg = arg_ptr.cast::<c_void>();
     }
 }
 
 unsafe impl Sync for VqAllocInfo {}
 
-pub type VqPtr = SyncPtr<bindings::virtqueue>;
+pub type VqPtr = SyncPtr<virtqueue>;
 
 /// Implement on a type to use read_device_config!
 ///
@@ -110,7 +156,11 @@ pub fn virtqueue_enable_intr(vq: VqPtr) -> Result<()> {
 pub fn virtio_alloc_virtqueues<const N: usize>(
     dev: device_t,
     vq_info: &mut [VqAllocInfo; N],
-) -> Result<()> {
+) -> Result<[VqPtr; N]> {
+    let mut vq_out_ptrs = [null_mut(); N];
+    for n in 0..N {
+        vq_info[n].info.vqai_vq = &raw mut vq_out_ptrs[n];
+    }
     let res = unsafe {
         bindings::virtio_alloc_virtqueues(
             dev,
@@ -121,21 +171,48 @@ pub fn virtio_alloc_virtqueues<const N: usize>(
     if res != 0 {
         return Err(ErrCode::from(res));
     }
-    Ok(())
+    Ok(vq_out_ptrs.map(|v| SyncPtr::new(v)))
 }
 
 pub fn virtio_negotiate_features(dev: device_t, features: VirtioFeatures) -> VirtioFeatures {
-    unsafe {
-        bindings::virtio_negotiate_features(dev, features)
-    }
+    unsafe { bindings::virtio_negotiate_features(dev, features) }
 }
 
 pub fn virtio_finalize_features(dev: device_t) -> Result<()> {
+    let res = unsafe { bindings::virtio_finalize_features(dev) };
+    if res != 0 {
+        return Err(ErrCode::from(res));
+    }
+    Ok(())
+}
+
+pub fn virtqueue_full(vq: VqPtr) -> bool {
+    unsafe { bindings::virtqueue_full(vq.as_ptr()) }
+}
+
+pub fn virtqueue_enqueue(
+    vq: VqPtr,
+    cookie: *mut c_void,
+    sg: &mut ScatterList,
+    num_readable: usize,
+    num_writable: usize,
+) -> Result<()> {
     let res = unsafe {
-        bindings::virtio_finalize_features(dev)
+        bindings::virtqueue_enqueue(
+            vq.as_ptr(),
+            cookie,
+            sg.as_ptr(),
+            num_readable.try_into().unwrap(),
+            num_writable.try_into().unwrap(),
+        )
     };
     if res != 0 {
         return Err(ErrCode::from(res));
     }
     Ok(())
+}
+
+pub fn virtqueue_poll(vq: VqPtr) -> *mut c_void {
+    let mut len = 0;
+    unsafe { bindings::virtqueue_poll(vq.as_ptr(), &raw mut len) }
 }
