@@ -35,8 +35,8 @@ use core::ffi::{c_int, c_void};
 use core::mem::MaybeUninit;
 use core::ptr::null_mut;
 use kpi::bindings::{
-    VIRTIO_F_VERSION_1, kobj, kobj_class_t, kobj_t, pcm_channel, pcmchan_caps, snd_dbuf,
-    snddev_info,
+    VIRTIO_F_VERSION_1, kobj, kobj_class_t, kobj_t, pcm_channel, pcmchan_caps, pcmchan_matrix,
+    snd_dbuf, snddev_info,
 };
 use kpi::boxed::Box;
 use kpi::bus::dma::BusDmaMap;
@@ -201,7 +201,10 @@ unsafe impl Sync for VtSoundChannel {}
 
 #[derive(Debug, Default)]
 pub struct VtSoundChannel {
+    dev: device_t,
     pcm_cap: pcmchan_caps,
+    pcm_buf: *mut snd_dbuf,
+    pcm_chan: *mut pcm_channel,
 }
 
 impl PcmChannel for VtSoundSoftcFields {
@@ -232,28 +235,6 @@ extern "C" fn vtsnd_deferred_attach(sc: &RefCounted<VtSoundSoftc>) {
 
 extern "C" fn vtsnd_event_vq_intr(sc: &RefCounted<VtSoundSoftc>) {
     while !virtqueue_full(sc.eventq) {}
-}
-
-impl VtSoundDriver {
-    fn vtsnd_chan_init_rust(
-        devinfo: *mut c_void,
-        b: *mut snd_dbuf,
-        c: *mut pcm_channel,
-        dir: PcmDir,
-    ) -> Result<()> {
-        sndbuf_setup(b, Vec::try_with_capacity(1024, M_DEVBUF, M_WAITOK)?)
-    }
-    fn vtsnd_chan_setformat(obj: kobj_t, devinfo: *mut c_void, format: u32) -> Result<()> {
-        Ok(())
-    }
-    fn vtsnd_chan_setspeed_rust(obj: kobj_t, devinfo: *mut c_void, speed: u32) -> Result<()> {
-        Ok(())
-    }
-    fn vtsnd_chan_getcaps_rust(devinfo: *mut c_void, outp: *mut *mut pcmchan_caps) -> Result<()> {
-        let x = unsafe { devinfo.cast::<VtSoundChannel>().as_ref().unwrap() };
-        unsafe { *outp = (&raw const (*x).pcm_cap).cast_mut().cast() };
-        Ok(())
-    }
 }
 
 impl DeviceIf for VtSoundDriver {
@@ -290,6 +271,7 @@ impl DeviceIf for VtSoundDriver {
             chan: VtSoundChannel::default(),
             //list: Mutable::new(list),
         }));
+        sc.chan.dev = dev;
         sc.chan.pcm_cap.fmtlist = todo!("");
         //unsafe { (*sc.chan.pcm_cap.assume_init_mut()).fmtlist = todo!("") };//bindings::vtsnd_get_fmt() };
 
@@ -360,7 +342,46 @@ impl KobjClassSize for VtSoundChannelClass {
 
 impl ChannelIf for VtSoundChannelClass {
     type DevInfo = VtSoundChannel;
-    fn channel_init(devinfo: &VtSoundChannel, b: *mut snd_dbuf, c: *mut pcm_channel, dir: PcmDir) {}
+    fn channel_init(
+        devinfo: &mut VtSoundChannel,
+        b: *mut snd_dbuf,
+        c: *mut pcm_channel,
+        dir: PcmDir,
+    ) {
+        sndbuf_setup(b, Vec::try_with_capacity(1024, M_DEVBUF, M_WAITOK).unwrap()).unwrap();
+        devinfo.pcm_buf = b;
+        devinfo.pcm_chan = c;
+    }
+    fn channel_setformat(_: kobj_t, devinfo: &VtSoundChannel, format: u32) -> Result<()> {
+        device_println!(devinfo.dev, "selecting format {format:#x?}");
+        Ok(())
+    }
+    fn channel_setspeed(_: kobj_t, devinfo: &Self::DevInfo, speed: u32) -> u32 {
+        speed
+    }
+    fn channel_setblocksize(_: kobj_t, devinfo: &Self::DevInfo, blocksize: u32) -> u32 {
+        blocksize
+    }
+    fn channel_setfragments(
+        _: kobj_t,
+        devinfo: &Self::DevInfo,
+        blocksize: u32,
+        blockcount: u32,
+    ) -> Result<()> {
+        Ok(())
+    }
+    fn channel_trigger(_: kobj_t, devinfo: &Self::DevInfo, go: c_int) -> Result<()> {
+        Ok(())
+    }
+    fn channel_getptr(_: kobj_t, devinfo: &Self::DevInfo) -> u32 {
+        todo!("")
+    }
+    fn channel_getcaps(_: kobj_t, devinfo: &Self::DevInfo) -> *mut pcmchan_caps {
+        (&raw const devinfo.pcm_cap).cast_mut()
+    }
+    fn channel_getmatrix(_: kobj_t, devinfo: &Self::DevInfo, format: u32) -> *mut pcmchan_matrix {
+        unsafe { bindings::feeder_matrix_format_map(format) }
+    }
 }
 
 define_class!(
@@ -374,6 +395,14 @@ method_table! {
     vtsnd_chan, VtSoundChannelClass,
     vtsnd_chan_methods = {
         channel_init vtsnd_chan_init,
+        channel_setformat vtsnd_chan_setformat,
+        channel_setspeed vtsnd_chan_setspeed,
+        channel_setblocksize vtsnd_chan_setblocksize,
+        channel_setfragments vtsnd_chan_setfragments,
+        channel_trigger vtsnd_chan_trigger,
+        channel_getptr vtsnd_chan_getptr,
+        channel_getcaps vtsnd_chan_getcaps,
+        channel_getmatrix vtsnd_chan_getmatrix,
     };
     with imports { sound };
 }

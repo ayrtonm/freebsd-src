@@ -32,12 +32,14 @@
 
 use core::ffi::{CStr, c_int, c_void};
 use core::mem::forget;
-use kpi::bindings::{kobj_class_t, pcm_channel, snd_dbuf, snddev_info, pcmchan_caps, pcmchan_matrix};
-use kpi::ffi::{Ptr, RefCounted, SubClass};
-use kpi::prelude::*;
-use kpi::objects::KobjClass;
-use kpi::vec::Vec;
+use kpi::bindings::{
+    kobj_class_t, kobj_t, pcm_channel, pcmchan_caps, pcmchan_matrix, snd_dbuf, snddev_info,
+};
 use kpi::define_interface;
+use kpi::ffi::{Ptr, RefCounted, SubClass};
+use kpi::objects::KobjClass;
+use kpi::prelude::*;
+use kpi::vec::Vec;
 
 #[repr(u32)]
 pub enum PcmDir {
@@ -84,7 +86,11 @@ pub fn pcm_init<T>(dev: device_t, sc: &RefCounted<PcmSoftc<T>>) -> Result<()> {
     Ok(())
 }
 
-pub fn pcm_addchan<T: PcmChannel, U: ChannelIf>(sc: Ptr<PcmSoftc<T>>, dir: PcmDir, chan_class: &'static U) -> Result<()> {
+pub fn pcm_addchan<T: PcmChannel, U: ChannelIf>(
+    sc: Ptr<PcmSoftc<T>>,
+    dir: PcmDir,
+    chan_class: &'static U,
+) -> Result<()> {
     let dev = softc_is_init(&sc)?;
     let devinfo = sc.get_devinfo();
     forget(sc);
@@ -153,24 +159,50 @@ macro_rules! channel_init {
 define_interface! {
     in ChannelIf
     fn channel_setformat(obj: kobj_t, devinfo: *mut void, format: u32) -> int;
-    fn channel_setspeed(obj: kobj_t, devinfo: *mut void, speed: u32) -> u32;
-    fn channel_setblocksize(obj: kobj_t, devinfo: *mut void, blocksize: u32) -> u32;
+    fn channel_setspeed(obj: kobj_t, devinfo: *mut void, speed: u32) -> u32, infallible;
+    fn channel_setblocksize(obj: kobj_t, devinfo: *mut void, blocksize: u32) -> u32, infallible;
     fn channel_setfragments(obj: kobj_t, devinfo: *mut void, blocksize: u32, blockcount: u32) -> int;
     fn channel_trigger(obj: kobj_t, devinfo: *mut void, go: int) -> int;
-    fn channel_getptr(obj: kobj_t, devinfo: *mut void) -> u32;
-    fn channel_getcaps(obj: kobj_t, devinfo: *mut void) -> *mut pcmchan_caps;
-    fn channel_getmatrix(obj: kobj_t, devinfo: *mut void, format: u32) -> *mut pcmchan_matrix;
+    fn channel_getptr(obj: kobj_t, devinfo: *mut void) -> u32, infallible;
+    fn channel_getcaps(obj: kobj_t, devinfo: *mut void) -> *mut pcmchan_caps, infallible;
+    fn channel_getmatrix(obj: kobj_t, devinfo: *mut void, format: u32) -> *mut pcmchan_matrix, infallible;
 }
 
 pub trait ChannelIf: KobjClass {
     type DevInfo;
-    fn channel_init(devinfo: &Self::DevInfo, b: *mut snd_dbuf, c: *mut pcm_channel, dir: PcmDir);
-    fn channel_setformat(devinfo: &Self::DevInfo, format: u32) -> Result<()> { todo!("") }
-    fn channel_setspeed(devinfo: &Self::DevInfo, speed: u32) -> Result<()> { todo!("") }
-    fn channel_getcaps(devinfo: &Self::DevInfo) -> Result<&pcmchan_caps> { todo!("") }
-    fn channel_getmatrix(devinfo: &Self::DevInfo, format: u32) -> Result<&pcmchan_matrix> { todo!("") }
-    fn channel_setblocksize(devinfo: &Self::DevInfo, blocksize: u32) -> Result<()> { todo!("") }
-    fn channel_setfragments(devinfo: &Self::DevInfo, blocksize: u32, blockcount: u32) -> Result<()> { todo!("") }
-    fn channel_trigger(devinfo: &Self::DevInfo, go: c_int) -> Result<()> { todo!("") }
-    fn channel_getptr(devinfo: &Self::DevInfo) -> u32 { todo!("") }
+    fn channel_init(
+        devinfo: &mut Self::DevInfo,
+        b: *mut snd_dbuf,
+        c: *mut pcm_channel,
+        dir: PcmDir,
+    );
+    fn channel_setformat(_: kobj_t, devinfo: &Self::DevInfo, format: u32) -> Result<()> {
+        todo!("")
+    }
+    fn channel_setspeed(_: kobj_t, devinfo: &Self::DevInfo, speed: u32) -> u32 {
+        todo!("")
+    }
+    fn channel_setblocksize(_: kobj_t, devinfo: &Self::DevInfo, blocksize: u32) -> u32 {
+        todo!("")
+    }
+    fn channel_setfragments(
+        _: kobj_t,
+        devinfo: &Self::DevInfo,
+        blocksize: u32,
+        blockcount: u32,
+    ) -> Result<()> {
+        todo!("")
+    }
+    fn channel_trigger(_: kobj_t, devinfo: &Self::DevInfo, go: c_int) -> Result<()> {
+        todo!("")
+    }
+    fn channel_getptr(_: kobj_t, devinfo: &Self::DevInfo) -> u32 {
+        todo!("")
+    }
+    fn channel_getcaps(_: kobj_t, devinfo: &Self::DevInfo) -> *mut pcmchan_caps {
+        todo!("")
+    }
+    fn channel_getmatrix(_: kobj_t, devinfo: &Self::DevInfo, format: u32) -> *mut pcmchan_matrix {
+        todo!("")
+    }
 }
