@@ -641,7 +641,7 @@ impl ChannelIf for VtSoundChannelClass {
         if set_params_resp != VtSoundStatus::NoErr as u32 {
             device_println!(
                 dev,
-                "virtio set_pcm_params request failed with {x:?}",
+                "virtio set_pcm_params request failed with {:x?}",
                 set_params_resp
             );
             return Err(EINVAL);
@@ -650,7 +650,7 @@ impl ChannelIf for VtSoundChannelClass {
         if resp != VtSoundStatus::NoErr as u32 {
             device_println!(
                 dev,
-                "virtio prepare_pcm_stream request failed with {x:?}",
+                "virtio prepare_pcm_stream request failed with {:x?}",
                 resp
             );
             return Err(EINVAL);
