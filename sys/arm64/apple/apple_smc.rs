@@ -37,7 +37,7 @@ use kpi::bindings::{
 use kpi::bus::Register;
 use kpi::device::{BusProbe, DeviceIf};
 use kpi::driver;
-use kpi::ffi::{Ptr, RefCounted, SubClass};
+use kpi::ffi::SubClass;
 use kpi::intr::ConfigHook;
 use kpi::sync::Mutable;
 
@@ -98,7 +98,7 @@ impl DeviceIf for AppleSmcDriver {
         return Ok(BUS_PROBE_DEFAULT);
     }
 
-    fn device_attach(uninit_sc: &mut Uninit<AppleSmcSoftc>, dev: device_t) -> Result<()> {
+    fn device_attach(uninit_sc: UninitArc<AppleSmcSoftc>, dev: device_t) -> Result<()> {
         let mut simplebus_sc = simplebus_softc::default();
         simplebus_sc.dev = dev;
         simplebus_sc.flags |= SB_FLAG_NO_RANGES;
@@ -142,7 +142,7 @@ impl DeviceIf for AppleSmcDriver {
         Ok(())
     }
 
-    fn device_detach(sc: &RefCounted<AppleSmcSoftc>, dev: device_t) -> Result<()> {
+    fn device_detach(sc: Arc<AppleSmcSoftc>, dev: device_t) -> Result<()> {
         todo!("")
     }
 }
@@ -261,14 +261,14 @@ impl Into<AppleMboxMsg> for SmcTxMsg {
     }
 }
 
-driver!(apple_smc_driver, c"apple_smc", AppleSmcDriver, apple_smc_methods,
-    inherit from simplebus_driver,
-    INTERFACES {
+driver!(apple_smc_driver, c"apple_smc", AppleSmcDriver,
+    apple_smc_methods = {
         device_probe apple_smc_probe,
         device_attach apple_smc_attach,
         device_detach apple_smc_detach,
     },
-    EXPORTS {
-        apple_smc_pin_set(dev: device_t, pin: u32, val: u32) -> int;
-    }
+    inherit from simplebus_driver,
+    //EXPORTS {
+    //    apple_smc_pin_set(dev: device_t, pin: u32, val: u32) -> int;
+    //}
 );

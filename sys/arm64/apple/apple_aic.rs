@@ -39,11 +39,10 @@ use kpi::boxed::Box;
 use kpi::bus::{Filter, Register, Resource};
 use kpi::device::BusProbe;
 use kpi::ffi::{OwnedPtr, SubClass};
-use kpi::intr::{IntrRoot, IrqSrc, MapData};
+use kpi::intr::{IntrRoot, IrqSrc, MapData, PicIf};
 use kpi::ofw::OfwCompatData;
 use kpi::sync::Mutable;
 use kpi::vec::Vec;
-use kpi::intr::PicIf;
 use kpi::{driver, gen_enum};
 
 const AIC_INFO: u64 = 0x0004;
@@ -324,7 +323,7 @@ impl DeviceIf for AppleIntDriver {
         return Ok(BUS_PROBE_DEFAULT);
     }
 
-    fn device_attach(uninit_sc: &mut Uninit<AppleIntSoftc>, dev: device_t) -> Result<()> {
+    fn device_attach(uninit_sc: UninitArc<AppleIntSoftc>, dev: device_t) -> Result<()> {
         // Cannot fail since it must have been called successfully in device_probe
         let cfg = ofw_bus_search_compatible(dev, &COMPAT_DATA).unwrap();
 
@@ -648,7 +647,7 @@ impl PicIf for AppleIntDriver {
     type IrqSrcFields = AppleIrqSrcFields;
 
     fn pic_setup_intr(
-        sc: &RefCounted<AppleIntSoftc>,
+        sc: ArcRef<AppleIntSoftc>,
         dev: device_t,
         isrc: &mut AppleIrqSrc,
         res: Resource,
@@ -681,7 +680,7 @@ impl PicIf for AppleIntDriver {
     }
 
     fn pic_map_intr<'a>(
-        sc: &'a RefCounted<AppleIntSoftc>,
+        sc: ArcRef<'a, AppleIntSoftc>,
         dev: device_t,
         data: MapData,
         isrcp: &mut Option<&'a AppleIrqSrc>,
@@ -700,7 +699,7 @@ impl PicIf for AppleIntDriver {
         Ok(())
     }
 
-    fn pic_enable_intr(sc: &RefCounted<AppleIntSoftc>, dev: device_t, isrc: &mut AppleIrqSrc) {
+    fn pic_enable_intr(sc: ArcRef<AppleIntSoftc>, dev: device_t, isrc: &mut AppleIrqSrc) {
         match isrc.kind {
             AppleIntrKind::Irq { die, irq } => {
                 apple_aic_mask_clear(&sc, die, irq);
@@ -712,7 +711,7 @@ impl PicIf for AppleIntDriver {
         }
     }
 
-    fn pic_disable_intr(sc: &RefCounted<AppleIntSoftc>, dev: device_t, isrc: &mut AppleIrqSrc) {
+    fn pic_disable_intr(sc: ArcRef<AppleIntSoftc>, dev: device_t, isrc: &mut AppleIrqSrc) {
         match isrc.kind {
             AppleIntrKind::Irq { die, irq } => {
                 apple_aic_mask_set(&sc, die, irq);
@@ -725,7 +724,7 @@ impl PicIf for AppleIntDriver {
     }
 
     fn pic_teardown_intr(
-        sc: &RefCounted<AppleIntSoftc>,
+        sc: ArcRef<AppleIntSoftc>,
         dev: device_t,
         isrc: &mut AppleIrqSrc,
         res: Resource,
@@ -734,7 +733,7 @@ impl PicIf for AppleIntDriver {
         todo!("")
     }
 
-    fn pic_post_filter(sc: &RefCounted<AppleIntSoftc>, dev: device_t, isrc: &mut AppleIrqSrc) {
+    fn pic_post_filter(sc: ArcRef<AppleIntSoftc>, dev: device_t, isrc: &mut AppleIrqSrc) {
         match isrc.kind {
             AppleIntrKind::Irq { die, irq } => {
                 apple_aic_sw_clear(&sc, die, irq);
@@ -747,7 +746,7 @@ impl PicIf for AppleIntDriver {
         }
     }
 
-    fn pic_pre_ithread(sc: &RefCounted<AppleIntSoftc>, dev: device_t, isrc: &mut AppleIrqSrc) {
+    fn pic_pre_ithread(sc: ArcRef<AppleIntSoftc>, dev: device_t, isrc: &mut AppleIrqSrc) {
         match isrc.kind {
             AppleIntrKind::Irq { die, irq } => {
                 apple_aic_sw_clear(&sc, die, irq);
@@ -758,7 +757,7 @@ impl PicIf for AppleIntDriver {
         }
     }
 
-    fn pic_post_ithread(sc: &RefCounted<AppleIntSoftc>, dev: device_t, isrc: &mut AppleIrqSrc) {
+    fn pic_post_ithread(sc: ArcRef<AppleIntSoftc>, dev: device_t, isrc: &mut AppleIrqSrc) {
         match isrc.kind {
             AppleIntrKind::Irq { die, irq } => {
                 apple_aic_sw_clear(&sc, die, irq);
@@ -769,14 +768,14 @@ impl PicIf for AppleIntDriver {
     }
 
     fn pic_bind_intr(
-        sc: &RefCounted<AppleIntSoftc>,
+        sc: ArcRef<AppleIntSoftc>,
         dev: device_t,
         isrc: &mut AppleIrqSrc,
     ) -> Result<()> {
         return Err(ENOTSUP);
     }
 
-    fn pic_init_secondary(sc: &RefCounted<AppleIntSoftc>, dev: device_t, root: IntrRoot) {
+    fn pic_init_secondary(sc: ArcRef<AppleIntSoftc>, dev: device_t, root: IntrRoot) {
         match root {
             INTR_ROOT_FIQ => {
                 apple_aic_init_cpu();
@@ -798,7 +797,7 @@ impl PicIf for AppleIntDriver {
     }
 
     fn pic_ipi_setup<'a>(
-        sc: &'a RefCounted<AppleIntSoftc>,
+        sc: ArcRef<'a, AppleIntSoftc>,
         dev: device_t,
         ipi: u32,
         isrcp: &mut Option<&'a AppleIrqSrc>,
@@ -816,7 +815,7 @@ impl PicIf for AppleIntDriver {
     }
 
     fn pic_ipi_send(
-        sc: &RefCounted<AppleIntSoftc>,
+        sc: ArcRef<AppleIntSoftc>,
         dev: device_t,
         isrc: &mut AppleIrqSrc,
         cpus: cpuset_t,
@@ -841,8 +840,8 @@ impl PicIf for AppleIntDriver {
         }
     }
 }
-driver!(apple_aic_driver, c"aic", AppleIntDriver, apple_aic_methods,
-    INTERFACES {
+driver!(apple_aic_driver, c"aic", AppleIntDriver,
+    apple_aic_methods = {
         /* device_t interface */
         device_probe apple_aic_probe,
         device_attach apple_aic_attach,

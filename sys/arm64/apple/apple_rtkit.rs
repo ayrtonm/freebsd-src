@@ -70,7 +70,7 @@ impl DeviceIf for AppleRTKitDriver {
         Ok(BUS_PROBE_SPECIFIC)
     }
 
-    fn device_attach(uninit_sc: &mut Uninit<AppleRTKitSoftc>, dev: device_t) -> Result<()> {
+    fn device_attach(uninit_sc: UninitArc<AppleRTKitSoftc>, dev: device_t) -> Result<()> {
         let [asc_res, sram_res] = bus_alloc_resources(dev, SPEC).inspect_err(|e| {
             device_println!(dev, "could not allocate device resources {e}");
         })?;
@@ -96,7 +96,7 @@ impl DeviceIf for AppleRTKitDriver {
         Ok(())
     }
 
-    fn device_detach(_sc: &RefCounted<AppleRTKitSoftc>, _dev: device_t) -> Result<()> {
+    fn device_detach(_sc: Arc<AppleRTKitSoftc>, _dev: device_t) -> Result<()> {
         unreachable!("apple RTKit helper cannot be detached")
     }
 }
@@ -130,13 +130,13 @@ impl AppleRTKitDriver {
     }
 }
 
-driver!(apple_rtkit_driver, c"apple_rtkit", AppleRTKitDriver, apple_rtkit_methods,
-    INTERFACES {
+driver!(apple_rtkit_driver, c"apple_rtkit", AppleRTKitDriver,
+    apple_rtkit_methods = {
         device_probe apple_rtkit_probe,
         device_attach apple_rtkit_attach,
         device_detach apple_rtkit_detach,
     },
-    EXPORTS {
-        apple_rtkit_boot(client: device_t, helper: phandle_t) -> int;
-    }
+    //EXPORTS {
+    //    apple_rtkit_boot(client: device_t, helper: phandle_t) -> int;
+    //}
 );

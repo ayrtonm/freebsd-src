@@ -23,10 +23,11 @@
 use core::ffi::c_void;
 use core::mem::transmute;
 use kpi::bindings::{INTR_MPSAFE, INTR_TYPE_MISC, device_t};
+use kpi::ffi::SyncPtr;
 use kpi::bus::{Irq, Register};
 use kpi::device::BusProbe;
 use kpi::driver;
-use kpi::ffi::{FatPtr, OwnedPtr, Ptr, RefCountData, RefCounted};
+use kpi::prelude::*;
 use kpi::sync::Mutable;
 
 const MBOX_A2I_CTRL: u64 = 0x110;
@@ -62,9 +63,9 @@ pub struct AppleMboxSoftc {
 
 #[derive(Debug)]
 struct AppleMboxCallback {
-    user_func: *mut c_void,
+    user_func: SyncPtr<c_void>,
     invoke: RawAppleMboxRx,
-    arg: *const c_void,
+    arg: SyncPtr<c_void>,
 }
 
 #[derive(Debug)]
@@ -97,7 +98,7 @@ impl DeviceIf for AppleMboxDriver {
         Ok(BUS_PROBE_SPECIFIC)
     }
 
-    fn device_attach(uninit_sc: &mut Uninit<AppleMboxSoftc>, dev: device_t) -> Result<()> {
+    fn device_attach(uninit_sc: UninitArc<AppleMboxSoftc>, dev: device_t) -> Result<()> {
         let node = ofw_bus_get_node(dev);
 
         let rid = ofw_bus_find_string_index(node, c"interrupt-names", c"recv-not-empty").map_err(
@@ -127,19 +128,19 @@ impl DeviceIf for AppleMboxDriver {
         })?;
 
         let a2i_ctrl = regs.take_register(MBOX_A2I_CTRL, 4).map_err(|e| {
-            device_print!(dev, "failed to split {MBOX_A2I_CTRL:x?} from register");
+            device_println!(dev, "failed to split {MBOX_A2I_CTRL:x?} from register");
             return ENXIO;
         })?;
         let a2i_send = regs.take_register(MBOX_A2I_SEND0, 0x10).map_err(|e| {
-            device_print!(dev, "failed to split {MBOX_A2I_SEND0:x?} from register");
+            device_println!(dev, "failed to split {MBOX_A2I_SEND0:x?} from register");
             return ENXIO;
         })?;
         let i2a_ctrl = regs.take_register(MBOX_I2A_CTRL, 4).map_err(|e| {
-            device_print!(dev, "failed to split {MBOX_I2A_CTRL:x?} from register");
+            device_println!(dev, "failed to split {MBOX_I2A_CTRL:x?} from register");
             return ENXIO;
         })?;
         let i2a_recv = regs.take_register(MBOX_I2A_RECV0, 0x10).map_err(|e| {
-            device_print!(dev, "failed to split {MBOX_I2A_RECV0:x?} from register");
+            device_println!(dev, "failed to split {MBOX_I2A_RECV0:x?} from register");
             return ENXIO;
         })?;
 
@@ -163,7 +164,7 @@ impl DeviceIf for AppleMboxDriver {
         Ok(())
     }
 
-    fn device_detach(_sc: &RefCounted<AppleMboxSoftc>, _dev: device_t) -> Result<()> {
+    fn device_detach(_sc: Arc<AppleMboxSoftc>, _dev: device_t) -> Result<()> {
         unreachable!("device cannot be detached")
     }
 }
@@ -177,62 +178,62 @@ impl AppleMboxDriver {
         OF_device_from_xref(mbox_xref)
     }
 
-    pub fn set_rx<T>(
-        mbox: device_t,
-        client: device_t,
-        func: AppleMboxRx<T>,
-        arg: FatPtr<T>,
-    ) -> Result<()> {
-        fn invoke_user_func<T: 'static>(
-            user_func: *mut c_void,
-            arg: *const c_void,
-            msg: AppleMboxMsg,
-        ) -> Result<()> {
-            let arg = unsafe { arg.cast::<T>().as_ref().unwrap() };
-            let user_func = unsafe { transmute::<*mut c_void, AppleMboxRx<T>>(user_func) };
-            user_func(arg, msg)
-        }
+    //pub fn set_rx<T>(
+    //    mbox: device_t,
+    //    client: device_t,
+    //    func: AppleMboxRx<T>,
+    //    arg: FatPtr<T>,
+    //) -> Result<()> {
+    //    fn invoke_user_func<T: 'static>(
+    //        user_func: *mut c_void,
+    //        arg: *const c_void,
+    //        msg: AppleMboxMsg,
+    //    ) -> Result<()> {
+    //        let arg = unsafe { arg.cast::<T>().as_ref().unwrap() };
+    //        let user_func = unsafe { transmute::<*mut c_void, AppleMboxRx<T>>(user_func) };
+    //        user_func(arg, msg)
+    //    }
 
-        let sc = device_get_softc!(mbox);
+    //    let sc = device_get_softc!(mbox);
 
-        let user_func = unsafe { transmute::<AppleMboxRx<T>, *mut c_void>(func) };
-        let arg_ptr = OwnedPtr::leak(arg) as *const T;
+    //    let user_func = unsafe { transmute::<AppleMboxRx<T>, *mut c_void>(func) };
+    //    let arg_ptr = OwnedPtr::leak(arg) as *const T;
 
-        sc.intr.get_mut().callback = Some(AppleMboxCallback {
-            user_func,
-            invoke: invoke_user_func::<T>,
-            arg: arg_ptr.cast::<c_void>(),
-        });
+    //    sc.intr.get_mut().callback = Some(AppleMboxCallback {
+    //        user_func,
+    //        invoke: invoke_user_func::<T>,
+    //        arg: arg_ptr.cast::<c_void>(),
+    //    });
 
-        let flags = INTR_MPSAFE | INTR_TYPE_MISC;
-        bus_setup_intr(
-            mbox,
-            &sc.irq,
-            flags,
-            None,
-            Some(AppleMboxDriver::handle_intr),
-            sc.clone(),
-        )
-    }
+    //    let flags = INTR_MPSAFE | INTR_TYPE_MISC;
+    //    bus_setup_intr(
+    //        mbox,
+    //        &sc.irq,
+    //        flags,
+    //        None,
+    //        Some(AppleMboxDriver::handle_intr),
+    //        sc.clone(),
+    //    )
+    //}
 
-    pub fn write_msg(mbox: device_t, msg: AppleMboxMsg) -> Result<()> {
-        let sc = device_get_softc!(mbox);
+    //pub fn write_msg(mbox: device_t, msg: AppleMboxMsg) -> Result<()> {
+    //    let sc = device_get_softc!(mbox);
 
-        let mut write_msg = sc.write_msg.get_mut();
+    //    let mut write_msg = sc.write_msg.get_mut();
 
-        let mut ctrl = &mut write_msg.a2i_ctrl;
-        if (bus_read_4!(ctrl, MBOX_A2I_CTRL) & MBOX_A2I_CTRL_FULL) != 0 {
-            device_println!(sc.dev, "mailbox full");
-            return Err(EBUSY);
-        }
+    //    let mut ctrl = &mut write_msg.a2i_ctrl;
+    //    if (bus_read_4!(ctrl, MBOX_A2I_CTRL) & MBOX_A2I_CTRL_FULL) != 0 {
+    //        device_println!(sc.dev, "mailbox full");
+    //        return Err(EBUSY);
+    //    }
 
-        let mut send = &mut write_msg.a2i_send;
-        bus_write_8!(send, MBOX_A2I_SEND0, msg.data0);
-        bus_write_8!(send, MBOX_A2I_SEND1, u64::from(msg.data1));
-        Ok(())
-    }
+    //    let mut send = &mut write_msg.a2i_send;
+    //    bus_write_8!(send, MBOX_A2I_SEND0, msg.data0);
+    //    bus_write_8!(send, MBOX_A2I_SEND1, u64::from(msg.data1));
+    //    Ok(())
+    //}
 
-    extern "C" fn handle_intr(sc: &RefCounted<AppleMboxSoftc>) {
+    extern "C" fn handle_intr(sc: ArcRef<AppleMboxSoftc>) {
         let mut intr = sc.intr.get_mut();
 
         while (bus_read_4!(&mut intr.i2a_ctrl, MBOX_I2A_CTRL) & MBOX_I2A_CTRL_EMPTY) == 0 {
@@ -241,13 +242,13 @@ impl AppleMboxDriver {
                 data1: bus_read_8!(&mut intr.i2a_recv, MBOX_I2A_RECV1) as u32,
             };
             let callback = intr.callback.as_mut().unwrap();
-            (callback.invoke)(callback.user_func, callback.arg, msg).unwrap();
+            (callback.invoke)(callback.user_func.as_ptr(), callback.arg.as_ptr(), msg).unwrap();
         }
     }
 }
 
-driver!(apple_mbox_driver, c"mbox", AppleMboxDriver, apple_mbox_methods,
-    INTERFACES {
+driver!(apple_mbox_driver, c"mbox", AppleMboxDriver,
+    apple_mbox_methods = {
         device_probe apple_mbox_probe,
         device_attach apple_mbox_attach,
         device_detach apple_mbox_detach,
