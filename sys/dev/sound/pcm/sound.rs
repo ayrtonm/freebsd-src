@@ -267,6 +267,8 @@ pub type Hz = u32;
 
 #[macro_export]
 macro_rules! channel_init {
+    (get_desc) => { channel_init_desc };
+    (get_typedef) => { channel_init_t };
     ($driver_ty:ident $impl_fn_name:ident) => {
         pub unsafe extern "C" fn $impl_fn_name(
             _obj: *mut kobj,
@@ -292,13 +294,29 @@ macro_rules! channel_init {
 
 define_interface! {
     in ChannelIf
-    fn channel_setformat(obj: kobj_t, ch: *mut void, format: u32) -> int;
-    fn channel_setspeed(obj: kobj_t, ch: *mut void, speed: u32) -> u32, infallible;
-    fn channel_setblocksize(obj: kobj_t, ch: *mut void, blocksize: u32) -> u32, infallible;
+    fn channel_setformat(obj: kobj_t, ch: *mut void, format: u32) -> int,
+        with desc channel_setformat_desc
+        and typedef channel_setformat_t;
+    fn channel_setspeed(obj: kobj_t, ch: *mut void, speed: u32) -> u32,
+        with desc channel_setspeed_desc
+        and typedef channel_setspeed_t,
+        infallible;
+    fn channel_setblocksize(obj: kobj_t, ch: *mut void, blocksize: u32) -> u32,
+        with desc channel_setblocksize_desc
+        and typedef channel_setblocksize_t,
+        infallible;
 //    fn channel_setfragments(obj: kobj_t, devinfo: *mut void, blocksize: u32, blockcount: u32) -> int;
-    fn channel_trigger(obj: kobj_t, ch: *mut void, go: int) -> int;
-    fn channel_getptr(obj: kobj_t, ch: *mut void) -> u32, infallible;
-    fn channel_getcaps(obj: kobj_t, ch: *mut void) -> *mut pcmchan_caps, infallible;
+    fn channel_trigger(obj: kobj_t, ch: *mut void, go: int) -> int,
+        with desc channel_trigger_desc
+        and typedef channel_trigger_t;
+    fn channel_getptr(obj: kobj_t, ch: *mut void) -> u32,
+        with desc channel_getptr_desc
+        and typedef channel_getptr_t,
+        infallible;
+    fn channel_getcaps(obj: kobj_t, ch: *mut void) -> *mut pcmchan_caps,
+        with desc channel_getcaps_desc
+        and typedef channel_getcaps_t,
+        infallible;
 //    fn channel_getmatrix(obj: kobj_t, devinfo: *mut void, format: u32) -> *mut pcmchan_matrix, infallible;
 }
 

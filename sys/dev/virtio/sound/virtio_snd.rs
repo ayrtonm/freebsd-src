@@ -29,7 +29,6 @@
 /* Driver for VirtIO sound devices. */
 
 #![no_std]
-#![feature(macro_metavar_expr_concat)]
 #![allow(unused, non_camel_case_types)]
 
 use core::ffi::c_void;
