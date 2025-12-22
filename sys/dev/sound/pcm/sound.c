@@ -426,7 +426,8 @@ pcm_register(device_t dev, char *str)
 	else if (snd_unit_auto == 1)
 		snd_unit = pcm_best_unit(snd_unit);
 
-	sndstat_register(dev, d->status);
+	if (sndstat_register(dev, d->status) != 0)
+		return (EINVAL);
 
 	return (dsp_make_dev(dev));
 }
