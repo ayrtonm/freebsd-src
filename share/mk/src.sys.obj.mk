@@ -112,11 +112,11 @@ OBJROOT:=	${OBJTOP}/
 .endif
 
 # Wait to validate MAKEOBJDIR until OBJTOP is set.
-.if defined(MAKEOBJDIR)
-.if ${MAKEOBJDIR:M/*} == ""
-.error Cannot use MAKEOBJDIR=${MAKEOBJDIR}${.newline}Unset MAKEOBJDIR to get default:  MAKEOBJDIR='${_default_makeobjdir}'
-.endif
-.endif
+#.if defined(MAKEOBJDIR)
+#.if ${MAKEOBJDIR:M/*} == ""
+#.error Cannot use MAKEOBJDIR=${MAKEOBJDIR}${.newline}Unset MAKEOBJDIR to get default:  MAKEOBJDIR='${_default_makeobjdir}'
+#.endif
+#.endif
 
 # __objdir is the expected .OBJDIR we want to use and that auto.obj.mk will
 # try to create.
