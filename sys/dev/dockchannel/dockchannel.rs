@@ -31,8 +31,9 @@
 use core::array;
 use kpi::bindings::device_t;
 use kpi::bus::{Filter, Irq, Register, Resource, ResourceSpec};
-use kpi::device::{BusProbe, DeviceIf};
-use kpi::ffi::{Ref, ToArrayCString, UninitRef};
+use core::pin::Pin;
+use kpi::device::{BusProbe, DeviceIf, Device};
+use kpi::ffi::{ToArrayCString, UninitRef};
 use kpi::intr::{IrqSrc, MapData, PicIf};
 use kpi::prelude::*;
 use kpi::sync::{Checked, OnceInit};
@@ -60,7 +61,7 @@ pub type DockchannelSoftc = SimpleBusSoftc<DockchannelSoftcFields>;
 
 #[derive(Debug)]
 pub struct DockchannelSoftcFields {
-    dev: device_t,
+    dev: Device,
     irq: Irq,
     isrcs: [DockchannelIrqSrc; MAX_INTR],
     stat_reg: Checked<Register>,
@@ -72,7 +73,7 @@ impl SimpleBusDriver for DockchannelDriver {}
 impl DeviceIf for DockchannelDriver {
     type Softc = DockchannelSoftc;
 
-    fn device_probe(dev: device_t) -> Result<BusProbe> {
+    fn device_probe(dev: Device) -> Result<BusProbe> {
         if !ofw_bus_status_okay(dev) {
             return Err(ENXIO);
         }
@@ -84,7 +85,7 @@ impl DeviceIf for DockchannelDriver {
         Ok(BUS_PROBE_DEFAULT)
     }
 
-    fn device_attach(uninit_sc: UninitRef<DockchannelSoftc>, dev: device_t) -> Result<()> {
+    fn device_attach(uninit_sc: UninitRef<DockchannelSoftc>, dev: Device) -> Result<()> {
         let [mem_res, irq_res] = bus_alloc_resources(dev, SPEC).map_err(|e| {
             device_println!(dev, "cannot allocate device resources {e}");
             ENXIO
@@ -106,15 +107,16 @@ impl DeviceIf for DockchannelDriver {
                 isrcs,
                 stat_reg: Checked::new(stat_reg),
                 mask_reg: Checked::new(mask_reg),
-            }))
-            .into_ref();
+            }));
 
-        bus_setup_intr!(
+        let dev = sc.dev;
+        bus_setup_intr(
             dev,
-            proj!(&sc->irq),
+            proj!(&sc.irq),
             INTR_TYPE_CLK.0 | INTR_MPSAFE.0,
             Some(dockchannel_intr),
             None,
+            sc,
         )
         .unwrap();
 
@@ -122,7 +124,7 @@ impl DeviceIf for DockchannelDriver {
         for irq in 0..MAX_INTR {
             let mut pushed = name.push(b',');
             pushed += name.push_c_str(irq.to_array_cstring().as_c_str());
-            intr_isrc_register(proj!(&sc->isrcs[irq]), dev, None, &name)?;
+            intr_isrc_register(proj!(&sc.isrcs[irq]), dev, None, &name)?;
             name.pop(pushed);
         }
 
@@ -130,7 +132,7 @@ impl DeviceIf for DockchannelDriver {
         intr_pic_register(dev, OF_xref_from_node(node))?;
 
         Self::simplebus_attach(dev, |simplebus_sc| {
-            simplebus_sc.dev = dev;
+            simplebus_sc.dev = dev.as_ptr();
             simplebus_sc.node = node.0;
         })
         .map_err(|e| {
@@ -146,7 +148,7 @@ impl DeviceIf for DockchannelDriver {
     }
 }
 
-extern "C" fn dockchannel_intr(sc: Ref<DockchannelSoftc>) -> Filter {
+extern "C" fn dockchannel_intr(sc: Pin<&DockchannelSoftc>) -> Filter {
     let tf = curthread!(td_intr_frame);
 
     let mut stat_reg = sc.stat_reg.get_mut();
@@ -166,38 +168,38 @@ extern "C" fn dockchannel_intr(sc: Ref<DockchannelSoftc>) -> Filter {
 
 impl DockchannelDriver {
     // TODO: derive the 2 and 3 from the IRQ struct resources
-    pub fn mask_rx(dev: device_t) {
+    pub fn mask_rx(dev: Device) {
         let parent = device_get_parent(dev).unwrap();
-        let sc = device_get_softc!(parent);
+        let sc = unsafe { device_get_softc::<Self>(parent) };
         dockchannel_mask_irq(sc, 3)
     }
 
-    pub fn mask_tx(dev: device_t) {
+    pub fn mask_tx(dev: Device) {
         let parent = device_get_parent(dev).unwrap();
-        let sc = device_get_softc!(parent);
+        let sc = unsafe { device_get_softc::<Self>(parent) };
         dockchannel_mask_irq(sc, 2)
     }
 
-    pub fn unmask_rx(dev: device_t) {
+    pub fn unmask_rx(dev: Device) {
         let parent = device_get_parent(dev).unwrap();
-        let sc = device_get_softc!(parent);
+        let sc = unsafe { device_get_softc::<Self>(parent) };
         dockchannel_unmask_irq(sc, 3)
     }
 
-    pub fn unmask_tx(dev: device_t) {
+    pub fn unmask_tx(dev: Device) {
         let parent = device_get_parent(dev).unwrap();
-        let sc = device_get_softc!(parent);
+        let sc = unsafe { device_get_softc::<Self>(parent) };
         dockchannel_unmask_irq(sc, 2)
     }
 }
 
-fn dockchannel_mask_irq(sc: Ref<DockchannelSoftc>, irq: u32) {
+fn dockchannel_mask_irq(sc: Pin<&DockchannelSoftc>, irq: u32) {
     let mut mask_reg = sc.mask_reg.get_mut();
     let old_value = bus_read_4!(mask_reg, IRQ_MASK);
     bus_write_4!(mask_reg, IRQ_MASK, old_value & !(1 << irq));
 }
 
-fn dockchannel_unmask_irq(sc: Ref<DockchannelSoftc>, irq: u32) {
+fn dockchannel_unmask_irq(sc: Pin<&DockchannelSoftc>, irq: u32) {
     let mut mask_reg = sc.mask_reg.get_mut();
     let old_value = bus_read_4!(mask_reg, IRQ_MASK);
     bus_write_4!(mask_reg, IRQ_MASK, old_value | (1 << irq));
@@ -222,24 +224,24 @@ fn do_dockchannel_irq_and_level(data: MapData) -> Result<(u32, u32)> {
 impl PicIf for DockchannelDriver {
     type IrqSrcFields = OnceInit<DockchannelIrqSrcFields>;
 
-    fn pic_enable_intr(sc: Ref<DockchannelSoftc>, isrc: &DockchannelIrqSrc) {
+    fn pic_enable_intr(sc: Pin<&DockchannelSoftc>, isrc: &DockchannelIrqSrc) {
         dockchannel_unmask_irq(sc, isrc.get().irq);
     }
 
-    fn pic_disable_intr(sc: Ref<DockchannelSoftc>, isrc: &DockchannelIrqSrc) {
+    fn pic_disable_intr(sc: Pin<&DockchannelSoftc>, isrc: &DockchannelIrqSrc) {
         dockchannel_mask_irq(sc, isrc.get().irq);
     }
 
-    fn pic_map_intr<'sc>(
-        sc: &'sc Ref<DockchannelSoftc>,
+    fn pic_map_intr(
+        sc: Pin<&DockchannelSoftc>,
         data: MapData,
-    ) -> Result<&'sc DockchannelIrqSrc> {
+    ) -> Result<Pin<&DockchannelIrqSrc>> {
         let (irq, _level) = do_dockchannel_irq_and_level(data)?;
-        Ok(&sc.isrcs[irq as usize])
+        Ok(proj!(&sc.isrcs[irq as usize]))
     }
 
     fn pic_setup_intr(
-        _sc: Ref<DockchannelSoftc>,
+        _sc: Pin<&DockchannelSoftc>,
         isrc: &DockchannelIrqSrc,
         _res: Resource,
         data: MapData,
@@ -250,7 +252,7 @@ impl PicIf for DockchannelDriver {
     }
 
     fn pic_teardown_intr(
-        sc: Ref<DockchannelSoftc>,
+        sc: Pin<&DockchannelSoftc>,
         _isrc: &DockchannelIrqSrc,
         _res: Resource,
         data: MapData,

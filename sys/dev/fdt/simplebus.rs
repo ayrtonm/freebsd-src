@@ -31,7 +31,7 @@
 use core::ffi::c_void;
 use kpi::ErrCode;
 use kpi::bindings::{device_t, simplebus_softc};
-use kpi::device::DeviceIf;
+use kpi::device::{DeviceIf, Device};
 use kpi::driver::Driver;
 use kpi::ffi::{SubClass, SubClassOf};
 use kpi::prelude::*;
@@ -44,16 +44,17 @@ where
     <Self as DeviceIf>::Softc: SubClassOf<simplebus_softc>,
 {
     fn simplebus_attach<F: FnMut(&mut SimpleBusSoftcBase)>(
-        dev: device_t,
+        dev: Device,
         mut init: F,
     ) -> Result<()> {
+        let dev_ptr = dev.as_ptr();
         assert_eq!(device_get_driver(dev), <Self as Driver>::DRIVER);
 
-        let simplebus_sc_ptr = unsafe { bindings::device_get_softc(dev).cast::<simplebus_softc>() };
+        let simplebus_sc_ptr = unsafe { bindings::device_get_softc(dev_ptr).cast::<simplebus_softc>() };
         let simplebus_sc = unsafe { simplebus_sc_ptr.as_mut().unwrap() };
         init(simplebus_sc);
 
-        let res = unsafe { bindings::simplebus_attach(dev) };
+        let res = unsafe { bindings::simplebus_attach(dev_ptr) };
         if res != 0 {
             return Err(ErrCode::from(res));
         }

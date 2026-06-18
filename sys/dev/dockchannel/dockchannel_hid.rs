@@ -40,14 +40,15 @@ use hid::HidIf;
 use kpi::bindings::{device_t, hid_device_info, hid_intr_t, hid_rdesc_info, hid_size_t, phandle_t};
 use kpi::boxed::{Box, LinkedList};
 use kpi::bus::{Filter, Irq, Register, Resource, SysRes};
-use kpi::device::{BusProbe, DeviceIf};
-use kpi::ffi::{ArrayCString, Ptr, Ref, UninitRef};
+use kpi::device::{BusProbe, DeviceIf, Device};
+use kpi::ffi::{ArrayCString, Ptr, UninitRef};
 use kpi::intr::ConfigHook;
 use kpi::ofw::{Node, XRef};
 use kpi::prelude::*;
 use kpi::sync::mtx::Mutex;
 use kpi::sync::{Checked, OnceInit};
 use kpi::taskqueue::{Task, Taskqueue};
+use core::pin::Pin;
 use kpi::vec::Vec;
 use kpi::{ErrCode, driver, proj};
 
@@ -263,7 +264,7 @@ struct DockchannelHidIface {
 
 #[derive(Debug, Default)]
 struct DockchannelHidChild {
-    hidbus: OnceInit<device_t>,
+    hidbus: OnceInit<Device>,
     hw: Checked<hid_device_info>,
     handler: OnceInit<hid_intr_t>,
     ctx: OnceInit<Ptr<c_void>>,
@@ -277,7 +278,7 @@ struct DockchannelHidRegister {
 
 #[derive(Debug)]
 pub struct DockchannelHidSoftc {
-    dev: device_t,
+    dev: Device,
     node: Node,
     mtp: XRef,
     fifo_size: u32,
@@ -304,7 +305,7 @@ pub struct DockchannelHidSoftc {
 }
 
 fn dockchannel_alloc_res(
-    dev: device_t,
+    dev: Device,
     node: Node,
     sys_ty: SysRes,
     name: &CStr,
@@ -324,7 +325,7 @@ fn dockchannel_alloc_res(
 impl DeviceIf for DockchannelHidDriver {
     type Softc = DockchannelHidSoftc;
 
-    fn device_probe(dev: device_t) -> Result<BusProbe> {
+    fn device_probe(dev: Device) -> Result<BusProbe> {
         if !ofw_bus_status_okay(dev) {
             return Err(ENXIO);
         }
@@ -335,7 +336,7 @@ impl DeviceIf for DockchannelHidDriver {
         Ok(BUS_PROBE_DEFAULT)
     }
 
-    fn device_attach(uninit_sc: UninitRef<DockchannelHidSoftc>, dev: device_t) -> Result<()> {
+    fn device_attach(uninit_sc: UninitRef<DockchannelHidSoftc>, dev: Device) -> Result<()> {
         let node = ofw_bus_get_node(dev);
         let mtp = unsafe {
             OF_getencprop_unchecked::<XRef>(node, c"apple,helper-cpu").map_err(|e| {
@@ -352,11 +353,11 @@ impl DeviceIf for DockchannelHidDriver {
         let config =
             dockchannel_alloc_res(dev, node, SYS_RES_MEMORY, c"config")?.into_register()?;
         let data = dockchannel_alloc_res(dev, node, SYS_RES_MEMORY, c"data")?.into_register()?;
-        let task = task_init!(dev, dockchannel_hid_task);
-        let hook = config_intrhook_init!(dev, dockchannel_hid_start_config_hook);
+        let task = Task::new();
+        let hook = ConfigHook::new();
         let queue = Taskqueue::new();
 
-        let mut sc = uninit_sc.init(DockchannelHidSoftc {
+        let sc = uninit_sc.init(DockchannelHidSoftc {
             dev,
             node,
             mtp,
@@ -381,40 +382,42 @@ impl DeviceIf for DockchannelHidDriver {
             serial: Checked::new([0; 64]),
         });
 
+        proj!(&sc.hook).init(dockchannel_hid_start_config_hook, sc);
+        proj!(&sc.task).init(dockchannel_hid_task, sc);
+
         sc.comm.iface.init(MTP_IFACE_COMM);
-        sc.comm.seq = AtomicU8::new(0);
-        sc.stm.seq = AtomicU8::new(0);
-        let sc = sc.into_ref();
-        mtx_init(proj!(&sc->comm->ret), c"", None, None);
-        mtx_init(proj!(&sc->stm->ret), c"", None, None);
-        mtx_init(proj!(&sc->kbd->ret), c"", None, None);
-        mtx_init(proj!(&sc->mt->ret), c"", None, None);
-        mtx_init(proj!(&sc->regs), c"", None, Some(MTX_RECURSE));
+        //sc.comm.seq = AtomicU8::new(0);
+        //sc.stm.seq = AtomicU8::new(0);
+        mtx_init(proj!(&sc.comm.ret), c"", None, None);
+        mtx_init(proj!(&sc.stm.ret), c"", None, None);
+        mtx_init(proj!(&sc.kbd.ret), c"", None, None);
+        mtx_init(proj!(&sc.mt.ret), c"", None, None);
+        mtx_init(proj!(&sc.regs), c"", None, Some(MTX_RECURSE));
 
         taskqueue_create_fast(
             ArrayCString::new(c"dockchannel taskq"),
             M_WAITOK,
-            proj!(&sc->queue),
+            &sc.queue,
         )?;
         taskqueue_start_threads(
-            proj!(&sc->queue),
+            &sc.queue,
             8,
             PWAIT,
             ArrayCString::new(c"dockchannel thead"),
         )?;
 
-        config_intrhook_establish(&sc.hook).unwrap();
+        config_intrhook_establish(proj!(&sc.hook)).unwrap();
 
         Ok(())
     }
 }
 
-extern "C" fn dockchannel_hid_start_config_hook(sc: Ref<DockchannelHidSoftc>) {
+extern "C" fn dockchannel_hid_start_config_hook(sc: Pin<&DockchannelHidSoftc>) {
     DockchannelHidDriver::try_dockchannel_hid_start_config_hook(sc).unwrap()
 }
 
 impl DockchannelHidDriver {
-    fn try_dockchannel_hid_start_config_hook(sc: Ref<DockchannelHidSoftc>) -> Result<()> {
+    fn try_dockchannel_hid_start_config_hook(sc: Pin<&DockchannelHidSoftc>) -> Result<()> {
         let dev = sc.dev;
         AppleRTKitDriver::boot_helper(dev, sc.mtp)?;
         //device_println!(dev, "booted apple_rtkit helper");
@@ -426,23 +429,25 @@ impl DockchannelHidDriver {
         mtx_unlock(regs);
         //device_println!(dev, "set config rx/tx threshold");
 
-        bus_setup_intr!(
+        bus_setup_intr(
             dev,
-            proj!(&sc->rx_irq),
+            proj!(&sc.rx_irq),
             INTR_MPSAFE.0 | INTR_TYPE_MISC.0,
             Some(dockchannel_hid_rx_filter),
             None,
+            sc,
         )
         .inspect_err(|e| {
             device_println!(dev, "couldn't set up rx irq {e}");
         })?;
 
-        bus_setup_intr!(
+        bus_setup_intr(
             dev,
-            proj!(&sc->tx_irq),
+            proj!(&sc.tx_irq),
             INTR_MPSAFE.0 | INTR_TYPE_MISC.0,
             Some(dockchannel_hid_tx_filter),
             None,
+            sc,
         )
         .inspect_err(|e| {
             device_println!(dev, "couldn't set up tx irq {e}");
@@ -454,7 +459,7 @@ impl DockchannelHidDriver {
     }
 }
 
-extern "C" fn dockchannel_hid_rx_filter(sc: Ref<DockchannelHidSoftc>) -> Filter {
+extern "C" fn dockchannel_hid_rx_filter(sc: Pin<&DockchannelHidSoftc>) -> Filter {
     DockchannelDriver::mask_rx(sc.dev);
     if !sc.rx_avail.load(Ordering::Relaxed) {
         sc.rx_avail.store(true, Ordering::Relaxed);
@@ -463,18 +468,18 @@ extern "C" fn dockchannel_hid_rx_filter(sc: Ref<DockchannelHidSoftc>) -> Filter 
         return FILTER_HANDLED;
     }
 
-    taskqueue_enqueue(&sc.queue, proj!(&sc->task)).unwrap();
+    taskqueue_enqueue(&sc.queue, &sc.task).unwrap();
     FILTER_HANDLED
 }
 
-extern "C" fn dockchannel_hid_tx_filter(sc: Ref<DockchannelHidSoftc>) -> Filter {
+extern "C" fn dockchannel_hid_tx_filter(sc: Pin<&DockchannelHidSoftc>) -> Filter {
     DockchannelDriver::mask_tx(sc.dev);
     sc.tx_avail.store(true, Ordering::Relaxed);
     wakeup(&sc.tx_avail);
     FILTER_HANDLED
 }
 
-extern "C" fn dockchannel_hid_task(sc: Ref<DockchannelHidSoftc>, pending: u32) {
+extern "C" fn dockchannel_hid_task(sc: Pin<&DockchannelHidSoftc>, pending: u32) {
     try_dockchannel_hid_task(sc).unwrap();
 }
 
@@ -488,7 +493,7 @@ static BUF: Checked<Vec<u8, M_DEVBUF>> = Checked::new(Vec::new());
 // interpreted. Note that each "split" is purely a type-system transformation to simplify
 // bookkeeping and the buffer itself is not moved or copied after its read into the initial
 // Vec<u8>.
-fn try_dockchannel_hid_task(sc: Ref<DockchannelHidSoftc>) -> Result<()> {
+fn try_dockchannel_hid_task(sc: Pin<&DockchannelHidSoftc>) -> Result<()> {
     let dev = sc.dev;
 
     let mut hdr = MtpHdr::default();
@@ -606,14 +611,14 @@ fn try_dockchannel_hid_task(sc: Ref<DockchannelHidSoftc>) -> Result<()> {
     dockchannel_hid_task_done(sc)
 }
 
-fn dockchannel_hid_task_done(sc: Ref<DockchannelHidSoftc>) -> Result<()> {
+fn dockchannel_hid_task_done(sc: Pin<&DockchannelHidSoftc>) -> Result<()> {
     sc.rx_avail.store(true, Ordering::Relaxed);
     /* unmask rx irq to get ack */
     DockchannelDriver::unmask_rx(sc.dev);
     Ok(())
 }
 
-fn dockchannel_handle_comm(sc: Ref<DockchannelHidSoftc>, buf: &mut [u8]) -> Result<()> {
+fn dockchannel_handle_comm(sc: Pin<&DockchannelHidSoftc>, buf: &mut [u8]) -> Result<()> {
     let len = size_of::<MtpInitHdr>();
     if buf.len() < len {
         return Ok(());
@@ -710,7 +715,7 @@ fn dockchannel_handle_comm(sc: Ref<DockchannelHidSoftc>, buf: &mut [u8]) -> Resu
 }
 
 fn dockchannel_hid_add_child(
-    sc: Ref<DockchannelHidSoftc>,
+    sc: Pin<&DockchannelHidSoftc>,
     child: &DockchannelHidChild,
 ) -> Result<()> {
     let dev = sc.dev;
@@ -732,19 +737,19 @@ fn dockchannel_hid_add_child(
     }
     let hidbus = device_add_child(dev, c"hidbus", None)?;
     let ivars = &raw mut *hidbus_hw;
-    unsafe { bindings::device_set_ivars(hidbus, ivars.cast::<c_void>()) };
+    unsafe { bindings::device_set_ivars(hidbus.as_ptr(), ivars.cast::<c_void>()) };
     child.hidbus.init(hidbus);
 
     bus_topo_lock();
     unsafe {
-        bindings::bus_attach_children(dev);
+        bindings::bus_attach_children(dev.as_ptr());
     }
     bus_topo_unlock();
     Ok(())
 }
 
 fn dockchannel_hid_get_report2(
-    sc: Ref<DockchannelHidSoftc>,
+    sc: Pin<&DockchannelHidSoftc>,
     dcif: &DockchannelHidIface,
     reportnum: u8,
     buf: &mut [u8],
@@ -761,7 +766,7 @@ fn dockchannel_hid_get_report2(
     Ok(())
 }
 
-fn dockchannel_handle_init(sc: Ref<DockchannelHidSoftc>, iface: u8, buf: &mut [u8]) -> Result<()> {
+fn dockchannel_handle_init(sc: Pin<&DockchannelHidSoftc>, iface: u8, buf: &mut [u8]) -> Result<()> {
     let len = size_of::<MtpInitBlockHdr>();
     if buf.len() < len {
         return Ok(());
@@ -817,7 +822,7 @@ fn dockchannel_handle_init(sc: Ref<DockchannelHidSoftc>, iface: u8, buf: &mut [u
 }
 
 fn dockchannel_hid_iface_enable(
-    sc: Ref<DockchannelHidSoftc>,
+    sc: Pin<&DockchannelHidSoftc>,
     dcif: &DockchannelHidIface,
 ) -> Result<()> {
     let cmd = [MTP_CMD_IFACE_ENABLE, *dcif.iface.get()];
@@ -830,7 +835,7 @@ fn dockchannel_hid_iface_enable(
 }
 
 fn dockchannel_hid_cmd(
-    sc: Ref<DockchannelHidSoftc>,
+    sc: Pin<&DockchannelHidSoftc>,
     dcif: &DockchannelHidIface,
     flags: u8,
     cmd: &[u8],
@@ -867,7 +872,7 @@ fn dockchannel_hid_cmd(
 }
 
 fn dockchannel_hid_wait_ack(
-    sc: Ref<DockchannelHidSoftc>,
+    sc: Pin<&DockchannelHidSoftc>,
     dcif: &DockchannelHidIface,
     wait_seq: u8,
 ) {
@@ -875,16 +880,26 @@ fn dockchannel_hid_wait_ack(
     // Write the rx threshold and immediately drop the regs lock
     bus_write_4!(mtx_lock(&sc.regs).config, CONFIG_RX_THRESH, 8);
     DockchannelDriver::unmask_rx(dev);
-    let mut x = mtx_lock(&dcif.ret).retain(|x| x.seq != wait_seq);
-    while !x {
+
+    let mut list = mtx_lock(&dcif.ret);
+    let init_len = list.len();
+    list.retain(|x| x.seq != wait_seq);
+    let mut new_len = list.len();
+    mtx_unlock(list);
+
+    if new_len == init_len {
         device_println!(
             sc.dev,
             "sleeping on ret field at {:p} for packet #{wait_seq:?}",
             &dcif.ret
         );
         let _ = tsleep(&dcif.ret, Some(PWAIT), c"", hz());
-        x = mtx_lock(&dcif.ret).retain(|x| x.seq != wait_seq);
+        let mut list = mtx_lock(&dcif.ret);
+        list.retain(|x| x.seq != wait_seq);
+        new_len = list.len();
+        mtx_unlock(list);
     }
+
     //let mut ret = dcif.ret.get_mut().take();
     //while ret.map(|r| r.seq) != Some(wait_seq) {
     //    device_println!(
@@ -910,7 +925,7 @@ fn dockchannel_hid_wait_ack(
 }
 
 fn dockchannel_hid_handle_gpio_req(
-    sc: Ref<DockchannelHidSoftc>,
+    sc: Pin<&DockchannelHidSoftc>,
     iface: u8,
     buf: &mut [u8],
 ) -> Result<()> {
@@ -959,7 +974,7 @@ fn dockchannel_hid_checksum(buf: &[u8]) -> u32 {
     checksum
 }
 
-fn dockchannel_hid_read(sc: Ref<DockchannelHidSoftc>, buf: &mut [u8]) -> Result<()> {
+fn dockchannel_hid_read(sc: Pin<&DockchannelHidSoftc>, buf: &mut [u8]) -> Result<()> {
     let mut remaining_buf = buf;
     while !remaining_buf.is_empty() {
         // The lock may already be acquired but its MTX_RECURSE
@@ -1013,7 +1028,7 @@ fn dockchannel_hid_read(sc: Ref<DockchannelHidSoftc>, buf: &mut [u8]) -> Result<
     Ok(())
 }
 
-fn dockchannel_hid_write(sc: Ref<DockchannelHidSoftc>, buf: &[u8]) -> Result<()> {
+fn dockchannel_hid_write(sc: Pin<&DockchannelHidSoftc>, buf: &[u8]) -> Result<()> {
     let mut remaining_buf = buf;
     while !remaining_buf.is_empty() {
         let mut regs = mtx_lock(&sc.regs);
@@ -1068,7 +1083,7 @@ fn dockchannel_hid_write(sc: Ref<DockchannelHidSoftc>, buf: &[u8]) -> Result<()>
 
 fn dockchannel_hid_get_child(
     sc: &DockchannelHidSoftc,
-    child: device_t,
+    child: Device,
 ) -> (&DockchannelHidChild, &DockchannelHidIface) {
     if sc.kbd_hid.hidbus.get().as_ptr() == child.as_ptr() {
         (&sc.kbd_hid, &sc.kbd)
@@ -1081,8 +1096,8 @@ fn dockchannel_hid_get_child(
 
 impl HidIf for DockchannelHidDriver {
     fn hid_intr_setup(
-        sc: Ref<DockchannelHidSoftc>,
-        child: device_t,
+        sc: Pin<&DockchannelHidSoftc>,
+        child: Device,
         intr: hid_intr_t,
         context: *mut c_void,
         rdesc: *mut hid_rdesc_info,
@@ -1101,15 +1116,15 @@ impl HidIf for DockchannelHidDriver {
         dc.handler.init(intr).unwrap();
         dc.ctx.init(Ptr::new(context));
     }
-    fn hid_intr_unsetup(sc: Ref<DockchannelHidSoftc>, child: device_t) {}
-    fn hid_intr_start(sc: Ref<DockchannelHidSoftc>, child: device_t) -> Result<()> {
+    fn hid_intr_unsetup(sc: Pin<&DockchannelHidSoftc>, child: Device) {}
+    fn hid_intr_start(sc: Pin<&DockchannelHidSoftc>, child: Device) -> Result<()> {
         Ok(())
     }
-    fn hid_intr_stop(sc: Ref<DockchannelHidSoftc>, child: device_t) -> Result<()> {
+    fn hid_intr_stop(sc: Pin<&DockchannelHidSoftc>, child: Device) -> Result<()> {
         Ok(())
     }
-    fn hid_intr_poll(sc: Ref<DockchannelHidSoftc>, child: device_t) {}
-    fn hid_get_rdesc(sc: Ref<DockchannelHidSoftc>, child: device_t, buf: &mut [u8]) -> Result<()> {
+    fn hid_intr_poll(sc: Pin<&DockchannelHidSoftc>, child: Device) {}
+    fn hid_get_rdesc(sc: Pin<&DockchannelHidSoftc>, child: Device, buf: &mut [u8]) -> Result<()> {
         let (dc, dcif) = dockchannel_hid_get_child(&*sc, child);
         assert!(dcif.desc.is_init());
         assert!(dcif.ready.load(Ordering::Relaxed));
@@ -1117,8 +1132,8 @@ impl HidIf for DockchannelHidDriver {
         Ok(())
     }
     fn hid_get_report(
-        sc: Ref<DockchannelHidSoftc>,
-        child: device_t,
+        sc: Pin<&DockchannelHidSoftc>,
+        child: Device,
         data: *mut c_void,
         max_len: hid_size_t,
         actlen: *mut hid_size_t,
@@ -1128,8 +1143,8 @@ impl HidIf for DockchannelHidDriver {
         Err(ENOTSUP)
     }
     fn hid_set_report(
-        sc: Ref<DockchannelHidSoftc>,
-        child: device_t,
+        sc: Pin<&DockchannelHidSoftc>,
+        child: Device,
         buf: *const c_void,
         len: hid_size_t,
         ty: u8,

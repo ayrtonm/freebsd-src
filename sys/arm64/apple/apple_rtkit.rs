@@ -30,13 +30,13 @@
 
 use kpi::bindings::device_t;
 use kpi::bus::{Register, ResourceSpec};
-use kpi::device::{BusProbe, DeviceIf};
-use kpi::ffi::{Ref, UninitRef};
+use kpi::device::{BusProbe, DeviceIf, Device};
+use kpi::ffi::{UninitRef};
 use kpi::ofw::XRef;
 use kpi::prelude::*;
 use kpi::sync::Checked;
 use kpi::{driver, proj};
-use rtkit::{PwrState, RTKit, RTKitDriver, rtkit_boot, rtkit_init, rtkit_set_ap};
+use rtkit::{PwrState, RTKit, RTKitDriver, rtkit_boot, rtkit_set_ap};
 
 const CPU_CTRL: u64 = 0x44;
 const CPU_CTRL_RUN: u32 = 1 << 4;
@@ -49,6 +49,7 @@ const SPEC: [ResourceSpec; 2] = [
 
 #[derive(Debug)]
 pub struct AppleRTKitSoftc {
+    dev: Device,
     asc: Checked<Register>,
     sram: Checked<Register>,
     rtk: RTKit,
@@ -56,16 +57,12 @@ pub struct AppleRTKitSoftc {
 
 impl RTKitDriver for AppleRTKitDriver {
     type CallbackArg = ();
-
-    fn get_rtkit(sc: Ref<Self::Softc>) -> Ref<RTKit> {
-        proj!(&sc->rtk)
-    }
 }
 
 impl DeviceIf for AppleRTKitDriver {
     type Softc = AppleRTKitSoftc;
 
-    fn device_probe(dev: device_t) -> Result<BusProbe> {
+    fn device_probe(dev: Device) -> Result<BusProbe> {
         if !ofw_bus_status_okay(dev) {
             return Err(ENXIO);
         }
@@ -79,7 +76,7 @@ impl DeviceIf for AppleRTKitDriver {
         Ok(BUS_PROBE_SPECIFIC)
     }
 
-    fn device_attach(uninit_sc: UninitRef<AppleRTKitSoftc>, dev: device_t) -> Result<()> {
+    fn device_attach(uninit_sc: UninitRef<AppleRTKitSoftc>, dev: Device) -> Result<()> {
         let [asc_res, sram_res] = bus_alloc_resources(dev, SPEC).inspect_err(|e| {
             device_println!(dev, "could not allocate device resources {e}");
         })?;
@@ -100,32 +97,32 @@ impl DeviceIf for AppleRTKitDriver {
         let rtk = Self::new_rtkit(dev)
             .inspect_err(|e| device_println!(dev, "failed to create RTKit {e}"))?;
 
-        let sc = AppleRTKitSoftc { asc, sram, rtk };
+        let sc = AppleRTKitSoftc { dev, asc, sram, rtk };
 
-        let sc = uninit_sc.init(sc).into_ref();
+        let sc = uninit_sc.init(sc);
 
-        rtkit_init(proj!(&sc->rtk))?;
+        proj!(&sc.rtk).init()?;
 
         Ok(())
     }
 }
 
 impl AppleRTKitDriver {
-    pub fn boot_helper(client: device_t, helper: XRef) -> Result<()> {
+    pub fn boot_helper(client: Device, helper: XRef) -> Result<()> {
         let dev = OF_device_from_xref(helper).inspect_err(|e| {
             device_println!(client, "could not get device from xref {e}");
         })?;
 
-        let sc = device_get_softc!(dev);
+        let sc = unsafe { device_get_softc::<Self>(dev) };
 
         let mut asc = sc.asc.get_mut();
         let ctrl = bus_read_4!(asc, CPU_CTRL);
         bus_write_4!(asc, CPU_CTRL, ctrl | CPU_CTRL_RUN);
 
-        rtkit_boot(proj!(&sc->rtk))?;
+        rtkit_boot(&sc.rtk)?;
 
         device_println!(dev, "setting RTKit AP power state to ON\n");
-        rtkit_set_ap(proj!(&sc->rtk), PwrState::On).inspect_err(|e| {
+        rtkit_set_ap(&sc.rtk, PwrState::On).inspect_err(|e| {
             device_println!(dev, "failed to set AP power state ON");
         })?;
 

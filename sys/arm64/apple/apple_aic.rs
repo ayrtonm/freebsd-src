@@ -35,14 +35,16 @@ use core::sync::atomic::AtomicU32;
 use kpi::bindings::{cpuset_t, device_t, intr_polarity, intr_trigger, trapframe, u_int};
 use kpi::boxed::Box;
 use kpi::bus::{Filter, Register, Resource};
-use kpi::device::{BusProbe, DeviceIf};
-use kpi::ffi::{Ref, ToArrayCString, UninitRef};
+use kpi::device::{BusProbe, DeviceIf, Device};
+use core::pin::Pin;
+use kpi::proj;
+use kpi::ffi::{ToArrayCString, UninitRef};
 use kpi::intr::{IntrRoot, IrqSrc, MapData, PicIf};
 use kpi::ofw::OfwCompatData;
 use kpi::prelude::*;
 use kpi::sync::Checked;
 use kpi::vec::Vec;
-use kpi::{base, driver, proj, gen_newtype};
+use kpi::{base, driver, gen_newtype};
 
 const AIC_INFO: u64 = 0x0004;
 
@@ -277,7 +279,7 @@ fn new_irq_src(kind: AppleIntrKind) -> AppleIrqSrc {
 
 #[derive(Debug)]
 pub struct AppleIntSoftc {
-    dev: device_t,
+    dev: Device,
     cfg: &'static AppleIntData,
     mem: Checked<Register>,
     event: Option<Checked<Register>>,
@@ -292,7 +294,7 @@ pub struct AppleIntSoftc {
 impl DeviceIf for AppleIntDriver {
     type Softc = AppleIntSoftc;
 
-    fn device_probe(dev: device_t) -> Result<BusProbe> {
+    fn device_probe(dev: Device) -> Result<BusProbe> {
         if !ofw_bus_status_okay(dev) {
             return Err(ENXIO);
         }
@@ -303,7 +305,7 @@ impl DeviceIf for AppleIntDriver {
         return Ok(BUS_PROBE_DEFAULT);
     }
 
-    fn device_attach(uninit_sc: UninitRef<AppleIntSoftc>, dev: device_t) -> Result<()> {
+    fn device_attach(uninit_sc: UninitRef<AppleIntSoftc>, dev: Device) -> Result<()> {
         // Can't fail since it must have been called successfully in device_probe
         let cfg = ofw_bus_search_compatible(dev, &COMPAT_DATA).unwrap();
 
@@ -359,7 +361,8 @@ impl DeviceIf for AppleIntDriver {
             nirqs,
             ipimasks,
         };
-        let sc = uninit_sc.init(sc).into_ref();
+        let sc = uninit_sc.init(sc);
+        let dev = sc.dev;
 
         // name is a buffer with a copy of the nameunit so we can push/pop extra characters
         let mut name = device_get_nameunit(dev);
@@ -371,7 +374,7 @@ impl DeviceIf for AppleIntDriver {
                 len_pushed += name.push_c_str(c",i");
                 len_pushed += name.push_c_str(irq.to_array_cstring().as_c_str());
 
-                let isrc = proj!(&sc->irq_srcs[die][irq]);
+                let isrc = proj!(&sc.irq_srcs[die][irq]);
                 let isrc_flags = if sc.cfg.version == 2 {
                     //Some(INTR_ISRCF_BOUND)
                     None
@@ -390,7 +393,7 @@ impl DeviceIf for AppleIntDriver {
             let prefix = name.push_c_str(c",f");
             let fiq_len = name.push_c_str(fiq.to_array_cstring().as_c_str());
 
-            let isrc = proj!(&sc->fiq_srcs[fiq]);
+            let isrc = proj!(&sc.fiq_srcs[fiq]);
             intr_isrc_register(isrc, sc.dev, Some(INTR_ISRCF_PPI), &name).map_err(|e| {
                 device_println!(dev, "unable to register fiq {:?} {e}", sc.fiq_srcs[fiq]);
                 ENXIO
@@ -403,7 +406,7 @@ impl DeviceIf for AppleIntDriver {
             let prefix = name.push_c_str(c",ipi");
             let ipi_len = name.push_c_str(ipi.to_array_cstring().as_c_str());
 
-            let isrc = proj!(&sc->ipi_srcs[ipi]);
+            let isrc = proj!(&sc.ipi_srcs[ipi]);
             intr_isrc_register(isrc, sc.dev, Some(INTR_ISRCF_IPI), &name).map_err(|e| {
                 device_println!(dev, "unable to register ipi {ipi} {e}");
                 ENXIO
@@ -484,7 +487,7 @@ fn apple_aic_init_cpu() {
     isb!();
 }
 
-extern "C" fn apple_aic_irq(sc: Ref<AppleIntSoftc>) -> Filter {
+extern "C" fn apple_aic_irq(sc: Pin<&AppleIntSoftc>) -> Filter {
     let event = match &sc.event {
         Some(reg) => bus_read_4!(reg.get_mut(), 0),
         None => bus_read_4!(sc.mem.get_mut(), AIC_EVENT),
@@ -513,7 +516,7 @@ extern "C" fn apple_aic_irq(sc: Ref<AppleIntSoftc>) -> Filter {
     return FILTER_HANDLED;
 }
 
-extern "C" fn apple_aic_fiq(sc: Ref<AppleIntSoftc>) -> Filter {
+extern "C" fn apple_aic_fiq(sc: Pin<&AppleIntSoftc>) -> Filter {
     let tf = curthread!(td_intr_frame);
 
     // #ifdef SMP
@@ -617,16 +620,16 @@ fn get_fdt_intr_data(dev: device_t, data: &MapData) -> Result<(AppleIntrKind, i3
 impl PicIf for AppleIntDriver {
     type IrqSrcFields = AppleIrqSrcFields;
 
-    fn pic_map_intr<'sc>(sc: &'sc Ref<AppleIntSoftc>, data: MapData) -> Result<&'sc AppleIrqSrc> {
-        let (kind, _flags) = get_fdt_intr_data(sc.dev, &data)?;
+    fn pic_map_intr(sc: Pin<&AppleIntSoftc>, data: MapData) -> Result<Pin<&AppleIrqSrc>> {
+        let (kind, _flags) = get_fdt_intr_data(sc.dev.as_ptr(), &data)?;
         //device_println!(sc.dev, "called pic_map_intr for {kind:?}");
 
         match kind {
             AppleIntrKind::Irq { die, irq } => {
-                Ok(&sc.irq_srcs[die][irq])
+                Ok(proj!(&sc.irq_srcs[die][irq]))
             }
             AppleIntrKind::Fiq(fiq) => {
-                Ok(&sc.fiq_srcs[fiq.0])
+                Ok(proj!(&sc.fiq_srcs[fiq.0]))
             }
             AppleIntrKind::Ipi => {
                 device_println!(sc.dev, "mapping IPIs not supported yet");
@@ -636,12 +639,12 @@ impl PicIf for AppleIntDriver {
     }
 
     fn pic_setup_intr(
-        sc: Ref<AppleIntSoftc>,
+        sc: Pin<&AppleIntSoftc>,
         isrc: &AppleIrqSrc,
         res: Resource,
         data: MapData,
     ) -> Result<()> {
-        let (kind, flags) = get_fdt_intr_data(sc.dev, &data)?;
+        let (kind, flags) = get_fdt_intr_data(sc.dev.as_ptr(), &data)?;
         //device_println!(sc.dev, "called pic_setup_intr for {kind:?}");
         if isrc.kind != kind {
             device_println!(sc.dev, "pic_setup_intr called with mismatched isrc and FDT data");
@@ -677,7 +680,7 @@ impl PicIf for AppleIntDriver {
         Ok(())
     }
 
-    fn pic_enable_intr(sc: Ref<AppleIntSoftc>, isrc: &AppleIrqSrc) {
+    fn pic_enable_intr(sc: Pin<&AppleIntSoftc>, isrc: &AppleIrqSrc) {
         //device_println!(sc.dev, "called pic_enable_intr for {:?}", isrc.kind);
         match isrc.kind {
             AppleIntrKind::Irq { die, irq } => {
@@ -690,7 +693,7 @@ impl PicIf for AppleIntDriver {
         }
     }
 
-    fn pic_disable_intr(sc: Ref<AppleIntSoftc>, isrc: &AppleIrqSrc) {
+    fn pic_disable_intr(sc: Pin<&AppleIntSoftc>, isrc: &AppleIrqSrc) {
         //device_println!(sc.dev, "called pic_disable_intr for {:?}", isrc.kind);
         match isrc.kind {
             AppleIntrKind::Irq { die, irq } => {
@@ -703,7 +706,7 @@ impl PicIf for AppleIntDriver {
         }
     }
 
-    fn pic_post_filter(sc: Ref<AppleIntSoftc>, isrc: &AppleIrqSrc) {
+    fn pic_post_filter(sc: Pin<&AppleIntSoftc>, isrc: &AppleIrqSrc) {
         match isrc.kind {
             AppleIntrKind::Irq { die, irq } => {
                 apple_aic_sw_clear(&sc, die, irq);
@@ -716,7 +719,7 @@ impl PicIf for AppleIntDriver {
         }
     }
 
-    fn pic_pre_ithread(sc: Ref<AppleIntSoftc>, isrc: &AppleIrqSrc) {
+    fn pic_pre_ithread(sc: Pin<&AppleIntSoftc>, isrc: &AppleIrqSrc) {
         match isrc.kind {
             AppleIntrKind::Irq { die, irq } => {
                 //device_println!(sc.dev, "called pic_pre_ithread for {:?}", isrc.kind);
@@ -728,7 +731,7 @@ impl PicIf for AppleIntDriver {
         }
     }
 
-    fn pic_post_ithread(sc: Ref<AppleIntSoftc>, isrc: &AppleIrqSrc) {
+    fn pic_post_ithread(sc: Pin<&AppleIntSoftc>, isrc: &AppleIrqSrc) {
         match isrc.kind {
             AppleIntrKind::Irq { die, irq } => {
                 //device_println!(sc.dev, "called pic_post_ithread for {:?}", isrc.kind);
@@ -739,11 +742,11 @@ impl PicIf for AppleIntDriver {
         }
     }
 
-    fn pic_bind_intr(sc: Ref<AppleIntSoftc>, isrc: &AppleIrqSrc) -> Result<()> {
+    fn pic_bind_intr(sc: Pin<&AppleIntSoftc>, isrc: &AppleIrqSrc) -> Result<()> {
         return Err(ENOTSUP);
     }
 
-    fn pic_init_secondary(sc: Ref<AppleIntSoftc>, root: IntrRoot) {
+    fn pic_init_secondary(sc: Pin<&AppleIntSoftc>, root: IntrRoot) {
         match root {
             INTR_ROOT_FIQ => {
                 apple_aic_init_cpu();
@@ -765,7 +768,7 @@ impl PicIf for AppleIntDriver {
         }
     }
 
-    fn pic_ipi_setup<'sc>(sc: &'sc Ref<AppleIntSoftc>, ipi: u32) -> Result<&'sc AppleIrqSrc> {
+    fn pic_ipi_setup(sc: Pin<&AppleIntSoftc>, ipi: u32) -> Result<Pin<&AppleIrqSrc>> {
         let ipi = ipi as usize;
         if ipi >= NUM_IPIS {
             panic!("ipi {ipi} too high");
@@ -774,10 +777,10 @@ impl PicIf for AppleIntDriver {
         let isrc = &sc.ipi_srcs[ipi];
         CPU_SET(cpuid, base!(&isrc->isrc_cpu));
 
-        Ok(&sc.ipi_srcs[ipi])
+        Ok(proj!(&sc.ipi_srcs[ipi]))
     }
 
-    fn pic_ipi_send(sc: Ref<AppleIntSoftc>, isrc: &AppleIrqSrc, cpus: cpuset_t, ipi: u32) {
+    fn pic_ipi_send(sc: Pin<&AppleIntSoftc>, isrc: &AppleIrqSrc, cpus: &cpuset_t, ipi: u32) {
         let localgrp = CPU_AFF1(CPU_AFFINITY(pcpu_get!(pc_cpuid)));
         for cpu in 0..=mp_maxid() as u_int {
             if CPU_ISSET(cpu, &cpus) {
