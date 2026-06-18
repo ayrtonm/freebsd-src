@@ -22,8 +22,9 @@ use core::ffi::c_void;
 use core::mem::transmute;
 use kpi::bindings::device_t;
 use kpi::bus::{Irq, Register};
-use kpi::device::{BusProbe, DeviceIf};
-use kpi::ffi::{Ptr, Ref, UninitRef};
+use kpi::device::{BusProbe, DeviceIf, Device};
+use core::pin::Pin;
+use kpi::ffi::{Ptr, UninitRef};
 use kpi::ofw::XRef;
 use kpi::prelude::*;
 use kpi::sync::Checked;
@@ -42,7 +43,7 @@ const MBOX_I2A_RECV0: u64 = 0x830;
 const MBOX_I2A_RECV1: u64 = 0x838;
 
 #[derive(Debug, Copy, Clone)]
-pub struct MboxDevice(device_t);
+pub struct MboxDevice(Device);
 
 // This needs repr(C) while it appears in an extern "C" function signature
 #[repr(C)]
@@ -52,12 +53,12 @@ pub struct AppleMboxMsg {
     pub data1: u32,
 }
 
-pub type AppleMboxRx<T> = extern "C" fn(Ref<T>, AppleMboxMsg);
+pub type AppleMboxRx<T> = extern "C" fn(Pin<&T>, AppleMboxMsg);
 type RawAppleMboxRx = extern "C" fn(*mut c_void, AppleMboxMsg);
 
 #[derive(Debug)]
 pub struct AppleMboxSoftc {
-    dev: device_t,
+    dev: Device,
     irq: Irq,
     intr_ctx: Checked<IntrCtx>,
     write_msg: Checked<WriteMsg>,
@@ -79,7 +80,7 @@ struct WriteMsg {
 impl DeviceIf for AppleMboxDriver {
     type Softc = AppleMboxSoftc;
 
-    fn device_probe(dev: device_t) -> Result<BusProbe> {
+    fn device_probe(dev: Device) -> Result<BusProbe> {
         if !ofw_bus_status_okay(dev) {
             return Err(ENXIO);
         }
@@ -93,7 +94,7 @@ impl DeviceIf for AppleMboxDriver {
         Ok(BUS_PROBE_SPECIFIC)
     }
 
-    fn device_attach(uninit_sc: UninitRef<AppleMboxSoftc>, dev: device_t) -> Result<()> {
+    fn device_attach(uninit_sc: UninitRef<AppleMboxSoftc>, dev: Device) -> Result<()> {
         let node = ofw_bus_get_node(dev);
 
         let rid = ofw_bus_find_string_index(node, c"interrupt-names", c"recv-not-empty").map_err(
@@ -163,33 +164,34 @@ impl DeviceIf for AppleMboxDriver {
 impl AppleMboxDriver {
     // Get a mailbox device_t from the client's mboxes devicetree property. The mailbox must've
     // previously registered its devicetree node xref which happens when this driver attaches.
-    pub fn get_mbox(client: device_t) -> Result<MboxDevice> {
+    pub fn get_mbox(client: Device) -> Result<MboxDevice> {
         let client_node = ofw_bus_get_node(client);
         let mbox_xref = unsafe { OF_getencprop_unchecked::<XRef>(client_node, c"mboxes")? };
         let mbox_dev = OF_device_from_xref(mbox_xref)?;
         Ok(MboxDevice(mbox_dev))
     }
 
-    pub fn set_rx<T>(mbox: MboxDevice, func: AppleMboxRx<T>, arg: Ref<T>) -> Result<()> {
-        let sc = device_get_softc!(mbox.0);
+    pub fn set_rx<T>(mbox: MboxDevice, func: AppleMboxRx<T>, arg: Pin<&T>) -> Result<()> {
+        let sc = unsafe { device_get_softc::<Self>(mbox.0) };
 
         let func = unsafe { transmute::<Option<AppleMboxRx<T>>, RawAppleMboxRx>(Some(func)) };
-        let arg = Ptr::new(Ref::into_raw(arg).cast::<c_void>());
+        let arg = Ptr::new(arg.get_ref() as *const T as *const c_void as *mut c_void);
 
         sc.intr_ctx.get_mut().callback = Some((func, arg));
 
         let flags = INTR_MPSAFE.0 | INTR_TYPE_MISC.0;
-        bus_setup_intr!(
+        bus_setup_intr(
             mbox.0,
-            proj!(&sc->irq),
+            proj!(&sc.irq),
             flags,
             None,
             Some(AppleMboxDriver::handle_intr),
+            sc,
         )
     }
 
     pub fn write_msg(mbox: MboxDevice, msg: AppleMboxMsg) -> Result<()> {
-        let sc = device_get_softc!(mbox.0);
+        let sc = unsafe { device_get_softc::<Self>(mbox.0) };
 
         let mut write_msg = sc.write_msg.get_mut();
 
@@ -205,7 +207,7 @@ impl AppleMboxDriver {
         Ok(())
     }
 
-    extern "C" fn handle_intr(sc: Ref<AppleMboxSoftc>) {
+    extern "C" fn handle_intr(sc: Pin<&AppleMboxSoftc>) {
         let mut intr = sc.intr_ctx.get_mut();
 
         while (bus_read_4!(&mut intr.i2a_ctrl, MBOX_I2A_CTRL) & MBOX_I2A_CTRL_EMPTY) == 0 {

@@ -18,15 +18,16 @@
 #![no_std]
 
 use apple_mbox::{AppleMboxDriver, AppleMboxMsg, MboxDevice};
+use core::pin::Pin;
 use core::ffi::c_void;
 use core::mem::transmute;
 use core::sync::atomic::{AtomicU16, AtomicU64, Ordering};
-use kpi::bindings::{bus_addr_t, bus_dma_segment_t, bus_size_t, device_t};
+use kpi::bindings::{bus_addr_t, bus_dma_segment_t, bus_size_t};
 use kpi::bus::dma::{BusDmaMap, BusDmaMem, BusDmaTag};
-use kpi::device::DeviceIf;
-use kpi::ffi::{ArrayCString, Ptr, Ref};
-use kpi::prelude::*;
+use kpi::device::{DeviceIf, Device};
+use kpi::ffi::{ArrayCString, Ptr};
 use kpi::proj;
+use kpi::prelude::*;
 use kpi::sync::mtx::SpinLock;
 use kpi::sync::{Checked, OnceInit};
 use kpi::taskqueue::{Task, Taskqueue};
@@ -283,12 +284,12 @@ impl<T> Default for RTKitBuffer<T> {
     }
 }
 
-type RTKitTaskCallback<T> = fn(Ref<T>, u64) -> Result<()>;
+type RTKitTaskCallback<T> = fn(&T, u64) -> Result<()>;
 type RTKitMapCallback<T> = fn(&T, bus_addr_t, bus_size_t);
 
 #[derive(Debug)]
 pub struct RTKit<T = ()> {
-    client: device_t,
+    client: Device,
     mbox: MboxDevice,
     pub verbose: bool,
     pub no_alloc: bool,
@@ -309,9 +310,7 @@ pub struct RTKit<T = ()> {
 pub trait RTKitDriver: DeviceIf {
     type CallbackArg;
 
-    fn get_rtkit(sc: Ref<Self::Softc>) -> Ref<RTKit<Self::CallbackArg>>;
-
-    fn new_rtkit(client: device_t) -> Result<RTKit<Self::CallbackArg>> {
+    fn new_rtkit(client: Device) -> Result<RTKit<Self::CallbackArg>> {
         let mbox = AppleMboxDriver::get_mbox(client)?;
         Ok(RTKit {
             client,
@@ -322,7 +321,7 @@ pub trait RTKitDriver: DeviceIf {
             ap: AtomicU16::new(PwrState::Sleep as u16),
             ep_map: AtomicU64::new(0),
             queue: Taskqueue::new(),
-            task: task_init!(client, rx_task::<Self>),
+            task: Task::new(),//task_init::<Self>(client, rx_task::<Self>),
             msgs: SpinLock::new(VecDeque::with_capacity(32, M_WAITOK)),
             ioreport: Checked::new(RTKitBuffer::default()),
             crashlog: Checked::new(RTKitBuffer::default()),
@@ -361,25 +360,26 @@ impl<T> RTKit<T> {
         }
         Ok(())
     }
+
+    pub fn init(self: Pin<&Self>) -> Result<()> {
+        let queue_name = ArrayCString::new(c"rtkit queue");
+        taskqueue_create(queue_name, M_WAITOK, &self.queue)?;
+    
+        let thread_name = ArrayCString::new(c"rtkit thread");
+        taskqueue_start_threads(&self.queue, 1, PI_INTR, thread_name)?;
+    
+        mtx_init(proj!(&self.msgs), c"rtk lock", None, None);
+        proj!(&self.task).init(rx_task, self);
+        AppleMboxDriver::set_rx(self.mbox, rx_callback, self)?;
+        Ok(())
+    }
 }
 
-pub fn rtkit_init<T>(rtk: Ref<RTKit<T>>) -> Result<()> {
-    let queue_name = ArrayCString::new(c"rtkit queue");
-    taskqueue_create(queue_name, M_WAITOK, proj!(&rtk->queue))?;
-
-    let thread_name = ArrayCString::new(c"rtkit thread");
-    taskqueue_start_threads(proj!(&rtk->queue), 1, PI_INTR, thread_name)?;
-
-    mtx_init(proj!(&rtk->msgs), c"rtk lock", None, None);
-    AppleMboxDriver::set_rx(rtk.mbox, rx_callback, rtk)?;
-    Ok(())
-}
-
-pub fn rtkit_boot<T>(rtk: Ref<RTKit<T>>) -> Result<()> {
+pub fn rtkit_boot<T>(rtk: &RTKit<T>) -> Result<()> {
     set_iop(rtk, PwrState::On)
 }
 
-fn set_iop<T>(rtk: Ref<RTKit<T>>, pwr_state: PwrState) -> Result<()> {
+fn set_iop<T>(rtk: &RTKit<T>, pwr_state: PwrState) -> Result<()> {
     assert!(!cold());
     let pwr_state = pwr_state as u16;
     if rtk.iop.load(Ordering::Relaxed) == (pwr_state & 0xFF) {
@@ -395,7 +395,7 @@ fn set_iop<T>(rtk: Ref<RTKit<T>>, pwr_state: PwrState) -> Result<()> {
     Ok(())
 }
 
-pub fn rtkit_set_ap<T>(rtk: Ref<RTKit<T>>, pwr_state: PwrState) -> Result<()> {
+pub fn rtkit_set_ap<T>(rtk: &RTKit<T>, pwr_state: PwrState) -> Result<()> {
     assert!(!cold());
     let pwr_state = pwr_state as u16;
     if rtk.ap.load(Ordering::Relaxed) == (pwr_state & 0xFF) {
@@ -411,7 +411,7 @@ pub fn rtkit_set_ap<T>(rtk: Ref<RTKit<T>>, pwr_state: PwrState) -> Result<()> {
     Ok(())
 }
 
-fn handle_mgmt<T>(rtk: Ref<RTKit<T>>, data0: u64) -> Result<()> {
+fn handle_mgmt<T>(rtk: Pin<&RTKit<T>>, data0: u64) -> Result<()> {
     let msg = MgmtRxMsg::new(data0)?;
     if rtk.verbose {
         device_println!(rtk.client, "recv'd msg from rtkit {msg:x?}");
@@ -479,13 +479,13 @@ fn handle_mgmt<T>(rtk: Ref<RTKit<T>>, data0: u64) -> Result<()> {
     Ok(())
 }
 
-fn handle_ioreport<T>(rtk: Ref<RTKit<T>>, data0: u64) -> Result<()> {
+fn handle_ioreport<T>(rtk: Pin<&RTKit<T>>, data0: u64) -> Result<()> {
     const IOREPORT_UNKNOWN1: u8 = 8;
     const IOREPORT_UNKNOWN2: u8 = 12;
     let msg_ty = mgmt_msg_type(data0);
     match msg_ty {
         BUFFER_REQUEST => {
-            handle_buffer_req(rtk, EP_IOREPORT, data0, proj!(&rtk->ioreport))?;
+            handle_buffer_req(rtk, EP_IOREPORT, data0, proj!(&rtk.ioreport))?;
         }
         IOREPORT_UNKNOWN1 | IOREPORT_UNKNOWN2 => {
             let echoed_msg = IoReportTxMsg { ack: data0 };
@@ -504,7 +504,7 @@ fn handle_ioreport<T>(rtk: Ref<RTKit<T>>, data0: u64) -> Result<()> {
     Ok(())
 }
 
-fn handle_crashlog<T>(rtk: Ref<RTKit<T>>, data0: u64) -> Result<()> {
+fn handle_crashlog<T>(rtk: Pin<&RTKit<T>>, data0: u64) -> Result<()> {
     let msg_ty = mgmt_msg_type(data0);
     if msg_ty != BUFFER_REQUEST {
         device_println!(
@@ -517,18 +517,18 @@ fn handle_crashlog<T>(rtk: Ref<RTKit<T>>, data0: u64) -> Result<()> {
         device_println!(rtk.client, "got another crashlog message");
         panic!("RTKit crashed");
     }
-    handle_buffer_req(rtk, EP_CRASHLOG, data0, proj!(&rtk->crashlog))?;
+    handle_buffer_req(rtk, EP_CRASHLOG, data0, proj!(&rtk.crashlog))?;
     Ok(())
 }
 
-fn handle_oslog<T>(rtk: Ref<RTKit<T>>, data0: u64) -> Result<()> {
+fn handle_oslog<T>(rtk: Pin<&RTKit<T>>, data0: u64) -> Result<()> {
     const OSLOG_UNKNOWN1: u8 = 3;
     const OSLOG_UNKNOWN2: u8 = 4;
     const OSLOG_UNKNOWN3: u8 = 5;
     let msg_ty = oslog_msg_type(data0);
     match msg_ty {
         BUFFER_REQUEST => {
-            handle_buffer_req(rtk, EP_OSLOG, data0, proj!(&rtk->oslog))?;
+            handle_buffer_req(rtk, EP_OSLOG, data0, proj!(&rtk.oslog))?;
         }
         OSLOG_UNKNOWN1 | OSLOG_UNKNOWN2 | OSLOG_UNKNOWN3 => {
             let echoed_msg = OsLogTxMsg { ack: data0 };
@@ -550,13 +550,13 @@ fn handle_oslog<T>(rtk: Ref<RTKit<T>>, data0: u64) -> Result<()> {
     Ok(())
 }
 
-fn handle_syslog<T>(rtk: Ref<RTKit<T>>, data0: u64) -> Result<()> {
+fn handle_syslog<T>(rtk: Pin<&RTKit<T>>, data0: u64) -> Result<()> {
     const SYSLOG_INIT: u8 = 8;
     const SYSLOG_LOG: u8 = 5;
     let msg_ty = mgmt_msg_type(data0);
     match msg_ty {
         BUFFER_REQUEST => {
-            handle_buffer_req(rtk, EP_SYSLOG, data0, proj!(&rtk->syslog))?;
+            handle_buffer_req(rtk, EP_SYSLOG, data0, proj!(&rtk.syslog))?;
         }
         SYSLOG_INIT => {
             device_println!(rtk.client, "TODO: store some state");
@@ -580,10 +580,10 @@ fn handle_syslog<T>(rtk: Ref<RTKit<T>>, data0: u64) -> Result<()> {
 }
 
 fn handle_buffer_req<T>(
-    rtk: Ref<RTKit<T>>,
+    rtk: Pin<&RTKit<T>>,
     ep: Endpoint,
     data0: u64,
-    buffer: Ref<Checked<RTKitBuffer<T>>>,
+    buffer: Pin<&Checked<RTKitBuffer<T>>>,
 ) -> Result<()> {
     let size = if ep != EP_OSLOG {
         buffer_size(data0)
@@ -628,9 +628,9 @@ fn handle_buffer_req<T>(
 }
 
 fn rtkit_alloc<T>(
-    rtk: Ref<RTKit<T>>,
+    rtk: Pin<&RTKit<T>>,
     req_size: bus_size_t,
-    buffer: Ref<Checked<RTKitBuffer<T>>>,
+    buffer: Pin<&Checked<RTKitBuffer<T>>>,
 ) -> Result<bus_addr_t> {
     //if rtk.no_alloc {
     //    return Ok(0);
@@ -640,7 +640,7 @@ fn rtkit_alloc<T>(
 
     let mut buffer_guard = buffer.get_mut();
 
-    buffer_guard.rtk = Ref::into_ptr(rtk);
+    buffer_guard.rtk = unsafe { Ptr::from_ref(&rtk) };
     buffer_guard.tag = bus_dma_tag_create(parent_tag)
         .alignment(PAGE_SIZE)
         .max_size(req_size)
@@ -672,7 +672,7 @@ fn rtkit_alloc<T>(
 }
 
 extern "C" fn rtkit_dmamap_cb<T>(
-    buffer: Ref<Checked<RTKitBuffer<T>>>,
+    buffer: Pin<&Checked<RTKitBuffer<T>>>,
     segs: &bus_dma_segment_t,
     nsegs: i32,
     error: i32,
@@ -698,7 +698,7 @@ extern "C" fn rtkit_dmamap_cb<T>(
         // trait at some point to use DeviceIf::Softc. Drivers that use the default T shouldn't set
         // the callback or fall into this branch but again that's not enforced by anything.
         let sc = unsafe {
-            bindings::device_get_softc(rtk.client)
+            bindings::device_get_softc(rtk.client.as_ptr())
                 .cast::<T>()
                 .as_ref()
                 .unwrap()
@@ -707,7 +707,7 @@ extern "C" fn rtkit_dmamap_cb<T>(
     }
 }
 
-extern "C" fn rx_callback<T>(rtk: Ref<RTKit<T>>, msg: AppleMboxMsg) {
+extern "C" fn rx_callback<T>(rtk: Pin<&RTKit<T>>, msg: AppleMboxMsg) {
     try_rx_callback(rtk, msg)
         .inspect_err(|e| {
             device_println!(rtk.client, "callback failed {e}");
@@ -715,18 +715,17 @@ extern "C" fn rx_callback<T>(rtk: Ref<RTKit<T>>, msg: AppleMboxMsg) {
         .unwrap();
 }
 
-fn try_rx_callback<T>(rtk: Ref<RTKit<T>>, msg: AppleMboxMsg) -> Result<()> {
+fn try_rx_callback<T>(rtk: Pin<&RTKit<T>>, msg: AppleMboxMsg) -> Result<()> {
     rmb!();
     mtx_lock_spin(&rtk.msgs).push_back(msg);
     if rtk.verbose {
         device_println!(rtk.client, "enqueuing rtkit task");
     }
-    taskqueue_enqueue(&rtk.queue, proj!(&rtk->task))?;
+    taskqueue_enqueue(&rtk.queue, &rtk.task)?;
     Ok(())
 }
 
-extern "C" fn rx_task<D: RTKitDriver + DeviceIf>(sc: Ref<D::Softc>, pending: u32) {
-    let rtk = D::get_rtkit(sc);
+extern "C" fn rx_task<T>(rtk: Pin<&RTKit<T>>, pending: u32) {
     try_rx_task(rtk, pending)
         .inspect_err(|e| {
             device_println!(rtk.client, "task fn failed {e}");
@@ -734,7 +733,7 @@ extern "C" fn rx_task<D: RTKitDriver + DeviceIf>(sc: Ref<D::Softc>, pending: u32
         .unwrap();
 }
 
-fn try_rx_task<T>(rtk: Ref<RTKit<T>>, pending: u32) -> Result<()> {
+fn try_rx_task<T>(rtk: Pin<&RTKit<T>>, pending: u32) -> Result<()> {
     for _ in 0..pending {
         let msg = mtx_lock_spin(&rtk.msgs).pop_front().unwrap();
         let ep = msg.data1;
@@ -757,8 +756,8 @@ fn try_rx_task<T>(rtk: Ref<RTKit<T>>, pending: u32) -> Result<()> {
                 // some drivers use the default `T = ()` for convenience. I should rework the RTKitDriver
                 // trait at some point to use DeviceIf::Softc. Drivers that use the default T shouldn't set
                 // the callback or fall into this branch but again that's not enforced by anything.
-                let sc_ptr = unsafe { bindings::device_get_softc(rtk.client).cast::<T>() };
-                let sc = unsafe { Ref::from_raw(sc_ptr) };
+                let sc_ptr = unsafe { bindings::device_get_softc(rtk.client.as_ptr()).cast::<T>() };
+                let sc = unsafe { sc_ptr.as_ref().unwrap() };
                 callback(sc, msg.data0)?;
             }
         }
