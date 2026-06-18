@@ -52,16 +52,17 @@ use kpi::bindings::{
 };
 use kpi::bus::dma::{BusDmaMap, BusDmaMem, BusDmaTag};
 use kpi::bus::{Register, Resource};
-use kpi::device::{BusProbe, DeviceIf};
-use kpi::ffi::{Ptr, Ref, SubClass, UninitRef};
+use kpi::device::{BusProbe, DeviceIf, Device};
+use kpi::ffi::{Ptr, SubClass, UninitRef};
 use kpi::kobj::AsRustType;
 use kpi::ofw::XRef;
 use kpi::prelude::*;
+use core::pin::Pin;
 use kpi::sync::Checked;
 use kpi::{base, driver, proj};
 use nvme::prelude::*;
 use nvme::{NvmeIf, NvmeSoftc};
-use rtkit::{RTKit, RTKitDriver, rtkit_boot, rtkit_init, PwrState, rtkit_set_ap};
+use rtkit::{RTKit, RTKitDriver, rtkit_boot, PwrState, rtkit_set_ap};
 
 const ANS_CPU_CTRL: u64 = 0x0044;
 const ANS_CPU_CTRL_RUN: u32 = 1 << 4;
@@ -135,7 +136,7 @@ fn nvme_ans_sart_map(sc: &NvmeAnsSoftc, addr: bus_addr_t, size: bus_size_t) {
 pub type NvmeAnsSoftc = NvmeSoftc<NvmeAnsSoftcFields>;
 
 pub struct NvmeAnsSoftcFields {
-    dev: device_t,
+    dev: Device,
     ans: Checked<Register>,
     sart: XRef,
     rtk: RTKit<NvmeAnsSoftc>,
@@ -145,16 +146,12 @@ pub struct NvmeAnsSoftcFields {
 
 impl RTKitDriver for NvmeAnsDriver {
     type CallbackArg = Self::Softc;
-
-    fn get_rtkit(sc: Ref<Self::Softc>) -> Ref<RTKit<Self::Softc>> {
-        proj!(&sc->rtk)
-    }
 }
 
 impl DeviceIf for NvmeAnsDriver {
     type Softc = NvmeAnsSoftc;
 
-    fn device_probe(dev: device_t) -> Result<BusProbe> {
+    fn device_probe(dev: Device) -> Result<BusProbe> {
         if !ofw_bus_status_okay(dev) {
             return Err(ENXIO);
         }
@@ -165,7 +162,7 @@ impl DeviceIf for NvmeAnsDriver {
         Ok(BUS_PROBE_DEFAULT)
     }
 
-    fn device_attach(uninit_sc: UninitRef<NvmeAnsSoftc>, dev: device_t) -> Result<()> {
+    fn device_attach(uninit_sc: UninitRef<NvmeAnsSoftc>, dev: Device) -> Result<()> {
         let node = ofw_bus_get_node(dev);
         let ans_id = ofw_bus_find_string_index(node, c"reg-names", c"ans").map_err(|e| {
             device_println!(dev, "couldn't find 'ans' reg {e}");
@@ -187,10 +184,14 @@ impl DeviceIf for NvmeAnsDriver {
                 ENXIO
             })?
         };
-        let rtk = Self::new_rtkit(dev).map_err(|e| {
+        let mut rtk = Self::new_rtkit(dev).map_err(|e| {
             device_println!(dev, "error initializing rtkit {e}");
             ENXIO
         })?;
+        // Set the callback for the RTKit module to use when it maps in a buffer. The callback is
+        // type-checked using the RTKit's generic parameter
+        rtk.map_callback = Some(nvme_ans_sart_map);
+
         let adminq = Checked::new(NvmeAnsQpair::default());
         let ioq = Checked::new(NvmeAnsQpair::default());
 
@@ -256,16 +257,8 @@ impl DeviceIf for NvmeAnsDriver {
             ctrlr.quirks |= QUIRK_ANS as u32;
         }
 
-        // Set the callback for the RTKit module to use when it maps in a buffer. The callback is
-        // type-checked using the RTKit's generic parameter
-        sc.rtk.map_callback = Some(nvme_ans_sart_map);
-
-        // Turn the UniqueRef into a shared Ref. This allows using the `proj!` macro to project the
-        // pointer to a pointer to the struct's fields which is required to initialize the RTKit.
-        let sc = sc.into_ref();
-
         // Initialize the RTKit instance's taskqueue, thread and mailbox
-        rtkit_init(proj!(&sc->rtk))?;
+        proj!(&sc.rtk).init()?;
 
         nvme_setup_intr(dev, &sc).map_err(|e| {
             device_println!(dev, "couldn't set up interrupt handler {e}");
@@ -282,7 +275,7 @@ impl DeviceIf for NvmeAnsDriver {
 }
 
 impl NvmeIf for NvmeAnsDriver {
-    fn nvme_delayed_attach(sc: Ref<NvmeAnsSoftc>) {
+    fn nvme_delayed_attach(sc: Pin<&NvmeAnsSoftc>, ctrlr: &mut nvme_controller) {
         let dev = sc.dev;
 
         // The ANS register isn't accessed anywhere else so this Checked access can't panic
@@ -298,9 +291,9 @@ impl NvmeIf for NvmeAnsDriver {
 
         let mut status = bus_read_4!(nvme_reg, ANS_BOOT_STATUS);
         if status != ANS_BOOT_STATUS_OK {
-            rtkit_boot(proj!(&sc->rtk)).unwrap();
+            rtkit_boot(&sc.rtk).unwrap();
         }
-        rtkit_set_ap(proj!(&sc->rtk), PwrState::On).unwrap();
+        rtkit_set_ap(&sc.rtk, PwrState::On).unwrap();
 
         for timo in 0..100000 {
             status = bus_read_4!(nvme_reg, ANS_BOOT_STATUS);
@@ -314,12 +307,12 @@ impl NvmeIf for NvmeAnsDriver {
             panic!("uh oh");
         }
 
-        nvme_ans_alloc_qpair(sc, 0, proj!(&sc->adminq))
+        nvme_ans_alloc_qpair(sc, 0, proj!(&sc.adminq))
             .inspect_err(|e| {
                 device_println!(dev, "unable to allocate dma mem for admin queue {e}");
             })
             .unwrap();
-        nvme_ans_alloc_qpair(sc, 1, proj!(&sc->ioq))
+        nvme_ans_alloc_qpair(sc, 1, proj!(&sc.ioq))
             .inspect_err(|e| {
                 device_println!(dev, "unable to allocate dma mem for admin queue {e}");
             })
@@ -339,7 +332,7 @@ impl NvmeIf for NvmeAnsDriver {
         bus_write_4!(nvme_reg, ANS_UNKNOWN_CTRL, ctrl & !ANS_PRP_NULL_CHECK);
     }
 
-    fn nvme_enable(sc: Ref<NvmeAnsSoftc>) {
+    fn nvme_enable(sc: Pin<&NvmeAnsSoftc>) {
         // SAFETY: The res field is initialized once and no thread should be using the register at
         // this point.
         let mut nvme_reg = unsafe { Register::from_raw(base!(sc->resource)).unwrap() };
@@ -351,12 +344,12 @@ impl NvmeIf for NvmeAnsDriver {
         bus_write_4!(nvme_reg, ANS_MODESEL_REG, 0);
     }
 
-    fn nvme_sq_enter(sc: Ref<Self::Softc>, qpair: *mut nvme_qpair, tr: &nvme_tracker) -> u32 {
+    fn nvme_sq_enter(sc: Pin<&NvmeAnsSoftc>, qpair: *mut nvme_qpair, tr: &nvme_tracker) -> u32 {
         let res = unsafe { (*tr.req).cmd.cid };
         u32::from(res)
     }
 
-    fn nvme_sq_leave(sc: Ref<NvmeAnsSoftc>, qpair: &nvme_qpair, tr: &nvme_tracker) {
+    fn nvme_sq_leave(sc: Pin<&NvmeAnsSoftc>, qpair: &nvme_qpair, tr: &nvme_tracker) {
         let ans_qpair = match qpair.id {
             0 => &sc.adminq,
             _ => &sc.ioq,
@@ -405,14 +398,14 @@ impl NvmeIf for NvmeAnsDriver {
     }
 
     fn nvme_qpair_construct(
-        sc: Ref<NvmeAnsSoftc>,
+        sc: Pin<&NvmeAnsSoftc>,
         qpair: *mut nvme_qpair,
         num_entries: u32,
         num_trackers: u32,
         ctrlr: *mut nvme_controller,
     ) -> Result<()> {
         let id = unsafe { (*qpair).id };
-        nvme_qpair_construct(sc.dev, qpair, num_entries, num_trackers, sc).map_err(|e| {
+        nvme_qpair_construct_default(sc.dev, qpair, num_entries, num_trackers, &sc).map_err(|e| {
             device_println!(sc.dev, "failed to construct qpair");
             ENXIO
         })?;
@@ -430,7 +423,7 @@ impl NvmeIf for NvmeAnsDriver {
         Ok(())
     }
 
-    fn nvme_cq_done(sc: Ref<NvmeAnsSoftc>, qpair: &nvme_qpair, tr: &nvme_tracker) {
+    fn nvme_cq_done(sc: Pin<&NvmeAnsSoftc>, qpair: &nvme_qpair, tr: &nvme_tracker) {
         let id = unsafe { (*tr.req).cmd.cid };
         let ans_qpair = if qpair.id == 0 {
             &*sc.adminq.get_mut()
@@ -460,9 +453,9 @@ impl NvmeIf for NvmeAnsDriver {
 }
 
 fn nvme_ans_alloc_qpair(
-    sc: Ref<NvmeAnsSoftc>,
+    sc: Pin<&NvmeAnsSoftc>,
     id: u32,
-    qpair: Ref<Checked<NvmeAnsQpair>>,
+    qpair: Pin<&Checked<NvmeAnsQpair>>,
 ) -> Result<()> {
     let is_admin = id == 0;
 
@@ -486,7 +479,7 @@ fn nvme_ans_alloc_qpair(
     qpair_guard.tag = tag;
     qpair_guard.map = map;
     qpair_guard.kva = kva;
-    qpair_guard.sc = Ref::into_ptr(sc);
+    qpair_guard.sc = Ptr::from_ref(&sc);
     drop(qpair_guard);
 
     let res = bus_dmamap_load(
@@ -511,7 +504,7 @@ fn nvme_ans_alloc_qpair(
 }
 
 extern "C" fn nvme_ans_dmamap_cb(
-    qpair: Ref<Checked<NvmeAnsQpair>>,
+    qpair: Pin<&Checked<NvmeAnsQpair>>,
     segs: &bus_dma_segment_t,
     nsegs: i32,
     error: i32,

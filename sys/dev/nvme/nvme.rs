@@ -28,10 +28,11 @@
 
 #![no_std]
 
+use core::pin::Pin;
 use core::ffi::{c_void, c_int};
 use kpi::bindings::{device_t, nvme_controller, nvme_qpair, nvme_tracker};
-use kpi::device::DeviceIf;
-use kpi::ffi::{Ref, SubClass, SubClassOf};
+use kpi::device::{DeviceIf, Device};
+use kpi::ffi::{SubClass, SubClassOf};
 use kpi::driver::Driver;
 use kpi::prelude::*;
 use kpi::{ErrCode, base, define_interface};
@@ -41,10 +42,10 @@ pub type NvmeSoftc<T> = SubClass<nvme_controller, T>;
 pub mod prelude {
     use super::*;
 
-    pub fn nvme_setup_intr<T>(dev: device_t, sc: &NvmeSoftc<T>) -> Result<()> {
+    pub fn nvme_setup_intr<T>(dev: Device, sc: &NvmeSoftc<T>) -> Result<()> {
         let res = unsafe {
             bindings::bus_setup_intr(
-                dev,
+                dev.as_ptr(),
                 base!(sc->res),
                 INTR_TYPE_MISC.0 | INTR_MPSAFE.0,
                 None,
@@ -59,15 +60,15 @@ pub mod prelude {
         Ok(())
     }
 
-    pub fn nvme_qpair_construct<T>(
-        dev: device_t,
+    pub fn nvme_qpair_construct_default<T>(
+        dev: Device,
         qpair: *mut nvme_qpair,
         num_entries: u32,
         num_trackers: u32,
-        sc: Ref<NvmeSoftc<T>>,
+        sc: &NvmeSoftc<T>,
     ) -> Result<()> {
         let res = unsafe {
-            bindings::nvme_qpair_construct(dev, qpair, num_entries, num_trackers, base!(&sc))
+            bindings::nvme_qpair_construct(dev.as_ptr(), qpair, num_entries, num_trackers, base!(&sc))
         };
         if res != 0 {
             return Err(ErrCode::from(res));
@@ -81,23 +82,23 @@ pub trait NvmeIf: DeviceIf
 where
     <Self as DeviceIf>::Softc: SubClassOf<nvme_controller>,
 {
-    fn nvme_delayed_attach(sc: Ref<Self::Softc>) {
+    fn nvme_delayed_attach(sc: Pin<&Self::Softc>, ctrlr: &mut nvme_controller) {
         unimplemented!()
     }
-    fn nvme_enable(sc: Ref<Self::Softc>) {
+    fn nvme_enable(sc: Pin<&Self::Softc>) {
         unimplemented!()
     }
-    fn nvme_sq_enter(sc: Ref<Self::Softc>, qpair: *mut nvme_qpair, tr: &nvme_tracker) -> u32 {
+    fn nvme_sq_enter(sc: Pin<&Self::Softc>, qpair: *mut nvme_qpair, tr: &nvme_tracker) -> u32 {
         unimplemented!()
     }
-    fn nvme_sq_leave(sc: Ref<Self::Softc>, qpair: &nvme_qpair, tr: &nvme_tracker) {
+    fn nvme_sq_leave(sc: Pin<&Self::Softc>, qpair: &nvme_qpair, tr: &nvme_tracker) {
         unimplemented!()
     }
-    fn nvme_cq_done(sc: Ref<Self::Softc>, qpair: &nvme_qpair, tr: &nvme_tracker) {
+    fn nvme_cq_done(sc: Pin<&Self::Softc>, qpair: &nvme_qpair, tr: &nvme_tracker) {
         unimplemented!()
     }
     fn nvme_qpair_construct(
-        sc: Ref<Self::Softc>,
+        sc: Pin<&Self::Softc>,
         qpair: *mut nvme_qpair,
         num_entries: u32,
         num_trackers: u32,
@@ -105,9 +106,9 @@ where
     ) -> Result<()> {
         unimplemented!()
     }
-    fn nvme_attach(dev: device_t) -> Result<()> {
+    fn nvme_attach(dev: Device) -> Result<()> {
         assert_eq!(device_get_driver(dev), <Self as Driver>::DRIVER);
-        let res = unsafe { bindings::nvme_attach(dev) };
+        let res = unsafe { bindings::nvme_attach(dev.as_ptr()) };
         if res != 0 {
             return Err(ErrCode::from(res));
         }
@@ -118,6 +119,9 @@ where
 
 define_interface! {
     in NvmeIf
+    fn nvme_delayed_attach(dev: device_t, ctrlr: *mut nvme_controller),
+        with desc nvme_delayed_attach_desc
+        and typedef nvme_delayed_attach_t;
     fn nvme_enable(dev: device_t),
         with desc nvme_enable_desc
         and typedef nvme_enable_t;
@@ -133,32 +137,4 @@ define_interface! {
     fn nvme_qpair_construct(dev: device_t, qpair: *mut nvme_qpair, num_entries: u32, num_trackers: u32, ctrlr: *mut nvme_controller) -> int,
         with desc nvme_qpair_construct_desc
         and typedef nvme_qpair_construct_t;
-}
-
-#[macro_export]
-macro_rules! nvme_delayed_attach {
-    (get_desc) => { kpi::bindings::nvme_delayed_attach_desc };
-    ($driver_ty:ident $driver_sym:ident $impl_fn_name:ident) => {
-        #[unsafe(no_mangle)]
-        pub unsafe extern "C" fn $impl_fn_name(dev: device_t, ctrlr: *mut nvme_controller) -> c_int {
-            // TODO: Typecheck this macro invocation against nvme_delayed_attach_t
-            //use core::any::{Any, TypeId};
-            //let typedef_val = nvme_delayed_attach_t::default();
-            //let typedef_id = typedef_val.type_id();
-            //let this_fn_id = Some($impl_fn_name).type_id();
-            //assert!(typedef_id == this_fn_id);
-
-            // SAFETY: Cast base class to softc specified with DeviceIf impl. NvmeIf ensures that
-            // this is a subclass of nvme_controller.
-            let sc = unsafe {
-                let sc_ptr = ctrlr.cast::<<$driver_ty as DeviceIf>::Softc>();
-                kpi::ffi::Ref::from_raw(sc_ptr)
-            };
-            <$driver_ty as $crate::NvmeIf>::nvme_delayed_attach(sc);
-
-            // The implementation does return an error because this function's caller doesn't do
-            // anything with it anyway.
-            0
-        }
-    };
 }

@@ -29,41 +29,43 @@
 #![no_std]
 
 use core::ffi::{c_int, c_void};
+use core::pin::Pin;
 use kpi::bindings::{device_t, hid_intr_t, hid_rdesc_info, hid_size_t};
-use kpi::device::DeviceIf;
-use kpi::ffi::{Ref, SubClass, SubClassOf};
+use kpi::device::{DeviceIf, Device};
+use kpi::ffi::{SubClass, SubClassOf};
 use kpi::prelude::*;
 use kpi::{ErrCode, base, define_interface};
+use kpi::kobj::{AsRustType, AsCType};
 
 #[allow(unused_variables)]
 pub trait HidIf: DeviceIf {
     fn hid_intr_setup(
-        sc: Ref<Self::Softc>,
-        child: device_t,
+        sc: Pin<&Self::Softc>,
+        child: Device,
         intr: hid_intr_t,
         context: *mut c_void,
         rdesc: *mut hid_rdesc_info,
     ) {
         unimplemented!()
     }
-    fn hid_intr_unsetup(sc: Ref<Self::Softc>, child: device_t) {
+    fn hid_intr_unsetup(sc: Pin<&Self::Softc>, child: Device) {
         unimplemented!()
     }
-    fn hid_intr_start(sc: Ref<Self::Softc>, child: device_t) -> Result<()> {
+    fn hid_intr_start(sc: Pin<&Self::Softc>, child: Device) -> Result<()> {
         unimplemented!()
     }
-    fn hid_intr_stop(sc: Ref<Self::Softc>, child: device_t) -> Result<()> {
+    fn hid_intr_stop(sc: Pin<&Self::Softc>, child: Device) -> Result<()> {
         unimplemented!()
     }
-    fn hid_intr_poll(sc: Ref<Self::Softc>, child: device_t) {
+    fn hid_intr_poll(sc: Pin<&Self::Softc>, child: Device) {
         unimplemented!()
     }
-    fn hid_get_rdesc(sc: Ref<Self::Softc>, child: device_t, buf: &mut [u8]) -> Result<()> {
+    fn hid_get_rdesc(sc: Pin<&Self::Softc>, child: Device, buf: &mut [u8]) -> Result<()> {
         unimplemented!()
     }
     fn hid_get_report(
-        sc: Ref<Self::Softc>,
-        child: device_t,
+        sc: Pin<&Self::Softc>,
+        child: Device,
         data: *mut c_void,
         max_len: hid_size_t,
         actlen: *mut hid_size_t,
@@ -73,8 +75,8 @@ pub trait HidIf: DeviceIf {
         unimplemented!()
     }
     fn hid_set_report(
-        sc: Ref<Self::Softc>,
-        child: device_t,
+        sc: Pin<&Self::Softc>,
+        child: Device,
         buf: *const c_void,
         len: hid_size_t,
         ty: u8,
@@ -113,7 +115,7 @@ macro_rules! hid_get_rdesc {
     (get_desc) => {
         kpi::bindings::hid_get_rdesc_desc
     };
-    ($driver_ty:ident $driver_sym:ident $impl_fn_name:ident) => {
+    ($driver_ty:ident $impl_fn_name:ident) => {
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $impl_fn_name(
             dev: device_t,
@@ -121,6 +123,7 @@ macro_rules! hid_get_rdesc {
             buf: *mut c_void,
             len: hid_size_t,
         ) -> c_int {
+            use kpi::kobj::{AsRustType, AsCType};
             // TODO: Typecheck this macro invocation against nvme_delayed_attach_t
             //use core::any::{Any, TypeId};
             //let typedef_val = nvme_delayed_attach_t::default();
@@ -129,6 +132,7 @@ macro_rules! hid_get_rdesc {
             //assert!(typedef_id == this_fn_id);
 
             let sc = dev.as_rust_type();
+            let child = child.as_rust_type();
             let mut buf =
                 unsafe { core::slice::from_raw_parts_mut(buf.cast::<u8>(), len as usize) };
             let res = <$driver_ty as $crate::HidIf>::hid_get_rdesc(sc, child, buf);
