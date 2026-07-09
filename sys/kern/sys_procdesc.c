@@ -64,6 +64,7 @@
 
 #include <sys/param.h>
 #include <sys/capsicum.h>
+#include <sys/event.h>
 #include <sys/fcntl.h>
 #include <sys/file.h>
 #include <sys/filedesc.h>
@@ -347,12 +348,27 @@ procdesc_exit(struct proc *p)
 		return (1);
 	}
 	selwakeup(&pd->pd_selinfo);
-	KNOTE_LOCKED(&pd->pd_selinfo.si_note, NOTE_EXIT);
+	KNOTE_LOCKED(&pd->pd_selinfo.si_note, NOTE_EXIT | NOTE_PDSIGCHLD);
 	PROCDESC_UNLOCK(pd);
 
 	/* Wakeup all waiters for this procdesc' process exit. */
 	wakeup(&p->p_procdesc);
 	return (0);
+}
+
+void
+procdesc_jobstate(struct proc *p)
+{
+	struct procdesc *pd;
+
+	PROC_LOCK_ASSERT(p, MA_OWNED);
+	pd = p->p_procdesc;
+	if (pd == NULL)
+		return;
+
+	PROCDESC_LOCK(pd);
+	KNOTE_LOCKED(&pd->pd_selinfo.si_note, NOTE_PDSIGCHLD);
+	PROCDESC_UNLOCK(pd);
 }
 
 /*
@@ -502,10 +518,11 @@ procdesc_kqops_event(struct knote *kn, long hint)
 	pd = kn->kn_fp->f_data;
 	if (hint == 0) {
 		/*
-		 * Initial test after registration. Generate a NOTE_EXIT in
+		 * Initial test after registration.  Generate notes in
 		 * case the process already terminated before registration.
 		 */
-		event = pd->pd_flags & PDF_EXITED ? NOTE_EXIT : 0;
+		event = (pd->pd_flags & PDF_EXITED) != 0 ? (NOTE_EXIT |
+		    NOTE_PDSIGCHLD) : 0;
 	} else {
 		/* Mask off extra data. */
 		event = (u_int)hint & NOTE_PCTRLMASK;
@@ -516,7 +533,7 @@ procdesc_kqops_event(struct knote *kn, long hint)
 		kn->kn_fflags |= event;
 
 	/* Process is gone, so flag the event as finished. */
-	if (event == NOTE_EXIT) {
+	if ((event & NOTE_EXIT) != 0) {
 		kn->kn_flags |= EV_EOF | EV_ONESHOT;
 		if (kn->kn_fflags & NOTE_EXIT)
 			kn->kn_data = pd->pd_xstat;
