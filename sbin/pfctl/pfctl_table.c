@@ -85,14 +85,15 @@ static const char	*istats_text[2][2][2] = {
 	} while (0)
 
 #define CREATE_TABLE do {						\
+		int _ret;						\
 		warn_duplicate_tables(table.pfrt_name,			\
 		    table.pfrt_anchor);					\
 		table.pfrt_flags |= PFR_TFLAG_PERSIST;			\
 		if ((!(opts & PF_OPT_NOACTION) ||			\
 		    (opts & PF_OPT_DUMMYACTION)) &&			\
-		    (pfr_add_table(&table, &nadd, flags)) &&		\
-		    (errno != EPERM)) {					\
-			warnx("%s", pf_strerror(errno));		\
+		    (_ret = pfr_add_table(&table, &nadd, flags)) &&	\
+		    (_ret != EPERM)) {					\
+			warnx("%s", pf_strerror(_ret));			\
 			goto _error;					\
 		}							\
 		if (nadd) {						\
