@@ -80,9 +80,7 @@ static struct {
 	{ "nosparse",		0, UF_SPARSE	},
 	{ "nousparse",		0, UF_SPARSE	},
 	{ "nosystem",		0, UF_SYSTEM	},
-	{ "nousystem",		0, UF_SYSTEM	},
-	{ "nodontcache",	0, UF_DONTCACHE	},
-	{ "noudontcache",	0, UF_DONTCACHE	}
+	{ "nousystem",		0, UF_SYSTEM	}
 };
 #define nmappings	(sizeof(mapping) / sizeof(mapping[0]))
 
