@@ -136,10 +136,10 @@ zlib_init(decomp_state *dctx, uint8_t *first_buf, size_t buflen, size_t size_hin
 	EFI_STATUS status = alloc_buffer(dctx, dctx->size);
 	if (EFI_ERROR(status))
 		return (status);
-        memset(strm, 0, sizeof(*strm));
-        strm->next_in = first_buf;
-        strm->avail_in = buflen;
-        return (inflateInit2(strm, 15 + 16) == Z_OK ? EFI_SUCCESS : EFI_VOLUME_CORRUPTED);
+	memset(strm, 0, sizeof(*strm));
+	strm->next_in = first_buf;
+	strm->avail_in = buflen;
+	return (inflateInit2(strm, 15 + 16) == Z_OK ? EFI_SUCCESS : EFI_VOLUME_CORRUPTED);
 }
 
 static enum step_return
@@ -148,19 +148,19 @@ zlib_step(decomp_state *dctx, uint8_t *buf, size_t len, size_t offset)
 	z_stream *strm = &dctx->zstrm;
 	size_t outlen = dctx->buf_end - dctx->buf_cur;
 
-        strm->next_in = buf;
-        strm->avail_in = len;
-        strm->next_out = dctx->buf_cur;
-        strm->avail_out = outlen;
+	strm->next_in = buf;
+	strm->avail_in = len;
+	strm->next_out = dctx->buf_cur;
+	strm->avail_out = outlen;
 	
-        int ret = inflate(strm, Z_NO_FLUSH);
+	int ret = inflate(strm, Z_NO_FLUSH);
 	dctx->buf_cur += outlen - strm->avail_out;
 
-        if (ret == Z_STREAM_END)
-                return (done);
-        if (ret != Z_OK)
-                return (err);
-        if (dctx->buf_cur < dctx->buf_end) /* Have output space */
+	if (ret == Z_STREAM_END)
+		return (done);
+	if (ret != Z_OK)
+		return (err);
+	if (dctx->buf_cur < dctx->buf_end) /* Have output space */
 		return (ok);
 
 	/*
@@ -200,10 +200,10 @@ bzip2_init(decomp_state *dctx, uint8_t *first_buf, size_t buflen, size_t size_hi
 	EFI_STATUS status = alloc_buffer(dctx, dctx->size);
 	if (EFI_ERROR(status))
 		return (status);
-        memset(strm, 0, sizeof(*strm));
-        strm->next_in = first_buf;
-        strm->avail_in = buflen;
-        return (BZ2_bzDecompressInit(strm, 0, 0) == BZ_OK ? EFI_SUCCESS : EFI_VOLUME_CORRUPTED);
+	memset(strm, 0, sizeof(*strm));
+	strm->next_in = first_buf;
+	strm->avail_in = buflen;
+	return (BZ2_bzDecompressInit(strm, 0, 0) == BZ_OK ? EFI_SUCCESS : EFI_VOLUME_CORRUPTED);
 }
 
 static enum step_return
@@ -212,19 +212,19 @@ bzip2_step(decomp_state *dctx, uint8_t *buf, size_t len, size_t offset)
 	bz_stream *strm = &dctx->bzstrm;
 	size_t outlen = dctx->buf_end - dctx->buf_cur;
 
-        strm->next_in = buf;
-        strm->avail_in = len;
-        strm->next_out = dctx->buf_cur;
-        strm->avail_out = outlen;
+	strm->next_in = buf;
+	strm->avail_in = len;
+	strm->next_out = dctx->buf_cur;
+	strm->avail_out = outlen;
 	
-        int ret = BZ2_bzDecompress(strm);
+	int ret = BZ2_bzDecompress(strm);
 	dctx->buf_cur += outlen - strm->avail_out;
 
-        if (ret == BZ_STREAM_END)
-                return (done);
-        if (ret != BZ_OK)
-                return (err);
-        if (dctx->buf_cur < dctx->buf_end) /* Have output space */
+	if (ret == BZ_STREAM_END)
+		return (done);
+	if (ret != BZ_OK)
+		return (err);
+	if (dctx->buf_cur < dctx->buf_end) /* Have output space */
 		return (ok);
 
 	/*
@@ -265,7 +265,7 @@ xz_init(decomp_state *dctx, uint8_t *first_buf, size_t buflen, size_t size_hint)
 	xz_crc32_init();
 	xz_crc64_init();
 	dctx->xzstrm = xz_dec_init(XZ_DYNALLOC, (uint32_t)-1);
-        return (dctx->xzstrm != NULL ? EFI_SUCCESS : EFI_VOLUME_CORRUPTED);	
+	return (dctx->xzstrm != NULL ? EFI_SUCCESS : EFI_VOLUME_CORRUPTED);	
 }
 
 
@@ -278,12 +278,12 @@ xz_step(decomp_state *dctx, uint8_t *buf, size_t len, size_t offset)
 		.out = dctx->buf_cur, .out_size = outlen, .out_pos = 0 };
 	int ret;
 	
-        ret = xz_dec_run(strm, &b);
+	ret = xz_dec_run(strm, &b);
 	dctx->buf_cur += b.out_pos;
 
-        if (ret == XZ_STREAM_END)
-                return (done);
-        if (ret != XZ_OK) {
+	if (ret == XZ_STREAM_END)
+		return (done);
+	if (ret != XZ_OK) {
 		switch(ret) {
 		case XZ_MEM_ERROR:
 			printf("xz no memory ");
@@ -305,9 +305,9 @@ xz_step(decomp_state *dctx, uint8_t *buf, size_t len, size_t offset)
 			break;
 		}
 		printf(" len %d offset %d\n", (int)len, (int)offset);
-                return (err);
+		return (err);
 	}
-        if (dctx->buf_cur < dctx->buf_end) /* Have output space */
+	if (dctx->buf_cur < dctx->buf_end) /* Have output space */
 		return (ok);
 
 	/*
@@ -351,13 +351,13 @@ zstd_init(decomp_state *dctx, uint8_t *first_buf, size_t buflen, size_t size_hin
 	if (EFI_ERROR(status))
 		return (status);
 
-        dctx->zstdstrm = ZSTD_createDStream();
-        if (dctx->zstdstrm == NULL)
-                return (EFI_OUT_OF_RESOURCES);
-        if (ZSTD_isError(ZSTD_initDStream(dctx->zstdstrm))) {
+	dctx->zstdstrm = ZSTD_createDStream();
+	if (dctx->zstdstrm == NULL)
+		return (EFI_OUT_OF_RESOURCES);
+	if (ZSTD_isError(ZSTD_initDStream(dctx->zstdstrm))) {
 		ZSTD_freeDStream(dctx->zstdstrm);
 		dctx->zstdstrm = NULL;
-                return (EFI_OUT_OF_RESOURCES);
+		return (EFI_OUT_OF_RESOURCES);
 	}
 	return (EFI_SUCCESS);
 }
@@ -373,11 +373,11 @@ zstd_step(decomp_state *dctx, uint8_t *buf, size_t len, size_t offset)
 	ret = ZSTD_decompressStream(dctx->zstdstrm, &outbuf, &inbuf);
 	dctx->buf_cur += outbuf.pos;
 
-        if (ZSTD_isError(ret))
-                return (err);
-        if (ret == 0)
-                return (done);
-        if (dctx->buf_cur < dctx->buf_end) /* Have output space */
+	if (ZSTD_isError(ret))
+		return (err);
+	if (ret == 0)
+		return (done);
+	if (dctx->buf_cur < dctx->buf_end) /* Have output space */
 		return (ok);
 
 	/*
