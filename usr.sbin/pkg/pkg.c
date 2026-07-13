@@ -28,7 +28,8 @@
  */
 
 #include <sys/param.h>
-#include <sys/jail.h>
+#include <sys/queue.h>
+#include <sys/types.h>
 #include <sys/wait.h>
 
 #include <archive.h>
@@ -40,7 +41,6 @@
 #include <fcntl.h>
 #include <fetch.h>
 #include <getopt.h>
-#include <jail.h>
 #include <libutil.h>
 #include <paths.h>
 #include <stdbool.h>
@@ -92,8 +92,6 @@ struct fingerprint {
 };
 
 static const char *bootstrap_name = "pkg.pkg";
-static const char *rootdir = NULL;
-static int rootd = -1;
 
 STAILQ_HEAD(fingerprint_list, fingerprint);
 
@@ -170,8 +168,7 @@ extract_pkg_static(int fd, char *p, int sz)
 {
 	struct archive *a;
 	struct archive_entry *ae;
-	const char *name, *end;
-	char *rname;
+	char *end;
 	int ret, r;
 
 	ret = -1;
@@ -195,22 +192,11 @@ extract_pkg_static(int fd, char *p, int sz)
 
 	ae = NULL;
 	while ((r = archive_read_next_header(a, &ae)) == ARCHIVE_OK) {
-		name = archive_entry_pathname(ae);
-		end = strrchr(name, '/');
+		end = strrchr(archive_entry_pathname(ae), '/');
 		if (end == NULL)
 			continue;
 
 		if (strcmp(end, "/pkg-static") == 0) {
-			if (rootdir) {
-				if (asprintf(&rname, "%s%s", rootdir, name) < 0)
-					err(1, NULL);
-				archive_entry_copy_pathname(ae, rname);
-				free(rname);
-			}
-			if (debug) {
-				fprintf(stderr, "extracting %s...\n",
-				    archive_entry_pathname(ae));
-			}
 			r = archive_read_extract(a, ae,
 			    ARCHIVE_EXTRACT_OWNER | ARCHIVE_EXTRACT_PERM |
 			    ARCHIVE_EXTRACT_TIME | ARCHIVE_EXTRACT_ACL |
@@ -235,56 +221,28 @@ cleanup:
 static int
 install_pkg_static(const char *path, const char *pkgpath, bool force)
 {
-	const char *argv[16];
-	int argc = 0;
 	int pstat;
 	pid_t pid;
 
-	/* assemble the command line */
-	argv[argc++] = "pkg-static";
-	if (rootdir) {
-		argv[argc++] = "-r";
-		argv[argc++] = rootdir;
-	}
-	argv[argc++] = "add";
-	if (rootdir) {
-		/*
-		 * Installing into an empty directory will normally fail
-		 * because none of the shared libraries required by pkg
-		 * are present, but pkg-static will still work and can be
-		 * used to install a packaged base, so tell pkg-static to
-		 * ignore missing dependencies.
-		 */
-		argv[argc++] = "-M";
-	}
-	if (force)
-		argv[argc++] = "-f";
-	argv[argc++] = pkgpath;
-	argv[argc] = NULL;
-	assert((size_t)argc < sizeof(argv) / sizeof(*argv));
-
-	if (debug) {
-		fprintf(stderr, "%s", path);
-		for (int i = 1; i < argc; i++)
-			fprintf(stderr, " %s", argv[i]);
-		fprintf(stderr, "\n");
-	}
-
-	/* fork and exec */
-	if ((pid = fork()) < 0)
+	switch ((pid = fork())) {
+	case -1:
 		return (-1);
-	if (pid == 0) {
-		/* child */
-		execv(path, __DECONST(char **, argv));
+	case 0:
+		if (force)
+			execl(path, "pkg-static", "add", "-f", pkgpath,
+			    (char *)NULL);
+		else
+			execl(path, "pkg-static", "add", pkgpath,
+			    (char *)NULL);
 		_exit(1);
+	default:
+		break;
 	}
 
-	/* wait for pkg-static to complete */
 	while (waitpid(pid, &pstat, 0) == -1)
 		if (errno != EINTR)
 			return (-1);
 
-	/* check the result */
 	if (WEXITSTATUS(pstat))
 		return (WEXITSTATUS(pstat));
 	else if (WIFSIGNALED(pstat))
@@ -988,7 +946,7 @@ static const char non_interactive_message[] =
 
 static const char args_bootstrap_message[] =
 "Too many arguments\n"
-"Usage: pkg [-46d] [-r rootdir] bootstrap [-f] [-y]\n";
+"Usage: pkg [-4|-6] bootstrap [-f] [-y]\n";
 
 static int
 pkg_query_yes_no(void)
@@ -1020,7 +978,7 @@ bootstrap_pkg_local(const char *pkgpath, bool force)
 	fd_sig = -1;
 	ret = -1;
 
-	fd_pkg = open(pkgpath, O_RDONLY | O_CLOEXEC);
+	fd_pkg = open(pkgpath, O_RDONLY);
 	if (fd_pkg == -1)
 		err(EXIT_FAILURE, "Unable to open %s", pkgpath);
 
@@ -1034,8 +992,7 @@ bootstrap_pkg_local(const char *pkgpath, bool force)
 
 			snprintf(path, sizeof(path), "%s.sig", pkgpath);
 
-			fd_sig = open(path, O_RDONLY | O_CLOEXEC);
-			if (fd_sig == -1) {
+			if ((fd_sig = open(path, O_RDONLY)) == -1) {
 				fprintf(stderr, "Signature for pkg not "
 				    "available.\n");
 				goto cleanup;
@@ -1048,8 +1005,7 @@ bootstrap_pkg_local(const char *pkgpath, bool force)
 
 			snprintf(path, sizeof(path), "%s.pubkeysig", pkgpath);
 
-			fd_sig = open(path, O_RDONLY | O_CLOEXEC);
-			if (fd_sig == -1) {
+			if ((fd_sig = open(path, O_RDONLY)) == -1) {
 				fprintf(stderr, "Signature for pkg not "
 				    "available.\n");
 				goto cleanup;
@@ -1119,9 +1075,9 @@ main(int argc, char *argv[])
 {
 	char pkgpath[MAXPATHLEN];
 	char **original_argv;
-	const char *localbase, *pkgarg, *repo_name;
+	const char *pkgarg, *repo_name;
 	bool activation_test, add_pkg, bootstrap_only, force, yes;
-	int ch, jid;
+	signed char ch;
 	const char *fetchOpts;
 	struct repositories *repositories;
 
@@ -1137,34 +1093,20 @@ main(int argc, char *argv[])
 
 	struct option longopts[] = {
 		{ "debug",		no_argument,		NULL,	'd' },
-		{ "jail",		required_argument,	NULL,	'j' },
 		{ "only-ipv4",		no_argument,		NULL,	'4' },
 		{ "only-ipv6",		no_argument,		NULL,	'6' },
-		{ "rootdir",		required_argument,	NULL,	'r' },
 		{ NULL,			0,			NULL,	0   },
 	};
 
-	localbase = getlocalbase();
-	while (localbase[0] == '/' && localbase[1] == '/')
-		localbase++;
-	snprintf(pkgpath, MAXPATHLEN, "%s/sbin/pkg", localbase);
+	snprintf(pkgpath, MAXPATHLEN, "%s/sbin/pkg", getlocalbase());
 
-	while ((ch = getopt_long(argc, argv, "+:djNr:46", longopts, NULL)) != -1) {
+	while ((ch = getopt_long(argc, argv, "+:dN46", longopts, NULL)) != -1) {
 		switch (ch) {
 		case 'd':
 			debug++;
 			break;
-		case 'j':
-			if ((jid = jail_getid(optarg)) == -1)
-				err(1, "%s", jail_errmsg);
-			if (jail_attach(jid) != 0)
-				err(1, "jail_attach(%s)", optarg);
-			break;
 		case 'N':
 			activation_test = true;
-			break;
-		case 'r':
-			rootdir = optarg;
 			break;
 		case '4':
 			fetchOpts = "4";
@@ -1265,14 +1207,7 @@ main(int argc, char *argv[])
 		}
 	}
 
-	if (rootdir) {
-		rootd = open(rootdir, O_DIRECTORY | O_SEARCH | O_CLOEXEC);
-		if (rootd < 0)
-			err(1, "%s", rootdir);
-	}
-
-	if ((bootstrap_only && force) ||
-	    faccessat(rootd, pkgpath + 1, X_OK, 0) == -1) {
+	if ((bootstrap_only && force) || access(pkgpath, X_OK) == -1) {
 		struct repository *repo;
 		int ret = 0;
 		/*
@@ -1324,8 +1259,7 @@ main(int argc, char *argv[])
 		if (bootstrap_only)
 			exit(EXIT_SUCCESS);
 	} else if (bootstrap_only) {
-		printf("pkg already bootstrapped at %s%s\n",
-		    rootdir ? rootdir : "", pkgpath);
+		printf("pkg already bootstrapped at %s\n", pkgpath);
 		exit(EXIT_SUCCESS);
 	}
 
