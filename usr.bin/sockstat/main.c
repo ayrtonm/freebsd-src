@@ -398,6 +398,7 @@ gather_sctp(struct proto *proto)
 			xo_err(1, "malloc()");
 		sock->socket = xinpcb->socket;
 		sock->proto = proto;
+		sock->protoname = proto->name;
 		if (xinpcb->maxqlen == 0)
 			sock->state = SCTP_CLOSED;
 		else
@@ -498,6 +499,7 @@ gather_sctp(struct proto *proto)
 					xo_err(1, "malloc()");
 				sock->socket = xinpcb->socket;
 				sock->proto = proto;
+				sock->protoname = proto->name;
 				sock->state = (int)xstcb->state;
 				if (xinpcb->flags & SCTP_PCB_FLAGS_BOUND_V6) {
 					sock->family = AF_INET6;
