@@ -132,8 +132,6 @@ in6_pcbsetport_locked(struct in6_addr *laddr, struct inpcb *inp,
 	if ((so->so_options & (SO_REUSEADDR|SO_REUSEPORT|SO_REUSEPORT_LB)) == 0)
 		lookupflags = INPLOOKUP_WILDCARD;
 
-	inp->inp_flags |= INP_ANONPORT;
-
 	error = in_pcb_lport(inp, NULL, &lport, cred, lookupflags);
 	if (error != 0)
 		return (error);
@@ -144,6 +142,8 @@ in6_pcbsetport_locked(struct in6_addr *laddr, struct inpcb *inp,
 		inp->inp_lport = 0;
 		return (EAGAIN);
 	}
+
+	inp->inp_flags |= INP_ANONPORT;
 
 	return (0);
 }
