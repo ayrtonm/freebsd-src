@@ -2160,7 +2160,8 @@ m_unshare(struct mbuf *m0, int how)
 		 * crypto operations, especially when using hardware.
 		 */
 		if ((m->m_flags & M_EXT) == 0) {
-			if (mprev && (mprev->m_flags & M_EXT) &&
+			if (mprev &&
+			    (mprev->m_flags & (M_EXT | M_EXTPG)) == M_EXT &&
 			    m->m_len <= M_TRAILINGSPACE(mprev)) {
 				/* XXX: this ignores mbuf types */
 				memcpy(mtod(mprev, caddr_t) + mprev->m_len,
@@ -2189,11 +2190,12 @@ m_unshare(struct mbuf *m0, int how)
 		 */
 		KASSERT(m->m_flags & M_EXT, ("m_flags 0x%x", m->m_flags));
 		/* NB: we only coalesce into a cluster or larger */
-		if (mprev != NULL && (mprev->m_flags & M_EXT) &&
+		if (mprev != NULL &&
+		    (mprev->m_flags & (M_EXT | M_EXTPG)) == M_EXT &&
 		    m->m_len <= M_TRAILINGSPACE(mprev)) {
 			/* XXX: this ignores mbuf types */
-			memcpy(mtod(mprev, caddr_t) + mprev->m_len,
-			    mtod(m, caddr_t), m->m_len);
+			m_copydata(m, 0, m->m_len,
+			    mtod(mprev, caddr_t) + mprev->m_len);
 			mprev->m_len += m->m_len;
 			mprev->m_next = m->m_next;	/* unlink from chain */
 			m_free(m);			/* reclaim mbuf */
@@ -2224,7 +2226,7 @@ m_unshare(struct mbuf *m0, int how)
 		mlast = NULL;
 		for (;;) {
 			int cc = min(len, MCLBYTES);
-			memcpy(mtod(n, caddr_t), mtod(m, caddr_t) + off, cc);
+			m_copydata(m, off, cc, mtod(n, caddr_t));
 			n->m_len = cc;
 			if (mlast != NULL)
 				mlast->m_next = n;
