@@ -82,7 +82,6 @@
 #include <net/rss_config.h>
 #include <net/vnet.h>
 
-#if defined(INET) || defined(INET6)
 #include <netinet/in.h>
 #include <netinet/in_pcb.h>
 #include <netinet/in_pcb_var.h>
@@ -97,9 +96,8 @@
 #include <netinet6/in6_pcb.h>
 #include <netinet6/in6_var.h>
 #include <netinet6/ip6_var.h>
-#endif /* INET6 */
-#include <net/route/nhop.h>
 #endif
+#include <net/route/nhop.h>
 
 #include <netipsec/ipsec_support.h>
 
@@ -723,7 +721,6 @@ out:
 #endif
 }
 
-#if defined(INET) || defined(INET6)
 /*
  * Assign a local port like in_pcb_lport(), but also used with connect()
  * and a foreign address and port.  If fsa is non-NULL, choose a local port
@@ -880,7 +877,6 @@ in_pcb_lport(struct inpcb *inp, struct in_addr *laddrp, u_short *lportp,
 	return (in_pcb_lport_dest(inp, laddrp ? (struct sockaddr *) &laddr :
 	    NULL, lportp, NULL, 0, cred, lookupflags));
 }
-#endif /* INET || INET6 */
 
 #ifdef INET
 /*
