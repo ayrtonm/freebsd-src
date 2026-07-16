@@ -412,7 +412,7 @@ _DP_pam+=	ypclnt
 _DP_pfctl=	nv
 _DP_pjdlog=	util
 _DP_proc=	cxxrt
-.if ${MK_CDDL} != "no"
+.if ${MK_CTF} != "no"
 _DP_proc+=	ctf
 .endif
 _DP_proc+=	elf procstat rtld_db util z
