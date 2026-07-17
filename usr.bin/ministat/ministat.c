@@ -483,7 +483,7 @@ dbl_cmp(const void *a, const void *b)
 static struct dataset *
 ReadSet(FILE *f, const char *n, int column, const char *delim)
 {
-	char buf[BUFSIZ], *p, *t;
+	char buf[BUFSIZ], *p, *t, *comma;
 	struct dataset *s;
 	double d;
 	int line;
@@ -507,10 +507,12 @@ ReadSet(FILE *f, const char *n, int column, const char *delim)
 		}
 		if (t == NULL || *t == '#')
 			continue;
-
+		if ((comma = strchr(t, ',')) != NULL)
+			*comma = '.';
 		d = strtod(t, &p);
 		if (p != NULL && *p != '\0')
-			errx(2, "Invalid data on line %d in %s", line, n);
+			errx(2, "Invalid data \"%s\" on line %d in %s",
+			    t, line, n);
 		if (*buf != '\0')
 			AddPoint(s, d);
 	}
