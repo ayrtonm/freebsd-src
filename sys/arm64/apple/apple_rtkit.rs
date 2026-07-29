@@ -35,7 +35,7 @@ use kpi::ffi::{Uninit};
 use kpi::ofw::XRef;
 use kpi::prelude::*;
 use kpi::sync::Checked;
-use kpi::{driver, proj};
+use kpi::{define_driver, proj};
 use rtkit::{PwrState, RTKit, RTKitDriver, rtkit_boot, rtkit_set_ap};
 
 const CPU_CTRL: u64 = 0x44;
@@ -76,7 +76,8 @@ impl DeviceIf for AppleRTKitDriver {
         Ok(BUS_PROBE_SPECIFIC)
     }
 
-    fn device_attach(uninit_sc: Uninit<AppleRTKitSoftc>, dev: Device) -> Result<()> {
+    fn device_attach(uninit_sc: Uninit<AppleRTKitSoftc>) -> Result<()> {
+        let dev = uninit_sc.device();
         let [asc_res, sram_res] = bus_alloc_resources(dev, SPEC).inspect_err(|e| {
             device_println!(dev, "could not allocate device resources {e}");
         })?;

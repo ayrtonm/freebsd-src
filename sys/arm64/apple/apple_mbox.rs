@@ -28,7 +28,7 @@ use kpi::ffi::{Ptr, Uninit};
 use kpi::ofw::XRef;
 use kpi::prelude::*;
 use kpi::sync::Checked;
-use kpi::{driver, proj};
+use kpi::{define_driver, proj};
 
 const MBOX_A2I_CTRL: u64 = 0x110;
 const MBOX_A2I_CTRL_FULL: u32 = 1 << 16;
@@ -94,7 +94,8 @@ impl DeviceIf for AppleMboxDriver {
         Ok(BUS_PROBE_SPECIFIC)
     }
 
-    fn device_attach(uninit_sc: Uninit<AppleMboxSoftc>, dev: Device) -> Result<()> {
+    fn device_attach(uninit_sc: Uninit<AppleMboxSoftc>) -> Result<()> {
+        let dev = uninit_sc.device();
         let node = ofw_bus_get_node(dev);
 
         let rid = ofw_bus_find_string_index(node, c"interrupt-names", c"recv-not-empty").map_err(
