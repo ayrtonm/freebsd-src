@@ -40,7 +40,7 @@ use kpi::intr::ConfigHook;
 use kpi::ofw::XRef;
 use kpi::prelude::*;
 use kpi::sync::Checked;
-use kpi::{base, driver, proj};
+use kpi::{base, define_driver, proj};
 use rtkit::{RTKitDriver, rtkit_boot, PwrState, rtkit_set_ap};
 use simplebus::{SimpleBusDriver, SimpleBusSoftc};
 
@@ -104,7 +104,8 @@ impl DeviceIf for AppleSmcDriver {
         return Ok(BUS_PROBE_DEFAULT);
     }
 
-    fn device_attach(uninit_sc: Uninit<AppleSmcSoftc>, dev: Device) -> Result<()> {
+    fn device_attach(uninit_sc: Uninit<AppleSmcSoftc>) -> Result<()> {
+        let dev = uninit_sc.device();
         let mut rtk = Self::new_rtkit(dev)
             .inspect_err(|e| device_println!(dev, "failed to create RTKit {e}"))?;
 
