@@ -24,7 +24,7 @@ use kpi::bindings::device_t;
 use kpi::bus::{Irq, Register};
 use kpi::device::{BusProbe, DeviceIf, Device};
 use core::pin::Pin;
-use kpi::ffi::{Ptr, UninitRef};
+use kpi::ffi::{Ptr, Uninit};
 use kpi::ofw::XRef;
 use kpi::prelude::*;
 use kpi::sync::Checked;
@@ -94,7 +94,7 @@ impl DeviceIf for AppleMboxDriver {
         Ok(BUS_PROBE_SPECIFIC)
     }
 
-    fn device_attach(uninit_sc: UninitRef<AppleMboxSoftc>, dev: Device) -> Result<()> {
+    fn device_attach(uninit_sc: Uninit<AppleMboxSoftc>, dev: Device) -> Result<()> {
         let node = ofw_bus_get_node(dev);
 
         let rid = ofw_bus_find_string_index(node, c"interrupt-names", c"recv-not-empty").map_err(
@@ -221,9 +221,12 @@ impl AppleMboxDriver {
     }
 }
 
-driver!(apple_mbox_driver, c"mbox", AppleMboxDriver,
-    apple_mbox_methods = {
-        device_probe apple_mbox_probe,
-        device_attach apple_mbox_attach,
+define_driver!(
+    static apple_mbox_driver: AppleMboxDriver = {
+        name: c"mbox",
+    }
+    static apple_mbox_methods = {
+        device_probe: apple_mbox_probe,
+        device_attach: apple_mbox_attach,
     }
 );

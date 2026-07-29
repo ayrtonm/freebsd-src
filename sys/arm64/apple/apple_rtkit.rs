@@ -31,7 +31,7 @@
 use kpi::bindings::device_t;
 use kpi::bus::{Register, ResourceSpec};
 use kpi::device::{BusProbe, DeviceIf, Device};
-use kpi::ffi::{UninitRef};
+use kpi::ffi::{Uninit};
 use kpi::ofw::XRef;
 use kpi::prelude::*;
 use kpi::sync::Checked;
@@ -76,7 +76,7 @@ impl DeviceIf for AppleRTKitDriver {
         Ok(BUS_PROBE_SPECIFIC)
     }
 
-    fn device_attach(uninit_sc: UninitRef<AppleRTKitSoftc>, dev: Device) -> Result<()> {
+    fn device_attach(uninit_sc: Uninit<AppleRTKitSoftc>, dev: Device) -> Result<()> {
         let [asc_res, sram_res] = bus_alloc_resources(dev, SPEC).inspect_err(|e| {
             device_println!(dev, "could not allocate device resources {e}");
         })?;
@@ -130,9 +130,12 @@ impl AppleRTKitDriver {
     }
 }
 
-driver!(apple_rtkit_driver, c"apple_rtkit", AppleRTKitDriver,
-    apple_rtkit_methods = {
-        device_probe apple_rtkit_probe,
-        device_attach apple_rtkit_attach,
+define_driver!(
+    static apple_rtkit_driver: AppleRTKitDriver = {
+        name: c"apple_rtkit",
+    }
+    static apple_rtkit_methods = {
+        device_probe: apple_rtkit_probe,
+        device_attach: apple_rtkit_attach,
     }
 );
