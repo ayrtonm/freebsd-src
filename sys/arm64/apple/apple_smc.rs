@@ -34,7 +34,7 @@ use kpi::bindings::{SB_FLAG_NO_RANGES, bus_size_t, bus_space_handle_t, device_t,
 use kpi::bus::Register;
 use kpi::device::{BusProbe, DeviceIf, Device};
 use kpi::driver::Driver;
-use kpi::ffi::{SubClass, UninitRef};
+use kpi::ffi::{SubClass, Uninit};
 use core::pin::Pin;
 use kpi::intr::ConfigHook;
 use kpi::ofw::XRef;
@@ -104,7 +104,7 @@ impl DeviceIf for AppleSmcDriver {
         return Ok(BUS_PROBE_DEFAULT);
     }
 
-    fn device_attach(uninit_sc: UninitRef<AppleSmcSoftc>, dev: Device) -> Result<()> {
+    fn device_attach(uninit_sc: Uninit<AppleSmcSoftc>, dev: Device) -> Result<()> {
         let mut rtk = Self::new_rtkit(dev)
             .inspect_err(|e| device_println!(dev, "failed to create RTKit {e}"))?;
 
@@ -312,13 +312,16 @@ macro_rules! gpio_pin_set {
     (get_desc) => { gpio_pin_set_desc };
 }
 
-driver!(apple_smc_driver, c"apple_smc", AppleSmcDriver,
-    apple_smc_methods = {
-        device_probe apple_smc_probe,
-        device_attach apple_smc_attach,
+define_driver!(
+    static apple_smc_driver: AppleSmcDriver = {
+        name: c"apple_smc",
+    }
+    static apple_smc_methods = {
+        device_probe: apple_smc_probe,
+        device_attach: apple_smc_attach,
 
-        gpio_get_bus apple_smc_get_bus defined in C,
-        gpio_pin_set apple_smc_pin_set defined in C,
+        gpio_get_bus: apple_smc_get_bus defined in C,
+        gpio_pin_set: apple_smc_pin_set defined in C,
     },
     inherit from simplebus_driver,
 );

@@ -38,7 +38,7 @@ use kpi::bus::{Filter, Register, Resource};
 use kpi::device::{BusProbe, DeviceIf, Device};
 use core::pin::Pin;
 use kpi::proj;
-use kpi::ffi::{ToArrayCString, UninitRef};
+use kpi::ffi::{ToArrayCString, Uninit};
 use kpi::intr::{IntrRoot, IrqSrc, MapData, PicIf};
 use kpi::ofw::OfwCompatData;
 use kpi::prelude::*;
@@ -305,7 +305,7 @@ impl DeviceIf for AppleIntDriver {
         return Ok(BUS_PROBE_DEFAULT);
     }
 
-    fn device_attach(uninit_sc: UninitRef<AppleIntSoftc>, dev: Device) -> Result<()> {
+    fn device_attach(uninit_sc: Uninit<AppleIntSoftc>, dev: Device) -> Result<()> {
         // Can't fail since it must have been called successfully in device_probe
         let cfg = ofw_bus_search_compatible(dev, &COMPAT_DATA).unwrap();
 
@@ -804,27 +804,30 @@ impl PicIf for AppleIntDriver {
         }
     }
 }
-driver!(apple_aic_driver, c"aic", AppleIntDriver,
-    apple_aic_methods = {
+define_driver!(
+    static apple_aic_driver: AppleIntDriver = {
+        name: c"aic",
+    }
+    static apple_aic_methods = {
         /* device_t interface */
-        device_probe apple_aic_probe,
-        device_attach apple_aic_attach,
+        device_probe: apple_aic_probe,
+        device_attach: apple_aic_attach,
 
         /* Interrupt controller interface */
-        pic_disable_intr apple_aic_disable_intr,
-        pic_enable_intr apple_aic_enable_intr,
-        pic_map_intr apple_aic_map_intr,
-        pic_setup_intr apple_aic_setup_intr,
-        pic_teardown_intr apple_aic_teardown_intr,
-        pic_post_filter apple_aic_post_filter,
-        pic_post_ithread apple_aic_post_ithread,
-        pic_pre_ithread apple_aic_pre_ithread,
+        pic_disable_intr: apple_aic_disable_intr,
+        pic_enable_intr: apple_aic_enable_intr,
+        pic_map_intr: apple_aic_map_intr,
+        pic_setup_intr: apple_aic_setup_intr,
+        pic_teardown_intr: apple_aic_teardown_intr,
+        pic_post_filter: apple_aic_post_filter,
+        pic_post_ithread: apple_aic_post_ithread,
+        pic_pre_ithread: apple_aic_pre_ithread,
 
         /* TODO: #ifdef SMP */
-        pic_bind_intr apple_aic_bind_intr,
-        pic_init_secondary apple_aic_init_secondary,
+        pic_bind_intr: apple_aic_bind_intr,
+        pic_init_secondary: apple_aic_init_secondary,
 
-        pic_ipi_setup apple_aic_ipi_setup,
-        pic_ipi_send apple_aic_ipi_send,
+        pic_ipi_setup: apple_aic_ipi_setup,
+        pic_ipi_send: apple_aic_ipi_send,
     }
 );
