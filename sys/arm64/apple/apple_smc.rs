@@ -41,7 +41,7 @@ use kpi::ofw::XRef;
 use kpi::prelude::*;
 use kpi::sync::Checked;
 use kpi::{base, define_driver, proj};
-use rtkit::{RTKitDriver, rtkit_boot, PwrState, rtkit_set_ap};
+use rtkit::{rtkit_boot, PwrState, rtkit_set_ap};
 use simplebus::{SimpleBusDriver, SimpleBusSoftc};
 
 use apple_mbox::AppleMboxMsg;
@@ -75,17 +75,12 @@ pub type AppleSmcSoftc = SimpleBusSoftc<AppleSmcSoftcFields>;
 
 #[derive(Debug)]
 pub struct AppleSmcSoftcFields {
-    dev: Device,
     gpiobus: Checked<Option<Device>>,
     sram: Checked<Register>,
     rtk: RTKit<AppleSmcSoftc>,
     config_hook: ConfigHook,
     msgid: AtomicU8,
     data: AtomicU64,
-}
-
-impl RTKitDriver for AppleSmcDriver {
-    type CallbackArg = AppleSmcSoftc;
 }
 
 impl SimpleBusDriver for AppleSmcDriver {}
@@ -120,7 +115,6 @@ impl DeviceIf for AppleSmcDriver {
         )?)?;
 
         let smc_sc = AppleSmcSoftcFields {
-            dev,
             gpiobus: Checked::new(None),
             sram: Checked::new(sram),
             rtk,
@@ -130,7 +124,7 @@ impl DeviceIf for AppleSmcDriver {
         };
         let sc = uninit_sc.init(SubClass::new(smc_sc));
         proj!(&sc.config_hook).init(start_config_hook, sc);
-        let dev = sc.dev;
+        let dev = sc.device();
 
         let res = Self::simplebus_attach(dev, |simplebus_sc| {
             simplebus_sc.dev = dev.as_ptr();
@@ -323,6 +317,6 @@ define_driver!(
 
         gpio_get_bus: apple_smc_get_bus defined in C,
         gpio_pin_set: apple_smc_pin_set defined in C,
-    },
+    }
     inherit from simplebus_driver,
 );

@@ -53,7 +53,7 @@ use kpi::bindings::{
 use kpi::bus::dma::{BusDmaMap, BusDmaMem, BusDmaTag};
 use kpi::bus::{Register, Resource};
 use kpi::device::{BusProbe, DeviceIf, Device};
-use kpi::ffi::{Ptr, SubClass, UninitRef};
+use kpi::ffi::{Ptr, SubClass, Uninit, Loan, Lease};
 use kpi::kobj::AsRustType;
 use kpi::ofw::XRef;
 use kpi::prelude::*;
@@ -62,7 +62,7 @@ use kpi::sync::Checked;
 use kpi::{base, driver, proj};
 use nvme::prelude::*;
 use nvme::{NvmeIf, NvmeSoftc};
-use rtkit::{RTKit, RTKitDriver, rtkit_boot, PwrState, rtkit_set_ap};
+use rtkit::{RTKit, rtkit_boot, PwrState, rtkit_set_ap};
 
 const ANS_CPU_CTRL: u64 = 0x0044;
 const ANS_CPU_CTRL_RUN: u32 = 1 << 4;
@@ -136,16 +136,11 @@ fn nvme_ans_sart_map(sc: &NvmeAnsSoftc, addr: bus_addr_t, size: bus_size_t) {
 pub type NvmeAnsSoftc = NvmeSoftc<NvmeAnsSoftcFields>;
 
 pub struct NvmeAnsSoftcFields {
-    dev: Device,
     ans: Checked<Register>,
     sart: XRef,
     rtk: RTKit<NvmeAnsSoftc>,
     adminq: Checked<NvmeAnsQpair>,
     ioq: Checked<NvmeAnsQpair>,
-}
-
-impl RTKitDriver for NvmeAnsDriver {
-    type CallbackArg = Self::Softc;
 }
 
 impl DeviceIf for NvmeAnsDriver {
@@ -162,7 +157,8 @@ impl DeviceIf for NvmeAnsDriver {
         Ok(BUS_PROBE_DEFAULT)
     }
 
-    fn device_attach(uninit_sc: UninitRef<NvmeAnsSoftc>, dev: Device) -> Result<()> {
+    fn device_attach(uninit_sc: Uninit<NvmeAnsSoftc>) -> Result<()> {
+        let dev = uninit_sc.device();
         let node = ofw_bus_get_node(dev);
         let ans_id = ofw_bus_find_string_index(node, c"reg-names", c"ans").map_err(|e| {
             device_println!(dev, "couldn't find 'ans' reg {e}");
@@ -197,13 +193,13 @@ impl DeviceIf for NvmeAnsDriver {
 
         // At this point `sc` is a just local variable on the stack that usually gets optimized out
         let sc = NvmeAnsSoftcFields {
-            dev,
             ans,
             sart,
             rtk,
             adminq,
             ioq,
         };
+        let dev = sc.device();
 
         // Only specify the subclass part of the softc here since the base class could overflow the
         // stack if a temporary is constructed on the stack. The base class on the heap is
@@ -275,8 +271,8 @@ impl DeviceIf for NvmeAnsDriver {
 }
 
 impl NvmeIf for NvmeAnsDriver {
-    fn nvme_delayed_attach(sc: Pin<&NvmeAnsSoftc>, ctrlr: &mut nvme_controller) {
-        let dev = sc.dev;
+    fn nvme_delayed_attach(sc: Loan<NvmeAnsSoftc>, ctrlr: &mut nvme_controller) {
+        let dev = sc.device();
 
         // The ANS register isn't accessed anywhere else so this Checked access can't panic
         let mut ans = sc.ans.get_mut();
@@ -332,7 +328,7 @@ impl NvmeIf for NvmeAnsDriver {
         bus_write_4!(nvme_reg, ANS_UNKNOWN_CTRL, ctrl & !ANS_PRP_NULL_CHECK);
     }
 
-    fn nvme_enable(sc: Pin<&NvmeAnsSoftc>) {
+    fn nvme_enable(sc: Loan<NvmeAnsSoftc>) {
         // SAFETY: The res field is initialized once and no thread should be using the register at
         // this point.
         let mut nvme_reg = unsafe { Register::from_raw(base!(sc->resource)).unwrap() };
@@ -344,12 +340,12 @@ impl NvmeIf for NvmeAnsDriver {
         bus_write_4!(nvme_reg, ANS_MODESEL_REG, 0);
     }
 
-    fn nvme_sq_enter(sc: Pin<&NvmeAnsSoftc>, qpair: *mut nvme_qpair, tr: &nvme_tracker) -> u32 {
+    fn nvme_sq_enter(sc: Loan<NvmeAnsSoftc>, qpair: *mut nvme_qpair, tr: &nvme_tracker) -> u32 {
         let res = unsafe { (*tr.req).cmd.cid };
         u32::from(res)
     }
 
-    fn nvme_sq_leave(sc: Pin<&NvmeAnsSoftc>, qpair: &nvme_qpair, tr: &nvme_tracker) {
+    fn nvme_sq_leave(sc: Loan<NvmeAnsSoftc>, qpair: &nvme_qpair, tr: &nvme_tracker) {
         let ans_qpair = match qpair.id {
             0 => &sc.adminq,
             _ => &sc.ioq,
@@ -398,7 +394,7 @@ impl NvmeIf for NvmeAnsDriver {
     }
 
     fn nvme_qpair_construct(
-        sc: Pin<&NvmeAnsSoftc>,
+        sc: Loan<&vmeAnsSoftc>,
         qpair: *mut nvme_qpair,
         num_entries: u32,
         num_trackers: u32,
@@ -423,7 +419,7 @@ impl NvmeIf for NvmeAnsDriver {
         Ok(())
     }
 
-    fn nvme_cq_done(sc: Pin<&NvmeAnsSoftc>, qpair: &nvme_qpair, tr: &nvme_tracker) {
+    fn nvme_cq_done(sc: Loan<NvmeAnsSoftc>, qpair: &nvme_qpair, tr: &nvme_tracker) {
         let id = unsafe { (*tr.req).cmd.cid };
         let ans_qpair = if qpair.id == 0 {
             &*sc.adminq.get_mut()
@@ -453,7 +449,7 @@ impl NvmeIf for NvmeAnsDriver {
 }
 
 fn nvme_ans_alloc_qpair(
-    sc: Pin<&NvmeAnsSoftc>,
+    sc: Loan<NvmeAnsSoftc>,
     id: u32,
     qpair: Pin<&Checked<NvmeAnsQpair>>,
 ) -> Result<()> {

@@ -32,7 +32,7 @@ use core::pin::Pin;
 use core::ffi::{c_void, c_int};
 use kpi::bindings::{device_t, nvme_controller, nvme_qpair, nvme_tracker};
 use kpi::device::{DeviceIf, Device};
-use kpi::ffi::{SubClass, SubClassOf};
+use kpi::ffi::{SubClass, SubClassOf, Loan};
 use kpi::driver::Driver;
 use kpi::prelude::*;
 use kpi::{ErrCode, base, define_interface};
@@ -82,23 +82,23 @@ pub trait NvmeIf: DeviceIf
 where
     <Self as DeviceIf>::Softc: SubClassOf<nvme_controller>,
 {
-    fn nvme_delayed_attach(sc: Pin<&Self::Softc>, ctrlr: &mut nvme_controller) {
+    fn nvme_delayed_attach(sc: Loan<Self::Softc>, ctrlr: &mut nvme_controller) {
         unimplemented!()
     }
-    fn nvme_enable(sc: Pin<&Self::Softc>) {
+    fn nvme_enable(sc: Loan<Self::Softc>) {
         unimplemented!()
     }
-    fn nvme_sq_enter(sc: Pin<&Self::Softc>, qpair: *mut nvme_qpair, tr: &nvme_tracker) -> u32 {
+    fn nvme_sq_enter(sc: Loan<Self::Softc>, qpair: *mut nvme_qpair, tr: &nvme_tracker) -> u32 {
         unimplemented!()
     }
-    fn nvme_sq_leave(sc: Pin<&Self::Softc>, qpair: &nvme_qpair, tr: &nvme_tracker) {
+    fn nvme_sq_leave(sc: Loan<Self::Softc>, qpair: &nvme_qpair, tr: &nvme_tracker) {
         unimplemented!()
     }
-    fn nvme_cq_done(sc: Pin<&Self::Softc>, qpair: &nvme_qpair, tr: &nvme_tracker) {
+    fn nvme_cq_done(sc: Loan<Self::Softc>, qpair: &nvme_qpair, tr: &nvme_tracker) {
         unimplemented!()
     }
     fn nvme_qpair_construct(
-        sc: Pin<&Self::Softc>,
+        sc: Loan<Self::Softc>,
         qpair: *mut nvme_qpair,
         num_entries: u32,
         num_trackers: u32,
