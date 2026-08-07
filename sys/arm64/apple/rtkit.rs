@@ -17,15 +17,15 @@
 
 #![no_std]
 
-use apple_mbox::{AppleMboxDriver, AppleMboxMsg, MboxDevice};
+use apple_mbox::{AppleMboxDriver, AppleMboxMsg, MboxDevice, apple_mbox_get_dev, apple_mbox_set_rx};
 use core::pin::Pin;
 use core::ffi::c_void;
 use core::mem::transmute;
 use core::sync::atomic::{AtomicU16, AtomicU64, Ordering};
-use kpi::bindings::{bus_addr_t, bus_dma_segment_t, bus_size_t};
+use kpi::bindings::{device_t, bus_addr_t, bus_dma_segment_t, bus_size_t};
 use kpi::bus::dma::{BusDmaMap, BusDmaMem, BusDmaTag};
 use kpi::device::{DeviceIf, Device};
-use kpi::ffi::{ArrayCString, Ptr};
+use kpi::ffi::{ArrayCString, Ptr, Loan};
 use kpi::proj;
 use kpi::prelude::*;
 use kpi::sync::mtx::SpinLock;
@@ -289,7 +289,11 @@ type RTKitMapCallback<T> = fn(&T, bus_addr_t, bus_size_t);
 
 #[derive(Debug)]
 pub struct RTKit<T = ()> {
-    client: Device,
+    // Mainly used for logging after getting the mailbox so don't bother trying to attach a lifetime
+    // to this. It would be problematic anyway since the RTKit struct is embedded in the client
+    // softc.
+    client: device_t,
+    // A Device with the lifetime 'static. This is allowed since the mailbox cannot be detached
     mbox: MboxDevice,
     pub verbose: bool,
     pub no_alloc: bool,
@@ -307,13 +311,17 @@ pub struct RTKit<T = ()> {
     ep_callback: OnceInit<(RTKitTaskCallback<T>, Endpoint)>,
 }
 
+pub fn rtkit_new<D: RTKitDriver>(client: Device, driver: &'static D) -> Result<RTKit<D::CallbackArg>> {
+    todo!("")
+}
+
 pub trait RTKitDriver: DeviceIf {
     type CallbackArg;
 
     fn new_rtkit(client: Device) -> Result<RTKit<Self::CallbackArg>> {
-        let mbox = AppleMboxDriver::get_mbox(client)?;
+        let mbox = apple_mbox_get_dev(client)?;
         Ok(RTKit {
-            client,
+            client: client.as_ptr(),
             mbox,
             verbose: false,
             no_alloc: false,
@@ -370,7 +378,7 @@ impl<T> RTKit<T> {
     
         mtx_init(proj!(&self.msgs), c"rtk lock", None, None);
         proj!(&self.task).init(rx_task, self);
-        AppleMboxDriver::set_rx(self.mbox, rx_callback, self)?;
+        apple_mbox_set_rx(self.mbox, rx_callback, self)?;
         Ok(())
     }
 }
@@ -411,7 +419,7 @@ pub fn rtkit_set_ap<T>(rtk: &RTKit<T>, pwr_state: PwrState) -> Result<()> {
     Ok(())
 }
 
-fn handle_mgmt<T>(rtk: Pin<&RTKit<T>>, data0: u64) -> Result<()> {
+fn handle_mgmt<T>(rtk: Loan<RTKit<T>>, data0: u64) -> Result<()> {
     let msg = MgmtRxMsg::new(data0)?;
     if rtk.verbose {
         device_println!(rtk.client, "recv'd msg from rtkit {msg:x?}");
@@ -479,7 +487,7 @@ fn handle_mgmt<T>(rtk: Pin<&RTKit<T>>, data0: u64) -> Result<()> {
     Ok(())
 }
 
-fn handle_ioreport<T>(rtk: Pin<&RTKit<T>>, data0: u64) -> Result<()> {
+fn handle_ioreport<T>(rtk: Loan<RTKit<T>>, data0: u64) -> Result<()> {
     const IOREPORT_UNKNOWN1: u8 = 8;
     const IOREPORT_UNKNOWN2: u8 = 12;
     let msg_ty = mgmt_msg_type(data0);
@@ -504,7 +512,7 @@ fn handle_ioreport<T>(rtk: Pin<&RTKit<T>>, data0: u64) -> Result<()> {
     Ok(())
 }
 
-fn handle_crashlog<T>(rtk: Pin<&RTKit<T>>, data0: u64) -> Result<()> {
+fn handle_crashlog<T>(rtk: Loan<RTKit<T>>, data0: u64) -> Result<()> {
     let msg_ty = mgmt_msg_type(data0);
     if msg_ty != BUFFER_REQUEST {
         device_println!(
@@ -521,7 +529,7 @@ fn handle_crashlog<T>(rtk: Pin<&RTKit<T>>, data0: u64) -> Result<()> {
     Ok(())
 }
 
-fn handle_oslog<T>(rtk: Pin<&RTKit<T>>, data0: u64) -> Result<()> {
+fn handle_oslog<T>(rtk: Loan<RTKit<T>>, data0: u64) -> Result<()> {
     const OSLOG_UNKNOWN1: u8 = 3;
     const OSLOG_UNKNOWN2: u8 = 4;
     const OSLOG_UNKNOWN3: u8 = 5;
@@ -550,7 +558,7 @@ fn handle_oslog<T>(rtk: Pin<&RTKit<T>>, data0: u64) -> Result<()> {
     Ok(())
 }
 
-fn handle_syslog<T>(rtk: Pin<&RTKit<T>>, data0: u64) -> Result<()> {
+fn handle_syslog<T>(rtk: Loan<RTKit<T>>, data0: u64) -> Result<()> {
     const SYSLOG_INIT: u8 = 8;
     const SYSLOG_LOG: u8 = 5;
     let msg_ty = mgmt_msg_type(data0);
@@ -580,7 +588,7 @@ fn handle_syslog<T>(rtk: Pin<&RTKit<T>>, data0: u64) -> Result<()> {
 }
 
 fn handle_buffer_req<T>(
-    rtk: Pin<&RTKit<T>>,
+    rtk: Loan<RTKit<T>>,
     ep: Endpoint,
     data0: u64,
     buffer: Pin<&Checked<RTKitBuffer<T>>>,
@@ -628,7 +636,7 @@ fn handle_buffer_req<T>(
 }
 
 fn rtkit_alloc<T>(
-    rtk: Pin<&RTKit<T>>,
+    rtk: Loan<RTKit<T>>,
     req_size: bus_size_t,
     buffer: Pin<&Checked<RTKitBuffer<T>>>,
 ) -> Result<bus_addr_t> {
@@ -707,7 +715,7 @@ extern "C" fn rtkit_dmamap_cb<T>(
     }
 }
 
-extern "C" fn rx_callback<T>(rtk: Pin<&RTKit<T>>, msg: AppleMboxMsg) {
+extern "C" fn rx_callback<T>(rtk: Loan<RTKit<T>>, msg: AppleMboxMsg) {
     try_rx_callback(rtk, msg)
         .inspect_err(|e| {
             device_println!(rtk.client, "callback failed {e}");
@@ -715,7 +723,7 @@ extern "C" fn rx_callback<T>(rtk: Pin<&RTKit<T>>, msg: AppleMboxMsg) {
         .unwrap();
 }
 
-fn try_rx_callback<T>(rtk: Pin<&RTKit<T>>, msg: AppleMboxMsg) -> Result<()> {
+fn try_rx_callback<T>(rtk: Loan<RTKit<T>>, msg: AppleMboxMsg) -> Result<()> {
     rmb!();
     mtx_lock_spin(&rtk.msgs).push_back(msg);
     if rtk.verbose {
@@ -725,7 +733,7 @@ fn try_rx_callback<T>(rtk: Pin<&RTKit<T>>, msg: AppleMboxMsg) -> Result<()> {
     Ok(())
 }
 
-extern "C" fn rx_task<T>(rtk: Pin<&RTKit<T>>, pending: u32) {
+extern "C" fn rx_task<T>(rtk: Loan<RTKit<T>>, pending: u32) {
     try_rx_task(rtk, pending)
         .inspect_err(|e| {
             device_println!(rtk.client, "task fn failed {e}");
@@ -733,7 +741,7 @@ extern "C" fn rx_task<T>(rtk: Pin<&RTKit<T>>, pending: u32) {
         .unwrap();
 }
 
-fn try_rx_task<T>(rtk: Pin<&RTKit<T>>, pending: u32) -> Result<()> {
+fn try_rx_task<T>(rtk: Loan<RTKit<T>>, pending: u32) -> Result<()> {
     for _ in 0..pending {
         let msg = mtx_lock_spin(&rtk.msgs).pop_front().unwrap();
         let ep = msg.data1;

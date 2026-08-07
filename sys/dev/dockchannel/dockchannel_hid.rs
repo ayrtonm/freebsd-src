@@ -41,7 +41,7 @@ use kpi::bindings::{device_t, hid_device_info, hid_intr_t, hid_rdesc_info, hid_s
 use kpi::boxed::{Box, LinkedList};
 use kpi::bus::{Filter, Irq, Register, Resource, SysRes};
 use kpi::device::{BusProbe, DeviceIf, Device};
-use kpi::ffi::{ArrayCString, Ptr, UninitRef};
+use kpi::ffi::{ArrayCString, Ptr, Uninit, Loan};
 use kpi::intr::ConfigHook;
 use kpi::ofw::{Node, XRef};
 use kpi::prelude::*;
@@ -50,7 +50,7 @@ use kpi::sync::{Checked, OnceInit};
 use kpi::taskqueue::{Task, Taskqueue};
 use core::pin::Pin;
 use kpi::vec::Vec;
-use kpi::{ErrCode, driver, proj};
+use kpi::{ErrCode, define_driver, proj};
 
 const CONFIG_TX_THRESH: u64 = 0;
 const CONFIG_RX_THRESH: u64 = 0x4;
@@ -278,7 +278,6 @@ struct DockchannelHidRegister {
 
 #[derive(Debug)]
 pub struct DockchannelHidSoftc {
-    dev: Device,
     node: Node,
     mtp: XRef,
     fifo_size: u32,
@@ -336,7 +335,8 @@ impl DeviceIf for DockchannelHidDriver {
         Ok(BUS_PROBE_DEFAULT)
     }
 
-    fn device_attach(uninit_sc: UninitRef<DockchannelHidSoftc>, dev: Device) -> Result<()> {
+    fn device_attach(uninit_sc: Uninit<DockchannelHidSoftc>) -> Result<()> {
+        let dev = uninit_sc.device();
         let node = ofw_bus_get_node(dev);
         let mtp = unsafe {
             OF_getencprop_unchecked::<XRef>(node, c"apple,helper-cpu").map_err(|e| {
@@ -358,7 +358,6 @@ impl DeviceIf for DockchannelHidDriver {
         let queue = Taskqueue::new();
 
         let sc = uninit_sc.init(DockchannelHidSoftc {
-            dev,
             node,
             mtp,
             fifo_size,
@@ -435,7 +434,7 @@ impl DockchannelHidDriver {
             INTR_MPSAFE.0 | INTR_TYPE_MISC.0,
             Some(dockchannel_hid_rx_filter),
             None,
-            sc,
+            sc.lease(),
         )
         .inspect_err(|e| {
             device_println!(dev, "couldn't set up rx irq {e}");
@@ -447,7 +446,7 @@ impl DockchannelHidDriver {
             INTR_MPSAFE.0 | INTR_TYPE_MISC.0,
             Some(dockchannel_hid_tx_filter),
             None,
-            sc,
+            sc.lease(),
         )
         .inspect_err(|e| {
             device_println!(dev, "couldn't set up tx irq {e}");
@@ -459,7 +458,7 @@ impl DockchannelHidDriver {
     }
 }
 
-extern "C" fn dockchannel_hid_rx_filter(sc: Pin<&DockchannelHidSoftc>) -> Filter {
+extern "C" fn dockchannel_hid_rx_filter(sc: Loan<DockchannelHidSoftc>) -> Filter {
     DockchannelDriver::mask_rx(sc.dev);
     if !sc.rx_avail.load(Ordering::Relaxed) {
         sc.rx_avail.store(true, Ordering::Relaxed);
@@ -472,14 +471,14 @@ extern "C" fn dockchannel_hid_rx_filter(sc: Pin<&DockchannelHidSoftc>) -> Filter
     FILTER_HANDLED
 }
 
-extern "C" fn dockchannel_hid_tx_filter(sc: Pin<&DockchannelHidSoftc>) -> Filter {
+extern "C" fn dockchannel_hid_tx_filter(sc: Loan<DockchannelHidSoftc>) -> Filter {
     DockchannelDriver::mask_tx(sc.dev);
     sc.tx_avail.store(true, Ordering::Relaxed);
     wakeup(&sc.tx_avail);
     FILTER_HANDLED
 }
 
-extern "C" fn dockchannel_hid_task(sc: Pin<&DockchannelHidSoftc>, pending: u32) {
+extern "C" fn dockchannel_hid_task(sc: Loan<DockchannelHidSoftc>, pending: u32) {
     try_dockchannel_hid_task(sc).unwrap();
 }
 
@@ -1154,23 +1153,25 @@ impl HidIf for DockchannelHidDriver {
     }
 }
 
-driver! {
-    dockchannel_hid_driver, c"dockchannel_hid", DockchannelHidDriver,
-    dockchannel_hid_method_table = {
-        device_probe dockchannel_hid_probe,
-        device_attach dockchannel_hid_attach,
+define_driver! {
+    static dockchannel_hid_driver: DockchannelHidDriver = {
+        name: c"dockchannel_hid",
+    }
+    static dockchannel_hid_method_table = {
+        device_probe: dockchannel_hid_probe,
+        device_attach: dockchannel_hid_attach,
 
         /* HID interrupt interface */
-        hid_intr_setup dockchannel_hid_intr_setup,
-        hid_intr_unsetup dockchannel_hid_intr_unsetup,
-        hid_intr_start dockchannel_hid_intr_start,
-        hid_intr_stop dockchannel_hid_intr_stop,
-        hid_intr_poll dockchannel_hid_intr_poll,
+        hid_intr_setup: dockchannel_hid_intr_setup,
+        hid_intr_unsetup: dockchannel_hid_intr_unsetup,
+        hid_intr_start: dockchannel_hid_intr_start,
+        hid_intr_stop: dockchannel_hid_intr_stop,
+        hid_intr_poll: dockchannel_hid_intr_poll,
 
         /* HID interface */
-        hid_get_rdesc dockchannel_hid_get_rdesc,
-        hid_get_report dockchannel_hid_get_report,
-        hid_set_report dockchannel_hid_set_report,
+        hid_get_rdesc: dockchannel_hid_get_rdesc,
+        hid_get_report: dockchannel_hid_get_report,
+        hid_set_report: dockchannel_hid_set_report,
     }
     // Required to use interfaces defined outside the KPI crate
     with interfaces from { hid };
