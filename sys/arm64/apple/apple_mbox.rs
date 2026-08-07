@@ -24,7 +24,7 @@ use kpi::bindings::device_t;
 use kpi::bus::{Irq, Register};
 use kpi::device::{BusProbe, DeviceIf, Device};
 use core::pin::Pin;
-use kpi::ffi::{Ptr, Uninit};
+use kpi::ffi::{Ptr, Uninit, Loan, Lease};
 use kpi::ofw::XRef;
 use kpi::prelude::*;
 use kpi::sync::Checked;
@@ -42,8 +42,9 @@ const MBOX_A2I_SEND1: u64 = 0x808;
 const MBOX_I2A_RECV0: u64 = 0x830;
 const MBOX_I2A_RECV1: u64 = 0x838;
 
+// Only for some mild type-safety
 #[derive(Debug, Copy, Clone)]
-pub struct MboxDevice(Device);
+pub struct MboxDevice(Device<'static>);
 
 // This needs repr(C) while it appears in an extern "C" function signature
 #[repr(C)]
@@ -53,12 +54,14 @@ pub struct AppleMboxMsg {
     pub data1: u32,
 }
 
-pub type AppleMboxRx<T> = extern "C" fn(Pin<&T>, AppleMboxMsg);
+// These two type aliases must be kept ABI-compatible to justify the function transmute below.
+// TODO: Find some way to avoid storing the *mut c_void for each client softc in the mbox. This
+// would allow removing this cursed transmute.
+pub type AppleMboxRx<T> = extern "C" fn(Loan<T>, AppleMboxMsg);
 type RawAppleMboxRx = extern "C" fn(*mut c_void, AppleMboxMsg);
 
 #[derive(Debug)]
 pub struct AppleMboxSoftc {
-    dev: Device,
     irq: Irq,
     intr_ctx: Checked<IntrCtx>,
     write_msg: Checked<WriteMsg>,
@@ -149,11 +152,12 @@ impl DeviceIf for AppleMboxDriver {
 
         let write_msg = Checked::new(WriteMsg { a2i_ctrl, a2i_send });
 
+        // Register the device with the xref for its devicetree node. Clients devices will have an
+        // mbox property in their devicetree nodes which is a xref to their corresponding mailbox.
         let xref = OF_xref_from_node(node);
         OF_device_register_xref(xref, dev);
 
         uninit_sc.init(AppleMboxSoftc {
-            dev,
             irq,
             intr_ctx,
             write_msg,
@@ -162,43 +166,69 @@ impl DeviceIf for AppleMboxDriver {
     }
 }
 
+// Get a mailbox device_t from the client's mboxes devicetree property. The mailbox must've
+// previously registered its devicetree node xref which happens when this driver attaches.
+pub fn apple_mbox_get_dev(client: Device) -> Result<MboxDevice> {
+    let client_node = ofw_bus_get_node(client);
+
+    // SAFETY: This devicetree property is a u32 which is intended to be interpreted as an XRef
+    let mbox_xref = unsafe { OF_getencprop_unchecked::<XRef>(client_node, c"mboxes")? };
+
+    let mbox_dev_ptr = OF_device_from_xref(mbox_xref)?;
+
+    // SAFETY: This mailbox doesn't implement device_detach so it can be used indefinitely
+    let mbox_dev = unsafe { Device::new_unchecked(mbox_dev_ptr) };
+
+    // Sanity check the device is actually managed by this mailbox driver
+    if !device_matches_driver::<AppleMboxDriver>(mbox_dev) {
+        return Err(ENXIO);
+    }
+    assert!(device_is_undetachable(mbox_dev));
+
+    Ok(MboxDevice(mbox_dev))
+}
+
+pub fn apple_mbox_set_rx<T>(mbox: MboxDevice, func: AppleMboxRx<T>, arg: Lease<T>) -> Result<()> {
+    let sc = device_get_softc::<AppleMboxDriver>(mbox.0);
+
+    let func = unsafe { transmute::<Option<AppleMboxRx<T>>, RawAppleMboxRx>(Some(func)) };
+    let (arg_ptr, _count_ptr) = Lease::into_raw(arg);
+
+    sc.intr_ctx.get_mut().callback = Some((func, Ptr::new(arg_ptr.cast::<c_void>())));
+
+    let flags = INTR_MPSAFE.0 | INTR_TYPE_MISC.0;
+    bus_setup_intr(
+        mbox.0,
+        proj!(&sc.irq),
+        flags,
+        None,
+        Some(apple_mbox_handle_intr),
+        sc.lease(),
+    )
+}
+
+extern "C" fn apple_mbox_handle_intr(sc: Loan<AppleMboxSoftc>) {
+    let mut intr = sc.intr_ctx.get_mut();
+
+    while (bus_read_4!(&mut intr.i2a_ctrl, MBOX_I2A_CTRL) & MBOX_I2A_CTRL_EMPTY) == 0 {
+        let msg = AppleMboxMsg {
+            data0: bus_read_8!(&mut intr.i2a_recv, MBOX_I2A_RECV0),
+            data1: bus_read_8!(&mut intr.i2a_recv, MBOX_I2A_RECV1) as u32,
+        };
+        let callback = intr.callback.as_mut().unwrap();
+        (callback.0)(callback.1.as_ptr(), msg);
+    }
+}
+
 impl AppleMboxDriver {
-    // Get a mailbox device_t from the client's mboxes devicetree property. The mailbox must've
-    // previously registered its devicetree node xref which happens when this driver attaches.
-    pub fn get_mbox(client: Device) -> Result<MboxDevice> {
-        let client_node = ofw_bus_get_node(client);
-        let mbox_xref = unsafe { OF_getencprop_unchecked::<XRef>(client_node, c"mboxes")? };
-        let mbox_dev = OF_device_from_xref(mbox_xref)?;
-        Ok(MboxDevice(mbox_dev))
-    }
-
-    pub fn set_rx<T>(mbox: MboxDevice, func: AppleMboxRx<T>, arg: Pin<&T>) -> Result<()> {
-        let sc = unsafe { device_get_softc::<Self>(mbox.0) };
-
-        let func = unsafe { transmute::<Option<AppleMboxRx<T>>, RawAppleMboxRx>(Some(func)) };
-        let arg = Ptr::new(arg.get_ref() as *const T as *const c_void as *mut c_void);
-
-        sc.intr_ctx.get_mut().callback = Some((func, arg));
-
-        let flags = INTR_MPSAFE.0 | INTR_TYPE_MISC.0;
-        bus_setup_intr(
-            mbox.0,
-            proj!(&sc.irq),
-            flags,
-            None,
-            Some(AppleMboxDriver::handle_intr),
-            sc,
-        )
-    }
-
     pub fn write_msg(mbox: MboxDevice, msg: AppleMboxMsg) -> Result<()> {
-        let sc = unsafe { device_get_softc::<Self>(mbox.0) };
+        let sc = device_get_softc::<Self>(mbox.0);
 
         let mut write_msg = sc.write_msg.get_mut();
 
         let mut ctrl = &mut write_msg.a2i_ctrl;
         if (bus_read_4!(ctrl, MBOX_A2I_CTRL) & MBOX_A2I_CTRL_FULL) != 0 {
-            device_println!(sc.dev, "mailbox full");
+            device_println!(sc.device(), "mailbox full");
             return Err(EBUSY);
         }
 
@@ -206,19 +236,6 @@ impl AppleMboxDriver {
         bus_write_8!(send, MBOX_A2I_SEND0, msg.data0);
         bus_write_8!(send, MBOX_A2I_SEND1, u64::from(msg.data1));
         Ok(())
-    }
-
-    extern "C" fn handle_intr(sc: Pin<&AppleMboxSoftc>) {
-        let mut intr = sc.intr_ctx.get_mut();
-
-        while (bus_read_4!(&mut intr.i2a_ctrl, MBOX_I2A_CTRL) & MBOX_I2A_CTRL_EMPTY) == 0 {
-            let msg = AppleMboxMsg {
-                data0: bus_read_8!(&mut intr.i2a_recv, MBOX_I2A_RECV0),
-                data1: bus_read_8!(&mut intr.i2a_recv, MBOX_I2A_RECV1) as u32,
-            };
-            let callback = intr.callback.as_mut().unwrap();
-            (callback.0)(callback.1.as_ptr(), msg);
-        }
     }
 }
 

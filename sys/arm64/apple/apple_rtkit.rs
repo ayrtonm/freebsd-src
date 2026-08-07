@@ -36,7 +36,7 @@ use kpi::ofw::XRef;
 use kpi::prelude::*;
 use kpi::sync::Checked;
 use kpi::{define_driver, proj};
-use rtkit::{PwrState, RTKit, RTKitDriver, rtkit_boot, rtkit_set_ap};
+use rtkit::{PwrState, RTKit, RTKitDriver, rtkit_boot, rtkit_set_ap, rtkit_new};
 
 const CPU_CTRL: u64 = 0x44;
 const CPU_CTRL_RUN: u32 = 1 << 4;
@@ -95,7 +95,7 @@ impl DeviceIf for AppleRTKitDriver {
 
         OF_device_register_xref(xref, dev);
 
-        let rtk = Self::new_rtkit(dev)
+        let rtk = rtkit_new(dev, &apple_rtkit_driver)
             .inspect_err(|e| device_println!(dev, "failed to create RTKit {e}"))?;
 
         let sc = AppleRTKitSoftc { dev, asc, sram, rtk };

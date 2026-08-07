@@ -33,11 +33,11 @@ use kpi::bindings::device_t;
 use kpi::bus::{Filter, Irq, Register, Resource, ResourceSpec};
 use core::pin::Pin;
 use kpi::device::{BusProbe, DeviceIf, Device};
-use kpi::ffi::{ToArrayCString, UninitRef};
+use kpi::ffi::{ToArrayCString, Uninit, Loan};
 use kpi::intr::{IrqSrc, MapData, PicIf};
 use kpi::prelude::*;
 use kpi::sync::{Checked, OnceInit};
-use kpi::{driver, proj};
+use kpi::{define_driver, proj};
 use simplebus::{SimpleBusDriver, SimpleBusSoftc, SimpleBusSoftcBase};
 
 const MAX_INTR: usize = 32;
@@ -61,7 +61,6 @@ pub type DockchannelSoftc = SimpleBusSoftc<DockchannelSoftcFields>;
 
 #[derive(Debug)]
 pub struct DockchannelSoftcFields {
-    dev: Device,
     irq: Irq,
     isrcs: [DockchannelIrqSrc; MAX_INTR],
     stat_reg: Checked<Register>,
@@ -85,7 +84,8 @@ impl DeviceIf for DockchannelDriver {
         Ok(BUS_PROBE_DEFAULT)
     }
 
-    fn device_attach(uninit_sc: UninitRef<DockchannelSoftc>, dev: Device) -> Result<()> {
+    fn device_attach(uninit_sc: Uninit<DockchannelSoftc>) -> Result<()> {
+        let dev = uninit_sc.device();
         let [mem_res, irq_res] = bus_alloc_resources(dev, SPEC).map_err(|e| {
             device_println!(dev, "cannot allocate device resources {e}");
             ENXIO
@@ -102,21 +102,20 @@ impl DeviceIf for DockchannelDriver {
         let isrcs = array::from_fn(|_| DockchannelIrqSrc::new(OnceInit::uninit()));
         let sc = uninit_sc
             .init(DockchannelSoftc::new(DockchannelSoftcFields {
-                dev,
                 irq,
                 isrcs,
                 stat_reg: Checked::new(stat_reg),
                 mask_reg: Checked::new(mask_reg),
             }));
 
-        let dev = sc.dev;
+        let dev = sc.device();
         bus_setup_intr(
             dev,
             proj!(&sc.irq),
             INTR_TYPE_CLK.0 | INTR_MPSAFE.0,
             Some(dockchannel_intr),
             None,
-            sc,
+            sc.lease(),
         )
         .unwrap();
 
@@ -133,7 +132,7 @@ impl DeviceIf for DockchannelDriver {
 
         Self::simplebus_attach(dev, |simplebus_sc| {
             simplebus_sc.dev = dev.as_ptr();
-            simplebus_sc.node = node.0;
+            simplebus_sc.node = node.as_phandle();
         })
         .map_err(|e| {
             device_println!(dev, "simplebus_attach failed {e}");
@@ -148,7 +147,7 @@ impl DeviceIf for DockchannelDriver {
     }
 }
 
-extern "C" fn dockchannel_intr(sc: Pin<&DockchannelSoftc>) -> Filter {
+extern "C" fn dockchannel_intr(sc: Loan<DockchannelSoftc>) -> Filter {
     let tf = curthread!(td_intr_frame);
 
     let mut stat_reg = sc.stat_reg.get_mut();
@@ -157,7 +156,7 @@ extern "C" fn dockchannel_intr(sc: Pin<&DockchannelSoftc>) -> Filter {
     while pending != 0 {
         let irq = pending.trailing_zeros();
         if intr_isrc_dispatch(&sc.isrcs[irq as usize], tf) != 0 {
-            device_println!(sc.dev, "Stray irq {irq} disabled");
+            device_println!(sc.device(), "Stray irq {irq} disabled");
             return FILTER_STRAY;
         }
         pending &= !(1 << irq);
@@ -193,13 +192,13 @@ impl DockchannelDriver {
     }
 }
 
-fn dockchannel_mask_irq(sc: Pin<&DockchannelSoftc>, irq: u32) {
+fn dockchannel_mask_irq(sc: Loan<DockchannelSoftc>, irq: u32) {
     let mut mask_reg = sc.mask_reg.get_mut();
     let old_value = bus_read_4!(mask_reg, IRQ_MASK);
     bus_write_4!(mask_reg, IRQ_MASK, old_value & !(1 << irq));
 }
 
-fn dockchannel_unmask_irq(sc: Pin<&DockchannelSoftc>, irq: u32) {
+fn dockchannel_unmask_irq(sc: Loan<DockchannelSoftc>, irq: u32) {
     let mut mask_reg = sc.mask_reg.get_mut();
     let old_value = bus_read_4!(mask_reg, IRQ_MASK);
     bus_write_4!(mask_reg, IRQ_MASK, old_value | (1 << irq));
@@ -224,16 +223,16 @@ fn do_dockchannel_irq_and_level(data: MapData) -> Result<(u32, u32)> {
 impl PicIf for DockchannelDriver {
     type IrqSrcFields = OnceInit<DockchannelIrqSrcFields>;
 
-    fn pic_enable_intr(sc: Pin<&DockchannelSoftc>, isrc: &DockchannelIrqSrc) {
+    fn pic_enable_intr(sc: Loan<DockchannelSoftc>, isrc: &DockchannelIrqSrc) {
         dockchannel_unmask_irq(sc, isrc.get().irq);
     }
 
-    fn pic_disable_intr(sc: Pin<&DockchannelSoftc>, isrc: &DockchannelIrqSrc) {
+    fn pic_disable_intr(sc: Loan<DockchannelSoftc>, isrc: &DockchannelIrqSrc) {
         dockchannel_mask_irq(sc, isrc.get().irq);
     }
 
     fn pic_map_intr(
-        sc: Pin<&DockchannelSoftc>,
+        sc: Loan<DockchannelSoftc>,
         data: MapData,
     ) -> Result<Pin<&DockchannelIrqSrc>> {
         let (irq, _level) = do_dockchannel_irq_and_level(data)?;
@@ -241,7 +240,7 @@ impl PicIf for DockchannelDriver {
     }
 
     fn pic_setup_intr(
-        _sc: Pin<&DockchannelSoftc>,
+        _sc: Loan<DockchannelSoftc>,
         isrc: &DockchannelIrqSrc,
         _res: Resource,
         data: MapData,
@@ -252,7 +251,7 @@ impl PicIf for DockchannelDriver {
     }
 
     fn pic_teardown_intr(
-        sc: Pin<&DockchannelSoftc>,
+        sc: Loan<DockchannelSoftc>,
         _isrc: &DockchannelIrqSrc,
         _res: Resource,
         data: MapData,
@@ -263,17 +262,19 @@ impl PicIf for DockchannelDriver {
     }
 }
 
-driver! {
-    dockchannel_driver, c"dockchannel", DockchannelDriver,
-    dockchannel_methods = {
-        device_probe dockchannel_probe,
-        device_attach dockchannel_attach,
+define_driver! {
+    static dockchannel_driver: DockchannelDriver = {
+        name: c"dockchannel",
+    }
+    static dockchannel_methods = {
+        device_probe: dockchannel_probe,
+        device_attach: dockchannel_attach,
 
-        pic_disable_intr dockchannel_disable_intr,
-        pic_enable_intr dockchannel_enable_intr,
-        pic_map_intr dockchannel_map_intr,
-        pic_setup_intr dockchannel_setup_intr,
-        pic_teardown_intr dockchannel_teardown_intr,
-    },
+        pic_disable_intr: dockchannel_disable_intr,
+        pic_enable_intr: dockchannel_enable_intr,
+        pic_map_intr: dockchannel_map_intr,
+        pic_setup_intr: dockchannel_setup_intr,
+        pic_teardown_intr: dockchannel_teardown_intr,
+    }
     inherit from simplebus_driver,
 }
