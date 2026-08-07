@@ -17,17 +17,20 @@
 
 #![no_std]
 
-use apple_mbox::{AppleMboxDriver, AppleMboxMsg, MboxDevice, apple_mbox_get_dev, apple_mbox_set_rx};
-use core::pin::Pin;
+use apple_mbox::{
+    AppleMboxDriver, AppleMboxMsg, MboxDevice, apple_mbox_get_dev, apple_mbox_set_rx,
+};
 use core::ffi::c_void;
 use core::mem::transmute;
+use core::pin::Pin;
+use core::ptr;
 use core::sync::atomic::{AtomicU16, AtomicU64, Ordering};
-use kpi::bindings::{device_t, bus_addr_t, bus_dma_segment_t, bus_size_t};
+use kpi::bindings::{bus_addr_t, bus_dma_segment_t, bus_size_t, device_t};
 use kpi::bus::dma::{BusDmaMap, BusDmaMem, BusDmaTag};
-use kpi::device::{DeviceIf, Device};
-use kpi::ffi::{ArrayCString, Ptr, Loan};
-use kpi::proj;
+use kpi::device::{Device, DeviceIf};
+use kpi::ffi::{ArrayCString, Lease, Loan, Ptr};
 use kpi::prelude::*;
+use kpi::proj;
 use kpi::sync::mtx::SpinLock;
 use kpi::sync::{Checked, OnceInit};
 use kpi::taskqueue::{Task, Taskqueue};
@@ -258,20 +261,16 @@ impl Into<AppleMboxMsg> for EpTxMsg {
     }
 }
 
-#[derive(Debug)]
-struct RTKitBuffer<T = ()> {
+#[derive(Debug, PartialEq, Eq)]
+struct RTKitBuffer {
     addr: bus_addr_t,
     size: bus_size_t,
     kva: BusDmaMem,
     tag: BusDmaTag,
     map: BusDmaMap,
-    // Pointer from the RTKitBuffer back to the RTKit struct that owns it. The C KPI kind of force
-    // us into this pattern, but we can live with it since all the RTKit instances we care about are
-    // embedded in softc instances and do not move.
-    rtk: Ptr<RTKit<T>>,
 }
 
-impl<T> Default for RTKitBuffer<T> {
+impl Default for RTKitBuffer {
     fn default() -> Self {
         Self {
             addr: Default::default(),
@@ -279,7 +278,6 @@ impl<T> Default for RTKitBuffer<T> {
             kva: Default::default(),
             tag: Default::default(),
             map: Default::default(),
-            rtk: Default::default(),
         }
     }
 }
@@ -288,7 +286,7 @@ type RTKitTaskCallback<T> = fn(&T, u64) -> Result<()>;
 type RTKitMapCallback<T> = fn(&T, bus_addr_t, bus_size_t);
 
 #[derive(Debug)]
-pub struct RTKit<T = ()> {
+pub struct RTKit {
     // Mainly used for logging after getting the mailbox so don't bother trying to attach a lifetime
     // to this. It would be problematic anyway since the RTKit struct is embedded in the client
     // softc.
@@ -296,98 +294,93 @@ pub struct RTKit<T = ()> {
     // A Device with the lifetime 'static. This is allowed since the mailbox cannot be detached
     mbox: MboxDevice,
     pub verbose: bool,
-    pub no_alloc: bool,
+    //pub no_alloc: bool,
     iop: AtomicU16,
     ap: AtomicU16,
     ep_map: AtomicU64,
     queue: Taskqueue,
     task: Task,
     msgs: SpinLock<VecDeque<AppleMboxMsg>>,
-    ioreport: Checked<RTKitBuffer<T>>,
-    crashlog: Checked<RTKitBuffer<T>>,
-    oslog: Checked<RTKitBuffer<T>>,
-    syslog: Checked<RTKitBuffer<T>>,
-    pub map_callback: Option<RTKitMapCallback<T>>,
-    ep_callback: OnceInit<(RTKitTaskCallback<T>, Endpoint)>,
+    ioreport: Checked<RTKitBuffer>,
+    crashlog: Checked<RTKitBuffer>,
+    oslog: Checked<RTKitBuffer>,
+    syslog: Checked<RTKitBuffer>,
+    //pub map_callback: Option<RTKitMapCallback<T>>,
+    //ep_callback: OnceInit<(RTKitTaskCallback<T>, Endpoint)>,
 }
 
-pub fn rtkit_new<D: RTKitDriver>(client: Device, driver: &'static D) -> Result<RTKit<D::CallbackArg>> {
-    todo!("")
+pub trait HasRTKit: Sized {
+    fn get_rtkit(sc: Loan<Self>) -> Pin<&RTKit>;
 }
 
-pub trait RTKitDriver: DeviceIf {
-    type CallbackArg;
+pub fn rtkit_new(client: Device) -> Result<RTKit> {
+    let mbox = apple_mbox_get_dev(client)?;
+    let client = client.as_ptr();
+    Ok(RTKit {
+        client,
+        mbox,
+        verbose: false,
+        iop: AtomicU16::new(PwrState::Sleep as u16),
+        ap: AtomicU16::new(PwrState::Sleep as u16),
+        ep_map: AtomicU64::new(0),
+        queue: Taskqueue::new(),
+        task: Task::new(),
+        msgs: SpinLock::new(VecDeque::with_capacity(32, M_WAITOK)),
 
-    fn new_rtkit(client: Device) -> Result<RTKit<Self::CallbackArg>> {
-        let mbox = apple_mbox_get_dev(client)?;
-        Ok(RTKit {
-            client: client.as_ptr(),
-            mbox,
-            verbose: false,
-            no_alloc: false,
-            iop: AtomicU16::new(PwrState::Sleep as u16),
-            ap: AtomicU16::new(PwrState::Sleep as u16),
-            ep_map: AtomicU64::new(0),
-            queue: Taskqueue::new(),
-            task: Task::new(),//task_init::<Self>(client, rx_task::<Self>),
-            msgs: SpinLock::new(VecDeque::with_capacity(32, M_WAITOK)),
-            ioreport: Checked::new(RTKitBuffer::default()),
-            crashlog: Checked::new(RTKitBuffer::default()),
-            oslog: Checked::new(RTKitBuffer::default()),
-            syslog: Checked::new(RTKitBuffer::default()),
-            map_callback: None,
-            ep_callback: OnceInit::uninit(),
-        })
-    }
+        ioreport: Checked::new(RTKitBuffer::default()),
+        crashlog: Checked::new(RTKitBuffer::default()),
+        oslog: Checked::new(RTKitBuffer::default()),
+        syslog: Checked::new(RTKitBuffer::default()),
+    })
 }
 
-impl<T> RTKit<T> {
+pub fn rtkit_init<T: HasRTKit>(rtk: Pin<&RTKit>, sc: Lease<T>) -> Result<()> {
+    let queue_name = ArrayCString::new(c"rtkit queue");
+    taskqueue_create(queue_name, M_WAITOK, &rtk.queue)?;
+
+    let thread_name = ArrayCString::new(c"rtkit thread");
+    taskqueue_start_threads(&rtk.queue, 1, PI_INTR, thread_name)?;
+
+    mtx_init(proj!(&rtk.msgs), c"rtk lock", None, None);
+    rtk.task.init(rtkit_rx_task, sc.lease());
+    apple_mbox_set_rx(rtk.mbox, rtkit_rx_callback, sc)?;
+    Ok(())
+}
+
+impl RTKit {
     pub fn send<M: Into<AppleMboxMsg>>(&self, msg: M) -> Result<()> {
         wmb!();
         AppleMboxDriver::write_msg(self.mbox, msg.into())
     }
 
-    pub fn start_endpoint(&self, ep: Endpoint, callback: RTKitTaskCallback<T>) -> Result<()> {
-        if ep < 32 || ep >= 64 {
-            device_println!(self.client, "invalid endpoint {ep:?}");
-            return Err(EINVAL);
-        }
-        device_println!(self.client, "waiting on ep map response");
-        //tsleep(&self.ep_map, Some(PWAIT), c"epmap", 5 * hz())?;
-        device_println!(self.client, "waited on ep map response");
-        let ep_map = self.ep_map.load(Ordering::Relaxed);
-        if ep_map & (1 << ep) == 0 {
-            device_println!(self.client, "endpoint {ep:?} not set in map {ep_map:x?}");
-            return Err(EINVAL);
-        }
-        self.ep_callback.init((callback, ep));
-        let start_ep = MgmtTxMsg::StartEp { ep };
-        self.send(start_ep)?;
-        if self.verbose {
-            device_println!(self.client, "started endpoint {ep:?}");
-        }
-        Ok(())
-    }
-
-    pub fn init(self: Pin<&Self>) -> Result<()> {
-        let queue_name = ArrayCString::new(c"rtkit queue");
-        taskqueue_create(queue_name, M_WAITOK, &self.queue)?;
-    
-        let thread_name = ArrayCString::new(c"rtkit thread");
-        taskqueue_start_threads(&self.queue, 1, PI_INTR, thread_name)?;
-    
-        mtx_init(proj!(&self.msgs), c"rtk lock", None, None);
-        proj!(&self.task).init(rx_task, self);
-        apple_mbox_set_rx(self.mbox, rx_callback, self)?;
-        Ok(())
-    }
+    //pub fn start_endpoint(&self, ep: Endpoint, callback: RTKitTaskCallback<T>) -> Result<()> {
+    //    if ep < 32 || ep >= 64 {
+    //        device_println!(self.client, "invalid endpoint {ep:?}");
+    //        return Err(EINVAL);
+    //    }
+    //    device_println!(self.client, "waiting on ep map response");
+    //    //tsleep(&self.ep_map, Some(PWAIT), c"epmap", 5 * hz())?;
+    //    device_println!(self.client, "waited on ep map response");
+    //    let ep_map = self.ep_map.load(Ordering::Relaxed);
+    //    if ep_map & (1 << ep) == 0 {
+    //        device_println!(self.client, "endpoint {ep:?} not set in map {ep_map:x?}");
+    //        return Err(EINVAL);
+    //    }
+    //    self.ep_callback.init((callback, ep));
+    //    let start_ep = MgmtTxMsg::StartEp { ep };
+    //    self.send(start_ep)?;
+    //    if self.verbose {
+    //        device_println!(self.client, "started endpoint {ep:?}");
+    //    }
+    //    Ok(())
+    //}
 }
 
-pub fn rtkit_boot<T>(rtk: &RTKit<T>) -> Result<()> {
-    set_iop(rtk, PwrState::On)
+pub fn rtkit_boot(rtk: &RTKit) -> Result<()> {
+    rtkit_set_iop(rtk, PwrState::On)
 }
 
-fn set_iop<T>(rtk: &RTKit<T>, pwr_state: PwrState) -> Result<()> {
+fn rtkit_set_iop(rtk: &RTKit, pwr_state: PwrState) -> Result<()> {
     assert!(!cold());
     let pwr_state = pwr_state as u16;
     if rtk.iop.load(Ordering::Relaxed) == (pwr_state & 0xFF) {
@@ -403,7 +396,7 @@ fn set_iop<T>(rtk: &RTKit<T>, pwr_state: PwrState) -> Result<()> {
     Ok(())
 }
 
-pub fn rtkit_set_ap<T>(rtk: &RTKit<T>, pwr_state: PwrState) -> Result<()> {
+pub fn rtkit_set_ap(rtk: &RTKit, pwr_state: PwrState) -> Result<()> {
     assert!(!cold());
     let pwr_state = pwr_state as u16;
     if rtk.ap.load(Ordering::Relaxed) == (pwr_state & 0xFF) {
@@ -419,7 +412,7 @@ pub fn rtkit_set_ap<T>(rtk: &RTKit<T>, pwr_state: PwrState) -> Result<()> {
     Ok(())
 }
 
-fn handle_mgmt<T>(rtk: Loan<RTKit<T>>, data0: u64) -> Result<()> {
+fn rtkit_handle_mgmt(rtk: &RTKit, data0: u64) -> Result<()> {
     let msg = MgmtRxMsg::new(data0)?;
     if rtk.verbose {
         device_println!(rtk.client, "recv'd msg from rtkit {msg:x?}");
@@ -487,13 +480,13 @@ fn handle_mgmt<T>(rtk: Loan<RTKit<T>>, data0: u64) -> Result<()> {
     Ok(())
 }
 
-fn handle_ioreport<T>(rtk: Loan<RTKit<T>>, data0: u64) -> Result<()> {
+fn rtkit_handle_ioreport<T: HasRTKit>(rtk: &RTKit, sc: Loan<T>, data0: u64) -> Result<()> {
     const IOREPORT_UNKNOWN1: u8 = 8;
     const IOREPORT_UNKNOWN2: u8 = 12;
     let msg_ty = mgmt_msg_type(data0);
     match msg_ty {
         BUFFER_REQUEST => {
-            handle_buffer_req(rtk, EP_IOREPORT, data0, proj!(&rtk.ioreport))?;
+            rtkit_handle_buffer_req(rtk, sc, EP_IOREPORT, data0, &rtk.ioreport)?;
         }
         IOREPORT_UNKNOWN1 | IOREPORT_UNKNOWN2 => {
             let echoed_msg = IoReportTxMsg { ack: data0 };
@@ -512,7 +505,7 @@ fn handle_ioreport<T>(rtk: Loan<RTKit<T>>, data0: u64) -> Result<()> {
     Ok(())
 }
 
-fn handle_crashlog<T>(rtk: Loan<RTKit<T>>, data0: u64) -> Result<()> {
+fn rtkit_handle_crashlog<T: HasRTKit>(rtk: &RTKit, sc: Loan<T>, data0: u64) -> Result<()> {
     let msg_ty = mgmt_msg_type(data0);
     if msg_ty != BUFFER_REQUEST {
         device_println!(
@@ -525,18 +518,18 @@ fn handle_crashlog<T>(rtk: Loan<RTKit<T>>, data0: u64) -> Result<()> {
         device_println!(rtk.client, "got another crashlog message");
         panic!("RTKit crashed");
     }
-    handle_buffer_req(rtk, EP_CRASHLOG, data0, proj!(&rtk.crashlog))?;
+    rtkit_handle_buffer_req(rtk, sc, EP_CRASHLOG, data0, &rtk.crashlog)?;
     Ok(())
 }
 
-fn handle_oslog<T>(rtk: Loan<RTKit<T>>, data0: u64) -> Result<()> {
+fn rtkit_handle_oslog<T: HasRTKit>(rtk: &RTKit, sc: Loan<T>, data0: u64) -> Result<()> {
     const OSLOG_UNKNOWN1: u8 = 3;
     const OSLOG_UNKNOWN2: u8 = 4;
     const OSLOG_UNKNOWN3: u8 = 5;
     let msg_ty = oslog_msg_type(data0);
     match msg_ty {
         BUFFER_REQUEST => {
-            handle_buffer_req(rtk, EP_OSLOG, data0, proj!(&rtk.oslog))?;
+            rtkit_handle_buffer_req(rtk, sc, EP_OSLOG, data0, &rtk.oslog)?;
         }
         OSLOG_UNKNOWN1 | OSLOG_UNKNOWN2 | OSLOG_UNKNOWN3 => {
             let echoed_msg = OsLogTxMsg { ack: data0 };
@@ -558,13 +551,13 @@ fn handle_oslog<T>(rtk: Loan<RTKit<T>>, data0: u64) -> Result<()> {
     Ok(())
 }
 
-fn handle_syslog<T>(rtk: Loan<RTKit<T>>, data0: u64) -> Result<()> {
+fn rtkit_handle_syslog<T: HasRTKit>(rtk: &RTKit, sc: Loan<T>, data0: u64) -> Result<()> {
     const SYSLOG_INIT: u8 = 8;
     const SYSLOG_LOG: u8 = 5;
     let msg_ty = mgmt_msg_type(data0);
     match msg_ty {
         BUFFER_REQUEST => {
-            handle_buffer_req(rtk, EP_SYSLOG, data0, proj!(&rtk.syslog))?;
+            rtkit_handle_buffer_req(rtk, sc, EP_SYSLOG, data0, &rtk.syslog)?;
         }
         SYSLOG_INIT => {
             device_println!(rtk.client, "TODO: store some state");
@@ -587,11 +580,12 @@ fn handle_syslog<T>(rtk: Loan<RTKit<T>>, data0: u64) -> Result<()> {
     Ok(())
 }
 
-fn handle_buffer_req<T>(
-    rtk: Loan<RTKit<T>>,
+fn rtkit_handle_buffer_req<T: HasRTKit>(
+    rtk: &RTKit,
+    sc: Loan<T>,
     ep: Endpoint,
     data0: u64,
-    buffer: Pin<&Checked<RTKitBuffer<T>>>,
+    buffer: &Checked<RTKitBuffer>,
 ) -> Result<()> {
     let size = if ep != EP_OSLOG {
         buffer_size(data0)
@@ -618,7 +612,7 @@ fn handle_buffer_req<T>(
     if req_addr != 0 {
         return Ok(());
     }
-    let addr = rtkit_alloc(rtk, req_size, buffer)?;
+    let addr = rtkit_alloc(rtk, sc, req_size, buffer)?;
     // TODO: See comment at the end of rtkit_alloc
     assert!(addr != 0);
     let resp = if ep != EP_OSLOG {
@@ -635,20 +629,24 @@ fn handle_buffer_req<T>(
     rtk.send(EpTxMsg::BufferReq { ep, data: resp })
 }
 
-fn rtkit_alloc<T>(
-    rtk: Loan<RTKit<T>>,
+fn rtkit_alloc<T: HasRTKit>(
+    rtk: &RTKit,
+    sc: Loan<T>,
     req_size: bus_size_t,
-    buffer: Pin<&Checked<RTKitBuffer<T>>>,
+    buffer: &Checked<RTKitBuffer>,
 ) -> Result<bus_addr_t> {
     //if rtk.no_alloc {
     //    return Ok(0);
     //}
 
-    let parent_tag = bus_get_dma_tag(rtk.client);
+    if sc.device().as_ptr() != rtk.client {
+        return Err(EDOOFUS);
+    }
+    let parent_tag = bus_get_dma_tag(sc.device());
 
     let mut buffer_guard = buffer.get_mut();
 
-    buffer_guard.rtk = unsafe { Ptr::from_ref(&rtk) };
+    //buffer_guard.rtk = unsafe { Ptr::from_ref(&rtk) };
     buffer_guard.tag = bus_dma_tag_create(parent_tag)
         .alignment(PAGE_SIZE)
         .max_size(req_size)
@@ -667,7 +665,19 @@ fn rtkit_alloc<T>(
     // the stack and have lifetimes that extend past the drop.
     drop(buffer_guard);
 
-    let res = bus_dmamap_load(tag, map, kva, req_size, Some(rtkit_dmamap_cb), buffer, None);
+    let callback = if ptr::eq(buffer.as_ptr(), rtk.ioreport.as_ptr()) {
+        rtkit_dmamap_cb::<_, 0>
+    } else if ptr::eq(buffer.as_ptr(), rtk.crashlog.as_ptr()) {
+        rtkit_dmamap_cb::<_, 1>
+    } else if ptr::eq(buffer.as_ptr(), rtk.oslog.as_ptr()) {
+        rtkit_dmamap_cb::<_, 2>
+    } else if ptr::eq(buffer.as_ptr(), rtk.syslog.as_ptr()) {
+        rtkit_dmamap_cb::<_, 3>
+    } else {
+        panic!("unknown buffer")
+    };
+
+    let res = bus_dmamap_load(tag, map, kva, req_size, Some(callback), sc.lease(), None);
     match res {
         Ok(_) | Err(EINPROGRESS) => {}
         Err(e) => {
@@ -679,12 +689,21 @@ fn rtkit_alloc<T>(
     Ok(buffer.get_mut().addr)
 }
 
-extern "C" fn rtkit_dmamap_cb<T>(
-    buffer: Pin<&Checked<RTKitBuffer<T>>>,
+extern "C" fn rtkit_dmamap_cb<T: HasRTKit, const BUFFER: usize>(
+    sc: Lease<T>,
     segs: &bus_dma_segment_t,
     nsegs: i32,
     error: i32,
 ) {
+    let rtk = HasRTKit::get_rtkit(sc.as_loan());
+    let buffer = match BUFFER {
+        0 => &rtk.ioreport,
+        1 => &rtk.crashlog,
+        2 => &rtk.oslog,
+        3 => &rtk.syslog,
+        _ => unreachable!(""),
+    };
+
     let mut buffer = buffer.get_mut();
     buffer.addr = segs.ds_addr;
     buffer.size = segs.ds_len;
@@ -692,7 +711,7 @@ extern "C" fn rtkit_dmamap_cb<T>(
     // mutable references and couldn't have moved since initialization (or to be extremely
     // pendantic... the RTKit instance can be moved, but the address is guaranteed to point to some
     // RTKit instance until the client device is detached which is what we really care about here).
-    let rtk = unsafe { buffer.rtk.get() };
+    //let rtk = unsafe { buffer.rtk.get() };
     if rtk.verbose {
         device_println!(
             rtk.client,
@@ -700,22 +719,23 @@ extern "C" fn rtkit_dmamap_cb<T>(
             segs.ds_addr
         );
     }
-    if let Some(map_cb) = rtk.map_callback {
-        // TODO: Nothing currently enforces that T is the client's softc but that's mostly because
-        // some drivers use the default `T = ()` for convenience. I should rework the RTKitDriver
-        // trait at some point to use DeviceIf::Softc. Drivers that use the default T shouldn't set
-        // the callback or fall into this branch but again that's not enforced by anything.
-        let sc = unsafe {
-            bindings::device_get_softc(rtk.client.as_ptr())
-                .cast::<T>()
-                .as_ref()
-                .unwrap()
-        };
-        map_cb(sc, buffer.addr, buffer.size);
-    }
+    //if let Some(map_cb) = rtk.map_callback {
+    //    // TODO: Nothing currently enforces that T is the client's softc but that's mostly because
+    //    // some drivers use the default `T = ()` for convenience. I should rework the RTKitDriver
+    //    // trait at some point to use DeviceIf::Softc. Drivers that use the default T shouldn't set
+    //    // the callback or fall into this branch but again that's not enforced by anything.
+    //    let sc = unsafe {
+    //        bindings::device_get_softc(rtk.client.as_ptr())
+    //            .cast::<T>()
+    //            .as_ref()
+    //            .unwrap()
+    //    };
+    //    map_cb(sc, buffer.addr, buffer.size);
+    //}
 }
 
-extern "C" fn rx_callback<T>(rtk: Loan<RTKit<T>>, msg: AppleMboxMsg) {
+extern "C" fn rtkit_rx_callback<T: HasRTKit>(sc: Loan<T>, msg: AppleMboxMsg) {
+    let rtk = HasRTKit::get_rtkit(sc);
     try_rx_callback(rtk, msg)
         .inspect_err(|e| {
             device_println!(rtk.client, "callback failed {e}");
@@ -723,7 +743,7 @@ extern "C" fn rx_callback<T>(rtk: Loan<RTKit<T>>, msg: AppleMboxMsg) {
         .unwrap();
 }
 
-fn try_rx_callback<T>(rtk: Loan<RTKit<T>>, msg: AppleMboxMsg) -> Result<()> {
+fn try_rx_callback(rtk: Pin<&RTKit>, msg: AppleMboxMsg) -> Result<()> {
     rmb!();
     mtx_lock_spin(&rtk.msgs).push_back(msg);
     if rtk.verbose {
@@ -733,31 +753,34 @@ fn try_rx_callback<T>(rtk: Loan<RTKit<T>>, msg: AppleMboxMsg) -> Result<()> {
     Ok(())
 }
 
-extern "C" fn rx_task<T>(rtk: Loan<RTKit<T>>, pending: u32) {
-    try_rx_task(rtk, pending)
+extern "C" fn rtkit_rx_task<T: HasRTKit>(sc: Loan<T>, pending: u32) {
+    let rtk = HasRTKit::get_rtkit(sc);
+    try_rx_task(rtk.get_ref(), sc, pending)
         .inspect_err(|e| {
             device_println!(rtk.client, "task fn failed {e}");
         })
         .unwrap();
 }
 
-fn try_rx_task<T>(rtk: Loan<RTKit<T>>, pending: u32) -> Result<()> {
+fn try_rx_task<T: HasRTKit>(rtk: &RTKit, sc: Loan<T>, pending: u32) -> Result<()> {
     for _ in 0..pending {
         let msg = mtx_lock_spin(&rtk.msgs).pop_front().unwrap();
         let ep = msg.data1;
         match ep {
-            EP_MGMT => handle_mgmt(rtk, msg.data0)?,
-            EP_IOREPORT => handle_ioreport(rtk, msg.data0)?,
-            EP_CRASHLOG => handle_crashlog(rtk, msg.data0)?,
-            EP_SYSLOG => handle_syslog(rtk, msg.data0)?,
+            EP_MGMT => rtkit_handle_mgmt(rtk, msg.data0)?,
+            EP_IOREPORT => rtkit_handle_ioreport(rtk, sc, msg.data0)?,
+            EP_CRASHLOG => rtkit_handle_crashlog(rtk, sc, msg.data0)?,
+            EP_SYSLOG => rtkit_handle_syslog(rtk, sc, msg.data0)?,
             EP_DEBUG => {
                 todo!("")
             }
-            EP_OSLOG => handle_oslog(rtk, msg.data0)?,
+            EP_OSLOG => rtkit_handle_oslog(rtk, sc, msg.data0)?,
             EP_TRACEKIT => {
                 todo!("")
             }
             other_ep => {
+                todo!("")
+                /*
                 let (callback, started_ep) = rtk.ep_callback.get();
                 assert!(other_ep == *started_ep);
                 // TODO: Nothing currently enforces that T is the client's softc but that's mostly because
@@ -767,6 +790,7 @@ fn try_rx_task<T>(rtk: Loan<RTKit<T>>, pending: u32) -> Result<()> {
                 let sc_ptr = unsafe { bindings::device_get_softc(rtk.client.as_ptr()).cast::<T>() };
                 let sc = unsafe { sc_ptr.as_ref().unwrap() };
                 callback(sc, msg.data0)?;
+                */
             }
         }
     }
