@@ -84,7 +84,7 @@ METHOD int handle_aen {
 #
 METHOD bool is_storage_device {
         device_t dev;
-} default nvme_is_storage_device_default;
+} DEFAULT nvme_is_storage_device_default;
 
 METHOD int delayed_attach {
 	device_t dev;
