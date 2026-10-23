@@ -14,8 +14,8 @@ device		nvme_rust
 device		nvme_ans
 device		dockchannel
 device		hid_rust
-#device		dwc3
+device		dwc3
 
 device		powerdom
-options		BOOTVERBOSE=1
+#options		BOOTVERBOSE=1
 #options		VERBOSE_SYSINIT=1
