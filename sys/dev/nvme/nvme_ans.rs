@@ -197,7 +197,6 @@ impl DeviceIf for NvmeAnsDriver {
             device_println!(dev, "error initializing rtkit {e}");
             ENXIO
         })?;
-        rtk.verbose = true;
         // Set the callback for the RTKit module to use when it maps in a buffer. The callback is
         // type-checked using the RTKit's generic parameter
         // TODO: re-enable
