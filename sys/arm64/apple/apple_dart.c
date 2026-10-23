@@ -56,6 +56,7 @@
 
 #include <dev/ofw/ofw_bus.h>
 #include <dev/ofw/ofw_bus_subr.h>
+#include <dev/powerdom/powerdom.h>
 
 #include "apple_dart_reg.h"
 
@@ -305,6 +306,14 @@ apple_dart_attach(device_t dev)
 		return (ENXIO);
 	}
 
+	/* The registers are only accessible with the power domain on. */
+	error = powerdom_enable_all(dev);
+	if (error != 0) {
+		device_printf(dev, "cannot enable power domains: %d\n", error);
+		bus_release_resources(dev, dart_spec, sc->sc_res);
+		return (ENXIO);
+	}
+
 	sc->sc_dev = dev;
 	sc->sc_phandle = phandle;
 	sc->sc_bst = rman_get_bustag(sc->sc_res[APPLE_DART_MEMRES]);
@@ -388,7 +397,15 @@ apple_dart_attach(device_t dev)
 		sc->sc_ias = 36;
 	}
 	bypass = params[1] & DART_PARAMS2_BYPASS_SUPPORT;
+	if (bootverbose)
+		device_printf(dev, "params %08x %08x %08x %08x, %u sids, "
+		    "%s, bypass %ssupported\n", params[0], params[1], params[2],
+		    params[3], sc->sc_nsid, sc->sc_locked ? "locked" : "unlocked",
+		    bypass ? "" : "not ");
 	if (!bypass) {
+		/* Translation isn't implemented yet, so DMA will fault. */
+		device_printf(dev,
+		    "bypass not supported, DMA through this DART will fail\n");
 		return 0;
 	}
 

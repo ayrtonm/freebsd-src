@@ -42,7 +42,7 @@ use kpi::ffi::{ToArrayCString, UninitPtr, Softc, PinIndex};
 use kpi::intr::{IntrRoot, IrqSrc, MapData, PicIf};
 use kpi::ofw::OfwCompatData;
 use kpi::prelude::*;
-use kpi::sync::Checked;
+use kpi::sync::Unchecked;
 use kpi::vec::Vec;
 use kpi::{base, define_driver, gen_newtype};
 
@@ -162,7 +162,8 @@ fn apple_aic_mask_set(sc: &AppleIntSoftc, die: usize, irq: usize) {
     let mut offset = sc.cfg.mask_set;
     offset += sc.cfg.die_stride * die;
     offset += (irq >> 5) * 4;
-    bus_write_4!(sc.mem.get_mut(), offset, irq_mask(irq));
+    // SAFETY: MASK_SET is write-1-to-set so concurrent writes don't conflict
+    bus_write_4!(unsafe { sc.mem.get() }, offset, irq_mask(irq));
 }
 
 fn apple_aic_mask_clear(sc: &AppleIntSoftc, die: usize, irq: usize) {
@@ -171,7 +172,8 @@ fn apple_aic_mask_clear(sc: &AppleIntSoftc, die: usize, irq: usize) {
     let mut offset = sc.cfg.mask_clear;
     offset += sc.cfg.die_stride * die;
     offset += (irq >> 5) * 4;
-    bus_write_4!(sc.mem.get_mut(), offset, irq_mask(irq));
+    // SAFETY: MASK_CLR is write-1-to-clear so concurrent writes don't conflict
+    bus_write_4!(unsafe { sc.mem.get() }, offset, irq_mask(irq));
 }
 
 fn apple_aic_sw_set(sc: &AppleIntSoftc, die: usize, irq: usize) {
@@ -180,7 +182,8 @@ fn apple_aic_sw_set(sc: &AppleIntSoftc, die: usize, irq: usize) {
     let mut offset = sc.cfg.sw_set;
     offset += sc.cfg.die_stride * die;
     offset += (irq >> 5) * 4;
-    bus_write_4!(sc.mem.get_mut(), offset, irq_mask(irq));
+    // SAFETY: SW_SET is write-1-to-set so concurrent writes don't conflict
+    bus_write_4!(unsafe { sc.mem.get() }, offset, irq_mask(irq));
 }
 
 fn apple_aic_sw_clear(sc: &AppleIntSoftc, die: usize, irq: usize) {
@@ -189,7 +192,8 @@ fn apple_aic_sw_clear(sc: &AppleIntSoftc, die: usize, irq: usize) {
     let mut offset = sc.cfg.sw_clear;
     offset += sc.cfg.die_stride * die;
     offset += (irq >> 5) * 4;
-    bus_write_4!(sc.mem.get_mut(), offset, irq_mask(irq));
+    // SAFETY: SW_CLR is write-1-to-clear so concurrent writes don't conflict
+    bus_write_4!(unsafe { sc.mem.get() }, offset, irq_mask(irq));
 }
 
 fn apple_aic_fiq_unmask(fiq: AppleFiqKind) {
@@ -286,8 +290,8 @@ define_projectable! {
     pub struct AppleIntSoftc {
         //dev: Device,
         cfg: &'static AppleIntData,
-        mem: Checked<Register>,
-        event: Option<Checked<Register>>,
+        mem: Unchecked<Register>,
+        event: Option<Unchecked<Register>>,
         irq_srcs: Pin<Box<[AppleIrqSrc]>>,
         fiq_srcs: [AppleIrqSrc; NUM_FIQS],
         ipi_srcs: [AppleIrqSrc; NUM_IPIS],
@@ -329,7 +333,7 @@ impl DeviceIf for AppleIntDriver {
                     device_println!(dev, "unable to allocate event register {e}");
                     return ENXIO;
                 })?;
-            event = Some(Checked::new(Register::new(event_res)?));
+            event = Some(Unchecked::new(Register::new(event_res)?));
         };
         let info = bus_read_4!(mem, AIC_INFO);
         let nirqs = info_nirqs(info);
@@ -356,7 +360,7 @@ impl DeviceIf for AppleIntDriver {
         }
         let sc = AppleIntSoftc {
             cfg,
-            mem: Checked::new(mem),
+            mem: Unchecked::new(mem),
             event,
             irq_srcs,
             fiq_srcs,
@@ -457,7 +461,8 @@ impl DeviceIf for AppleIntDriver {
         }
 
         if sc.cfg.version == 2 {
-            let mut mem = sc.mem.get_mut();
+            // SAFETY: attach is single threaded and interrupts aren't enabled yet
+            let mut mem = unsafe { sc.mem.get_mut() };
             let config = bus_read_4!(mem, AIC2_CONFIG);
             bus_write_4!(mem, AIC2_CONFIG, config | AIC2_CONFIG_ENABLE);
         }
@@ -492,9 +497,11 @@ fn apple_aic_init_cpu() {
 }
 
 extern "C" fn apple_aic_irq(sc: &Softc<AppleIntSoftc>) -> Filter {
+    // SAFETY: reading EVENT acknowledges the interrupt for the current CPU, so concurrent reads
+    // from other CPUs don't conflict
     let event = match &sc.event {
-        Some(reg) => bus_read_4!(reg.get_mut(), 0),
-        None => bus_read_4!(sc.mem.get_mut(), AIC_EVENT),
+        Some(reg) => bus_read_4!(unsafe { reg.get() }, 0),
+        None => bus_read_4!(unsafe { sc.mem.get() }, AIC_EVENT),
     };
     let ty = event_type(event);
     assert!(ty != AIC_EVENT_TYPE_IPI);
