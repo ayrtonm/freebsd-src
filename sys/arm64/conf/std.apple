@@ -4,6 +4,7 @@
 
 # SoC support
 options 	SOC_APPLE_T8103
+options		ARM64_16K_PAGES
 
 options 	FDT
 options		IOMMU
