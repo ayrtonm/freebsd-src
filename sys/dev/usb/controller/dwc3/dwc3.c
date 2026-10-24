@@ -28,6 +28,7 @@
 
 #include "opt_platform.h"
 #include "opt_acpi.h"
+#include "opt_soc.h"
 
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -66,6 +67,9 @@
 
 #include <dev/clk/clk.h>
 #include <dev/phy/phy_usb.h>
+#ifdef SOC_APPLE_T8103
+#include <dev/powerdom/powerdom.h>
+#endif
 #endif
 
 #ifdef DEV_ACPI
@@ -399,6 +403,18 @@ snps_dwc3_common_attach(device_t dev, bool is_fdt)
 
 	sc = device_get_softc(dev);
 	sc->dev = dev;
+
+#if defined(FDT) && defined(SOC_APPLE_T8103)
+	/* The controller's registers are only accessible when powered. */
+	if (is_fdt && ofw_bus_is_compatible(dev, "apple,dwc3") == 1) {
+		error = powerdom_enable_all(dev);
+		if (error != 0) {
+			device_printf(dev, "Cannot enable power domains: %d\n",
+			    error);
+			return (ENXIO);
+		}
+	}
+#endif
 
 	rid = 0;
 	sc->mem_res = bus_alloc_resource_any(dev, SYS_RES_MEMORY, &rid,
