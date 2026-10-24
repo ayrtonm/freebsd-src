@@ -88,7 +88,7 @@
 #  define JEMALLOC_TLS_MODEL	/* Default. */
 #endif
 
-#define	LG_PAGE			PAGE_SHIFT
+#define	LG_PAGE			14
 #define	LG_SIZEOF_INT		2
 #define	LG_SIZEOF_LONG		LG_SIZEOF_PTR
 #define	LG_SIZEOF_INTMAX_T	3
