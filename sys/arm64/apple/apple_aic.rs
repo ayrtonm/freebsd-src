@@ -616,7 +616,7 @@ fn get_fdt_intr_data(dev: Device, data: &MapData) -> Result<(AppleIntrKind, i32)
             let num = num as usize;
             let intr = match ty {
                 0 => AppleIntrKind::Irq { die, irq: num },
-                1 => AppleIntrKind::Fiq(AppleFiqKind::all_fiqs()[num]),
+                1 => AppleIntrKind::Fiq(translate_fiq(AppleFiqKind::all_fiqs()[num])),
                 _ => {
                     return Err(EINVAL);
                 }
@@ -624,6 +624,28 @@ fn get_fdt_intr_data(dev: Device, data: &MapData) -> Result<(AppleIntrKind, i32)
             Ok((intr, flags as i32))
         }
         _ => Err(ENOTSUP),
+    }
+}
+
+/// The devicetree numbers the timer FIQs from the point of view of a kernel running at EL2 with
+/// VHE: the "hypervisor" timers are the kernel's own and the "guest" timers belong to VMs. A
+/// kernel running at EL1 (e.g. as a guest of m1n1's hypervisor) has no hypervisor timers, and the
+/// devicetree's guest timers are its own EL0 timers, which use the hypervisor timers' sources.
+/// The guest timers' mask bits in AIC_FIQ_VM_TIMER are only accessible from EL2, so they must not
+/// be used at EL1.
+///
+/// The hypervisor timers are left as they are rather than rejected: arm_tmr treats every timer
+/// listed in "interrupt-names" as required, so failing to map hyp-phys/hyp-virt would fail its
+/// attach. At EL1 they alias the phys/virt sources, which is harmless since arm_tmr only sets up
+/// a handler for the virtual timer there.
+fn translate_fiq(fiq: AppleFiqKind) -> AppleFiqKind {
+    if in_vhe() {
+        return fiq;
+    }
+    match fiq {
+        AIC_TMR_GUEST_PHYS => AIC_TMR_HV_PHYS,
+        AIC_TMR_GUEST_VIRT => AIC_TMR_HV_VIRT,
+        other => other,
     }
 }
 
