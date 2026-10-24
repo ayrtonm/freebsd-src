@@ -36,6 +36,7 @@ use kpi::device::{BusProbe, DeviceIf, Device};
 use kpi::ffi::{ToArrayCString, UninitPtr, Softc, PinProject, PinIndex};
 use kpi::intr::{IrqSrc, MapData, PicIf};
 use kpi::prelude::*;
+use kpi::sync::mtx::SpinLock;
 use kpi::sync::{Checked, OnceInit};
 use kpi::{define_driver, define_projectable};
 use simplebus::{SimpleBusDriver, SimpleBusSoftc, SimpleBusSoftcBase};
@@ -65,7 +66,9 @@ define_projectable! {
         irq: Irq,
         isrcs: [DockchannelIrqSrc; MAX_INTR],
         stat_reg: Checked<Register>,
-        mask_reg: Checked<Register>,
+        // IRQ_MASK is updated with read-modify-writes from interrupt filters and threads (the
+        // children mask and unmask their irqs), so it needs a spin lock rather than Checked
+        mask_reg: SpinLock<Register>,
     }
 }
 
@@ -107,8 +110,9 @@ impl DeviceIf for DockchannelDriver {
                 irq,
                 isrcs,
                 stat_reg: Checked::new(stat_reg),
-                mask_reg: Checked::new(mask_reg),
+                mask_reg: SpinLock::new(mask_reg),
             }));
+        mtx_init(sc.project().mask_reg, c"dockchannel mask", None, None);
 
         let dev = sc.device();
         bus_setup_intr(
@@ -195,15 +199,17 @@ impl DockchannelDriver {
 }
 
 fn dockchannel_mask_irq(sc: &Softc<DockchannelSoftc>, irq: u32) {
-    let mut mask_reg = sc.mask_reg.get_mut();
+    let mut mask_reg = mtx_lock_spin(&sc.mask_reg);
     let old_value = bus_read_4!(mask_reg, IRQ_MASK);
     bus_write_4!(mask_reg, IRQ_MASK, old_value & !(1 << irq));
+    mtx_unlock_spin(mask_reg);
 }
 
 fn dockchannel_unmask_irq(sc: &Softc<DockchannelSoftc>, irq: u32) {
-    let mut mask_reg = sc.mask_reg.get_mut();
+    let mut mask_reg = mtx_lock_spin(&sc.mask_reg);
     let old_value = bus_read_4!(mask_reg, IRQ_MASK);
     bus_write_4!(mask_reg, IRQ_MASK, old_value | (1 << irq));
+    mtx_unlock_spin(mask_reg);
 }
 
 fn do_dockchannel_irq_and_level(data: MapData) -> Result<(u32, u32)> {
