@@ -223,6 +223,10 @@ struct nvme_namespace {
 	struct mtx			lock;
 };
 
+uint32_t	nvme_qpair_sq_enter(struct nvme_qpair *qpair, struct nvme_tracker *tr);
+void		nvme_qpair_sq_leave(struct nvme_qpair *qpair, struct nvme_tracker *tr);
+void		nvme_qpair_cq_done(struct nvme_qpair *qpair, struct nvme_tracker *tr);
+
 /*
  * One of these per allocated PCI device.
  */
@@ -248,6 +252,7 @@ struct nvme_controller {
 #define	QUIRK_APPLE_S3X_NS1_ONLY		0x200	/* Ignore Apple-internal namespace 2 */
 #define	QUIRK_APPLE_128_BYTE_SQES		0x400	/* T2 uses 128-byte I/O SQEs */
 #define	QUIRK_PCIE_FLR_ON_FATAL			0x800	/* Use FLR for a fatal controller */
+#define	QUIRK_ANS						0x1000		/* Attached via Apple ANS */
 #define	QUIRK_IGNORE_RAB			0x2000	/* Don't configure AB from RAB */
 
 /* Values programmed into CC.IOSQES (log2 of the SQE size in bytes). */
@@ -463,7 +468,7 @@ void	nvme_ctrlr_submit_admin_request(struct nvme_controller *ctrlr,
 void	nvme_ctrlr_submit_io_request(struct nvme_controller *ctrlr,
 				     struct nvme_request *req);
 
-int	nvme_qpair_construct(struct nvme_qpair *qpair,
+int	nvme_qpair_construct(device_t dev, struct nvme_qpair *qpair,
 			     uint32_t num_entries, uint32_t num_trackers,
 			     struct nvme_controller *ctrlr);
 void	nvme_qpair_submit_tracker(struct nvme_qpair *qpair,
