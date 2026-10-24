@@ -34,11 +34,15 @@ use core::cmp::min;
 use core::ffi::{CStr, c_char, c_void};
 use core::mem::MaybeUninit;
 use core::slice;
-use core::sync::atomic::{AtomicBool, AtomicU8, Ordering, AtomicPtr};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering, AtomicPtr};
 use dockchannel::DockchannelDriver;
 use hid::HidIf;
-use kpi::bindings::{device_t, hid_device_info, hid_intr_t, hid_rdesc_info, hid_size_t, phandle_t};
+use kpi::bindings::{
+    bus_dma_segment_t, bus_size_t, device_t, hid_device_info, hid_intr_t, hid_rdesc_info,
+    hid_size_t, phandle_t,
+};
 use kpi::boxed::Box;
+use kpi::bus::dma::{BusDmaMap, BusDmaMem, BusDmaTag};
 use kpi::bus::{Filter, Irq, Register, Resource, SysRes};
 use kpi::device::{BusProbe, DeviceIf, Device};
 use kpi::ffi::{ArrayCString, Ptr, UninitPtr, Softc, PinProject};
@@ -227,6 +231,36 @@ struct MtpGpioAck {
 
 impl_from_slice!(MtpGpioAck);
 
+// Header of the multi-touch firmware files extracted from macOS (apple/tpmtfw-*.bin). The data
+// sent to the device follows the header.
+const MTP_FW_MAGIC: u32 = 0x46444948; // "HIDF"
+const MTP_FW_VERSION: u32 = 1;
+
+#[repr(packed)]
+struct MtpFwHdr {
+    magic: u32,
+    version: u32,
+    hdr_len: u32,
+    data_len: u32,
+    // Offset in the data of a byte to overwrite with the interface index, 0 if none
+    iface_offset: u32,
+}
+
+impl_from_slice!(MtpFwHdr);
+
+#[repr(packed)]
+struct MtpSendFwCmd {
+    cmd: u8,
+    unk0: u8,
+    unk1: u8,
+    iface: u8,
+    // Device address of the firmware data
+    addr: u64,
+    size: u32,
+}
+
+impl_from_slice!(MtpSendFwCmd);
+
 const STM_REPORT_ID: u8 = 0x10;
 const STM_REPORT_SERIAL: u8 = 0x11;
 
@@ -306,7 +340,13 @@ define_projectable! {
         mt_hid: DockchannelHidChild,
         // Set by whichever task thread gets to add the keyboard's hidbus child first
         kbd_child_added: AtomicBool,
-    
+        // Same for the multi-touch child
+        mt_child_added: AtomicBool,
+        // Set once the multi-touch firmware upload has been started (on first open)
+        mt_fw_loaded: AtomicBool,
+        // Device address of the multi-touch firmware buffer, set by the dmamap callback
+        mt_fw_addr: AtomicU64,
+
         stm_id: OnceInit<DockchannelHidStmId>,
         serial: OnceInit<[c_char; 64]>,
     }
@@ -387,6 +427,9 @@ impl DeviceIf for DockchannelHidDriver {
             mt_hid: DockchannelHidChild::default(),
 
             kbd_child_added: AtomicBool::new(false),
+            mt_child_added: AtomicBool::new(false),
+            mt_fw_loaded: AtomicBool::new(false),
+            mt_fw_addr: AtomicU64::new(0),
 
             stm_id: OnceInit::uninit(),
             serial: OnceInit::uninit(),
@@ -619,6 +662,16 @@ fn try_dockchannel_hid_task(sc: &Softc<DockchannelHidSoftc>) -> Result<()> {
                     let ctx = sc.kbd_hid.ctx.load(Ordering::Acquire);
                     unsafe { handler(ctx, ptr, sublen as hid_size_t) }
                 }
+            } else if let Some(iface) = sc.mt.iface.try_get()
+                && *iface == hdr.iface
+                && sc.mt.ready.load(Ordering::Relaxed)
+            {
+                // Same as the keyboard, drop reports until the multi-touch child's handler is set
+                if let Some(Some(handler)) = sc.mt_hid.handler.try_get() {
+                    let ptr = remaining_buf.as_mut_ptr().cast::<c_void>();
+                    let ctx = sc.mt_hid.ctx.load(Ordering::Acquire);
+                    unsafe { handler(ctx, ptr, sublen as hid_size_t) }
+                }
             };
         }
         _ => {
@@ -702,11 +755,15 @@ fn dockchannel_handle_comm(sc: &Softc<DockchannelHidSoftc>, buf: &mut [u8]) -> R
                 if sc.kbd.ready.load(Ordering::Relaxed) {
                     dockchannel_hid_add_kbd_child(sc)?;
                 }
+                if sc.mt.ready.load(Ordering::Relaxed) {
+                    dockchannel_hid_add_mt_child(sc)?;
+                }
             } else if Some(ready_iface) == sc.kbd.iface.try_get().cloned() {
                 sc.kbd.ready.store(true, Ordering::Relaxed);
                 dockchannel_hid_add_kbd_child(sc)?;
             } else if Some(ready_iface) == sc.mt.iface.try_get().cloned() {
                 sc.mt.ready.store(true, Ordering::Relaxed);
+                dockchannel_hid_add_mt_child(sc)?;
             };
             DockchannelDriver::unmask_rx(sc.device());
         }
@@ -724,8 +781,16 @@ fn dockchannel_handle_comm(sc: &Softc<DockchannelHidSoftc>, buf: &mut [u8]) -> R
                 gpio_cmd.gpio,
                 gpio_cmd.iface
             );
-            if Some(&gpio_cmd.iface) == sc.stm.iface.try_get()
-                && let (Some(smc), Some(gpio_pin)) = (sc.stm.smc.try_get(), sc.stm.gpio.try_get())
+            // The stm and multi-touch interfaces each request a reset GPIO during init
+            let dcif = if Some(&gpio_cmd.iface) == sc.stm.iface.try_get() {
+                Some(&sc.stm)
+            } else if Some(&gpio_cmd.iface) == sc.mt.iface.try_get() {
+                Some(&sc.mt)
+            } else {
+                None
+            };
+            if let Some(dcif) = dcif
+                && let (Some(smc), Some(gpio_pin)) = (dcif.smc.try_get(), dcif.gpio.try_get())
             {
                 let cdev = OF_device_from_xref(*smc)?;
                 let gpio_pin = *gpio_pin;
@@ -734,7 +799,8 @@ fn dockchannel_handle_comm(sc: &Softc<DockchannelHidSoftc>, buf: &mut [u8]) -> R
                 apple_smc_gpio_pin_set(cdev, gpio_pin, 0)?;
                 let mut ack = MtpGpioAck {
                     ty: MTP_CMD_ACK_GPIO_CMD,
-                    retcode: 0xe000f00d,
+                    // The pulse was done, report success
+                    retcode: 0,
                     cmd: [0; 512],
                 };
                 let ack_cmd_len = min(512, buf.len());
@@ -758,12 +824,27 @@ fn dockchannel_hid_add_kbd_child(sc: &Softc<DockchannelHidSoftc>) -> Result<()> 
         return Ok(());
     }
     device_println!(sc.device(), "adding child device for keyboard");
-    dockchannel_hid_add_child(sc, &sc.kbd_hid)
+    dockchannel_hid_add_child(sc, &sc.kbd_hid, &sc.kbd)
+}
+
+// Same as the keyboard. The firmware the trackpad needs is only sent when the child is opened
+// (hid_intr_start), when the root filesystem with /boot/firmware is available.
+fn dockchannel_hid_add_mt_child(sc: &Softc<DockchannelHidSoftc>) -> Result<()> {
+    if !sc.mt.desc.is_init() {
+        device_println!(sc.device(), "multi-touch has no HID descriptor, not adding it");
+        return Ok(());
+    }
+    if sc.mt_child_added.swap(true, Ordering::AcqRel) {
+        return Ok(());
+    }
+    device_println!(sc.device(), "adding child device for multi-touch");
+    dockchannel_hid_add_child(sc, &sc.mt_hid, &sc.mt)
 }
 
 fn dockchannel_hid_add_child(
     sc: &Softc<DockchannelHidSoftc>,
     child: &DockchannelHidChild,
+    dcif: &DockchannelHidIface,
 ) -> Result<()> {
     let dev = sc.device();
     DockchannelDriver::unmask_rx(dev);
@@ -774,9 +855,15 @@ fn dockchannel_hid_add_child(
     hidbus_hw.idVendor = stm_id.vendor_id;
     hidbus_hw.idProduct = stm_id.product_id;
     hidbus_hw.idVersion = stm_id.version;
-    hidbus_hw.rdescsize = sc.kbd.desc.get().len() as u32;
+    hidbus_hw.rdescsize = dcif.desc.get().len() as u32;
     let serial = sc.serial.try_get().copied().unwrap_or([0; 64]);
     (&mut hidbus_hw.serial[..64]).copy_from_slice(&serial[..]);
+    // bcm5974 recognizes the trackpad by this PnP ID (APPLE_MTP_TP there)
+    if core::ptr::eq(child, &sc.mt_hid) {
+        for (dst, &src) in hidbus_hw.idPnP.iter_mut().zip(b"APPLE-MTP-TP\0") {
+            *dst = src as c_char;
+        }
+    }
 
     let res = unsafe {
         bindings::hid_add_dynamic_quirk(&raw mut *hidbus_hw, bindings::HQ_NOWRITE as u16)
@@ -890,17 +977,168 @@ fn dockchannel_handle_init(sc: &Softc<DockchannelHidSoftc>, iface: u8, buf: &mut
     Ok(())
 }
 
+// Send a command on the comm interface and wait for its ack
+fn dockchannel_hid_comm_cmd(sc: &Softc<DockchannelHidSoftc>, cmd: &[u8]) -> Result<()> {
+    let mut flags = (MtpGroup::Cmd as u8) << MTP_GROUP_SHIFT;
+    flags |= (MtpReq::SetReport as u8) << MTP_REQ_SHIFT;
+
+    dockchannel_hid_cmd(sc, &sc.comm, flags, cmd)?;
+    dockchannel_hid_wait_ack(sc, &sc.comm, sc.comm.seq.load(Ordering::Relaxed) - 1);
+    Ok(())
+}
+
 fn dockchannel_hid_iface_enable(
     sc: &Softc<DockchannelHidSoftc>,
     dcif: &DockchannelHidIface,
 ) -> Result<()> {
-    let cmd = [MTP_CMD_IFACE_ENABLE, *dcif.iface.get()];
-    let mut flags = (MtpGroup::Cmd as u8) << MTP_GROUP_SHIFT;
-    flags |= (MtpReq::SetReport as u8) << MTP_REQ_SHIFT;
+    dockchannel_hid_comm_cmd(sc, &[MTP_CMD_IFACE_ENABLE, *dcif.iface.get()])
+}
 
-    dockchannel_hid_cmd(sc, &sc.comm, flags, &cmd)?;
-    dockchannel_hid_wait_ack(sc, &sc.comm, sc.comm.seq.load(Ordering::Relaxed) - 1);
-    Ok(())
+fn dockchannel_hid_iface_reset(
+    sc: &Softc<DockchannelHidSoftc>,
+    dcif: &DockchannelHidIface,
+    state: u8,
+) -> Result<()> {
+    dockchannel_hid_comm_cmd(sc, &[MTP_CMD_IFACE_RESET, 1, *dcif.iface.get(), state])
+}
+
+// Name of the multi-touch firmware from the "multi-touch" child node's firmware-name property,
+// NUL-terminated. None if the node or the property doesn't exist (no firmware needed).
+fn dockchannel_hid_mt_fw_name(sc: &Softc<DockchannelHidSoftc>) -> Option<[u8; 64]> {
+    let mut child = OF_child(sc.node);
+    while let Some(node) = child {
+        let mut name = [0u8; 32];
+        let len = unsafe {
+            bindings::OF_getprop(
+                node.as_phandle(),
+                c"name".as_ptr(),
+                name.as_mut_ptr().cast::<c_void>(),
+                name.len() - 1,
+            )
+        };
+        if len > 0 && CStr::from_bytes_until_nul(&name).ok() == Some(c"multi-touch") {
+            let mut fw_name = [0u8; 64];
+            let len = unsafe {
+                bindings::OF_getprop(
+                    node.as_phandle(),
+                    c"firmware-name".as_ptr(),
+                    fw_name.as_mut_ptr().cast::<c_void>(),
+                    fw_name.len() - 1,
+                )
+            };
+            return if len > 0 { Some(fw_name) } else { None };
+        }
+        child = OF_peer(node);
+    }
+    None
+}
+
+extern "C" fn dockchannel_hid_mt_fw_cb(
+    sc: Ptr<DockchannelHidSoftc>,
+    segs: &bus_dma_segment_t,
+    nsegs: i32,
+    error: i32,
+) {
+    if error != 0 || nsegs != 1 {
+        return;
+    }
+    sc.as_pin().mt_fw_addr.store(segs.ds_addr, Ordering::Release);
+}
+
+// Upload the multi-touch firmware and reset the interface, which the trackpad needs before it
+// sends any reports. The firmware data is copied into a DMA buffer and the device is told its
+// address.
+fn dockchannel_hid_load_mt_fw(sc: &Softc<DockchannelHidSoftc>) -> Result<()> {
+    let dev = sc.device();
+    let Some(fw_name) = dockchannel_hid_mt_fw_name(sc) else {
+        return Ok(());
+    };
+    let fw_name = CStr::from_bytes_until_nul(&fw_name).map_err(|_| EINVAL)?;
+    let iface = *sc.mt.iface.get();
+
+    let fw = unsafe { bindings::firmware_get(fw_name.as_ptr()) };
+    if fw.is_null() {
+        device_println!(dev, "couldn't load {fw_name:?}, the trackpad won't work");
+        return Err(ENOENT);
+    }
+    // SAFETY: firmware_get returned a valid firmware, which stays valid until firmware_put
+    let data = unsafe { slice::from_raw_parts((*fw).data.cast::<u8>(), (*fw).datasize) };
+
+    let res = (|| {
+        if data.len() < size_of::<MtpFwHdr>() {
+            return Err(EINVAL);
+        }
+        let hdr = MtpFwHdr::from_slice(data);
+        let (magic, version) = (hdr.magic, hdr.version);
+        let (hdr_len, data_len, iface_offset) =
+            (hdr.hdr_len as usize, hdr.data_len as usize, hdr.iface_offset as usize);
+        if magic != MTP_FW_MAGIC
+            || version != MTP_FW_VERSION
+            || hdr_len < size_of::<MtpFwHdr>()
+            || hdr_len.checked_add(data_len).is_none_or(|end| end > data.len())
+            || iface_offset >= data_len
+        {
+            device_println!(dev, "{fw_name:?} has an invalid header");
+            return Err(EINVAL);
+        }
+        let payload = &data[hdr_len..hdr_len + data_len];
+
+        // The device may keep using the firmware after loading it, so the buffer is kept for
+        // the lifetime of the driver
+        let size = data_len as bus_size_t;
+        let tag: BusDmaTag = bus_dma_tag_create(bus_get_dma_tag(dev))
+            .alignment(PAGE_SIZE)
+            .max_size(size)
+            .max_seg_size(size)
+            .flags(Some(BUS_DMA_COHERENT))
+            .build()?;
+        let (map, kva): (BusDmaMap, BusDmaMem) =
+            bus_dmamem_alloc(tag, BUS_DMA_WAITOK | BUS_DMA_ZERO)?;
+        let buf = kva.as_ptr().cast::<u8>();
+        // SAFETY: buf was just allocated with room for size bytes
+        unsafe {
+            core::ptr::copy_nonoverlapping(payload.as_ptr(), buf, payload.len());
+            if iface_offset != 0 {
+                *buf.add(iface_offset) = iface;
+            }
+        }
+
+        sc.mt_fw_addr.store(0, Ordering::Relaxed);
+        bus_dmamap_load(
+            tag,
+            map,
+            kva,
+            size,
+            Some(dockchannel_hid_mt_fw_cb),
+            sc.get_ptr(),
+            Some(BUS_DMA_NOWAIT),
+        )?;
+        let addr = sc.mt_fw_addr.load(Ordering::Acquire);
+        if addr == 0 {
+            device_println!(dev, "couldn't map the multi-touch firmware buffer");
+            return Err(ENOMEM);
+        }
+        bus_dmamap_sync(tag, map, BUS_DMASYNC_PREWRITE);
+
+        device_println!(dev, "sending {size} bytes of multi-touch firmware");
+        let cmd = MtpSendFwCmd {
+            cmd: MTP_CMD_SEND_FIRMWARE,
+            unk0: 2,
+            unk1: 0,
+            iface,
+            addr,
+            size: data_len as u32,
+        };
+        dockchannel_hid_comm_cmd(sc, cmd.as_slice())?;
+
+        // After loading firmware, multi-touch needs a reset
+        dockchannel_hid_iface_reset(sc, &sc.mt, 0)?;
+        dockchannel_hid_iface_reset(sc, &sc.mt, 2)?;
+        Ok(())
+    })();
+
+    unsafe { bindings::firmware_put(fw, bindings::FIRMWARE_UNLOAD as i32) };
+    res
 }
 
 fn dockchannel_hid_cmd(
@@ -956,7 +1194,7 @@ fn dockchannel_hid_wait_ack(
         let (g, res) = mtx_sleep(&dcif.ret, guard, PWAIT.0, c"dcack", hz());
         guard = g;
         if res.is_err() {
-            device_println!(dev, "still waiting for ack of packet #{wait_seq:?}");
+            //device_println!(dev, "still waiting for ack of packet #{wait_seq:?}");
         }
     }
     let ret = guard.take().unwrap();
@@ -1012,9 +1250,18 @@ fn dockchannel_hid_handle_gpio_req(
     let cdev = OF_device_from_xref(xref)?;
     apple_smc_gpio_pin_set(cdev, prop[1], 0)?;
 
-    if Some(&iface) == sc.stm.iface.try_get() && !sc.stm.smc.is_init() {
-        sc.stm.smc.init(xref);
-        sc.stm.gpio.init(prop[1]);
+    let dcif = if Some(&iface) == sc.stm.iface.try_get() {
+        Some(&sc.stm)
+    } else if Some(&iface) == sc.mt.iface.try_get() {
+        Some(&sc.mt)
+    } else {
+        None
+    };
+    if let Some(dcif) = dcif
+        && !dcif.smc.is_init()
+    {
+        dcif.smc.init(xref);
+        dcif.gpio.init(prop[1]);
     }
     Ok(())
 }
@@ -1139,9 +1386,10 @@ fn dockchannel_hid_get_child<'a>(
     sc: &'a DockchannelHidSoftc,
     child: Device,
 ) -> (&'a DockchannelHidChild, &'a DockchannelHidIface) {
-    if *sc.kbd_hid.hidbus.get() == child.as_ptr() {
+    // Either child may not have been added yet, try_get rather than panicking in get
+    if sc.kbd_hid.hidbus.try_get() == Some(&child.as_ptr()) {
         (&sc.kbd_hid, &sc.kbd)
-    } else if *sc.mt_hid.hidbus.get() == child.as_ptr() {
+    } else if sc.mt_hid.hidbus.try_get() == Some(&child.as_ptr()) {
         (&sc.mt_hid, &sc.mt)
     } else {
         panic!("uh oh")
@@ -1176,6 +1424,17 @@ impl HidIf for DockchannelHidDriver {
     }
     fn hid_intr_unsetup(sc: &Softc<DockchannelHidSoftc>, child: Device) {}
     fn hid_intr_start(sc: &Softc<DockchannelHidSoftc>, child: Device) -> Result<()> {
+        // Send the multi-touch firmware when the trackpad is first opened, once /boot/firmware is
+        // available. This runs with only hidbus' sx lock held, so sleeping for the acks is fine.
+        let (_, dcif) = dockchannel_hid_get_child(&*sc, child);
+        if core::ptr::eq(dcif, &sc.mt) && !sc.mt_fw_loaded.swap(true, Ordering::AcqRel) {
+            if let Err(e) = dockchannel_hid_load_mt_fw(sc) {
+                device_println!(sc.device(), "failed to load multi-touch firmware {e:?}");
+                // Retry on the next open
+                sc.mt_fw_loaded.store(false, Ordering::Release);
+                return Err(e);
+            }
+        }
         Ok(())
     }
     fn hid_intr_stop(sc: &Softc<DockchannelHidSoftc>, child: Device) -> Result<()> {

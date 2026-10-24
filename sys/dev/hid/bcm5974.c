@@ -114,6 +114,7 @@ enum tp_type {
 	TYPE3,			/* additional header fields since June 2013 */
 	TYPE4,                  /* additional header field for pressure data */
 	TYPE_MT2U,			/* Magic Trackpad 2 USB */
+	TYPE_MTP,		/* Apple silicon laptops, behind the MTP coprocessor */
 	TYPE_CNT
 };
 
@@ -158,7 +159,49 @@ struct tp_type_params {
 		.offset = 12,
 		.delta = 0,
 	},
+	/*
+	 * The finger records are assumed to be the same as on Type4 SPI
+	 * trackpads.  The header layout isn't known for certain, so the Type4
+	 * values are only defaults and can be overridden with the
+	 * hw.hid.bcm5974.mtp_* tunables (see bcm5974_mtp_params()).
+	 */
+	[TYPE_MTP] = {
+		.caps = HAS_INTEGRATED_BUTTON | SUPPORTS_FORCETOUCH,
+		.button = 31,
+		.offset = 23 * 2,
+		.delta = 2,
+	},
 };
+
+/*
+ * Tunables for the MTP trackpad header layout and axis ranges.  They are read
+ * when the driver attaches.  Set hw.hid.bcm5974.mtp_dump to N to hexdump the
+ * next N raw reports, e.g. to work out the header layout.
+ */
+static int bcm5974_mtp_button = 31;
+SYSCTL_INT(_hw_hid_bcm5974, OID_AUTO, mtp_button, CTLFLAG_RWTUN,
+    &bcm5974_mtp_button, 0, "MTP trackpad: offset of the button byte");
+static int bcm5974_mtp_offset = 23 * 2;
+SYSCTL_INT(_hw_hid_bcm5974, OID_AUTO, mtp_offset, CTLFLAG_RWTUN,
+    &bcm5974_mtp_offset, 0, "MTP trackpad: offset of the finger data");
+static int bcm5974_mtp_delta = 2;
+SYSCTL_INT(_hw_hid_bcm5974, OID_AUTO, mtp_delta, CTLFLAG_RWTUN,
+    &bcm5974_mtp_delta, 0, "MTP trackpad: padding before each finger record");
+static int bcm5974_mtp_x_min = -6243;
+SYSCTL_INT(_hw_hid_bcm5974, OID_AUTO, mtp_x_min, CTLFLAG_RWTUN,
+    &bcm5974_mtp_x_min, 0, "MTP trackpad: minimum X coordinate");
+static int bcm5974_mtp_x_max = 6749;
+SYSCTL_INT(_hw_hid_bcm5974, OID_AUTO, mtp_x_max, CTLFLAG_RWTUN,
+    &bcm5974_mtp_x_max, 0, "MTP trackpad: maximum X coordinate");
+static int bcm5974_mtp_y_min = -170;
+SYSCTL_INT(_hw_hid_bcm5974, OID_AUTO, mtp_y_min, CTLFLAG_RWTUN,
+    &bcm5974_mtp_y_min, 0, "MTP trackpad: minimum Y coordinate");
+static int bcm5974_mtp_y_max = 7685;
+SYSCTL_INT(_hw_hid_bcm5974, OID_AUTO, mtp_y_max, CTLFLAG_RWTUN,
+    &bcm5974_mtp_y_max, 0, "MTP trackpad: maximum Y coordinate");
+static int bcm5974_mtp_dump = 0;
+SYSCTL_INT(_hw_hid_bcm5974, OID_AUTO, mtp_dump, CTLFLAG_RWTUN,
+    &bcm5974_mtp_dump, 0, "MTP trackpad: hexdump this many raw reports");
 
 /* trackpad finger structure - compact version for external "Magic" devices */
 struct tp_finger_compact {
@@ -216,6 +259,7 @@ enum {
 	BCM5974_FLAG_WELLSPRING9_MODEL5,
 	BCM5974_FLAG_WELLSPRING9_MODEL6,
 	BCM5974_FLAG_MAGIC_TRACKPAD2_USB,
+	BCM5974_FLAG_MTP,
 	BCM5974_FLAG_MAX,
 };
 
@@ -402,6 +446,16 @@ static const struct bcm5974_dev_params bcm5974_dev_params[BCM5974_FLAG_MAX] = {
 		.y = { SN_COORD, -2478, 2587, 107 },
 		.o = { SN_ORIENT, -3, 4, 0 },
 	},
+	/* x and y are replaced by the hw.hid.bcm5974.mtp_* tunables on attach */
+	[BCM5974_FLAG_MTP] = {
+		.tp = tp + TYPE_MTP,
+		.p = { SN_PRESSURE, 0, 4096, 4096 },
+		.w = { SN_WIDTH, 0, 2048, 0 },
+		.x = { SN_COORD, -6243, 6749, 105 },
+		.y = { SN_COORD, -170, 7685, 75 },
+		.o = { SN_ORIENT,
+		    -MAX_FINGER_ORIENTATION, MAX_FINGER_ORIENTATION, 0 },
+	},
 };
 
 #define	BCM5974_DEV(v,p,i)	{					\
@@ -416,6 +470,13 @@ static const struct bcm5974_dev_params bcm5974_dev_params[BCM5974_FLAG_MAX] = {
 #define	APPLE_HID	"APP000D"
 #define	BCM5974_DEV_SPI(hid, i)	{					\
 	HID_BUS(BUS_SPI), HID_PNP(hid), HID_DRIVER_INFO(i),		\
+	HID_TLC(BCM5974_TLC_PAGE, BCM5974_TLC_USAGE),			\
+}
+
+/* Set by dockchannel_hid on the multi-touch interface's hidbus child */
+#define	APPLE_MTP_TP	"APPLE-MTP-TP"
+#define	BCM5974_DEV_MTP(pnp, i)	{					\
+	HID_BUS(BUS_HOST), HID_PNP(pnp), HID_DRIVER_INFO(i),		\
 	HID_TLC(BCM5974_TLC_PAGE, BCM5974_TLC_USAGE),			\
 }
 
@@ -491,6 +552,9 @@ static const struct hid_device_id bcm5974_devs[] = {
 
 	/* External "Magic" devices */
 	BCM5974_DEV(APPLE, MAGIC_TRACKPAD2, BCM5974_FLAG_MAGIC_TRACKPAD2_USB),
+
+	/* Apple silicon laptops */
+	BCM5974_DEV_MTP(APPLE_MTP_TP, BCM5974_FLAG_MTP),
 };
 
 #define	BCM5974_WELLSPRING9_RDESC_SIZE		110
@@ -501,6 +565,10 @@ struct bcm5974_softc {
 	struct evdev_dev *sc_evdev;
 	/* device configuration */
 	const struct bcm5974_dev_params *sc_params;
+	enum tp_type sc_type;
+	/* copies of the parameters that tunables may override (MTP) */
+	struct bcm5974_dev_params sc_dev_params;
+	struct tp_type_params sc_tp_params;
 	bool sc_saved_mode;
 };
 
@@ -621,12 +689,13 @@ bcm5974_set_device_mode(struct bcm5974_softc *sc, bool on)
 {
 	int err = 0;
 
-	switch (sc->sc_params->tp - tp) {
+	switch (sc->sc_type) {
 	case TYPE1:
 	case TYPE2:
 		err = bcm5974_set_device_mode_usb(sc, on);
 		break;
 	case TYPE3:	/* Type 3 does not require a mode switch */
+	case TYPE_MTP:	/* the MTP trackpad only sends raw reports */
 		break;
 	case TYPE4:
 	case TYPE_MT2U:
@@ -680,9 +749,39 @@ bcm5974_get_wsp9_model(device_t dev)
 	return (BCM5974_FLAG_WELLSPRING9_MODEL_SPI);
 }
 
+/* Apply the hw.hid.bcm5974.mtp_* tunables to the MTP trackpad's parameters */
+static void
+bcm5974_mtp_params(struct bcm5974_softc *sc)
+{
+	struct tp_type_params *tpp = &sc->sc_tp_params;
+	struct bcm5974_dev_params *dp = &sc->sc_dev_params;
+
+	if (bcm5974_mtp_button >= 0 && bcm5974_mtp_button <= UINT8_MAX &&
+	    bcm5974_mtp_offset >= 0 && bcm5974_mtp_offset <= UINT8_MAX &&
+	    bcm5974_mtp_delta >= 0 && bcm5974_mtp_delta <= UINT8_MAX) {
+		tpp->button = bcm5974_mtp_button;
+		tpp->offset = bcm5974_mtp_offset;
+		tpp->delta = bcm5974_mtp_delta;
+	} else {
+		device_printf(sc->sc_dev,
+		    "MTP header offsets out of range, using defaults\n");
+	}
+	if (bcm5974_mtp_x_min < bcm5974_mtp_x_max &&
+	    bcm5974_mtp_y_min < bcm5974_mtp_y_max) {
+		dp->x.min = bcm5974_mtp_x_min;
+		dp->x.max = bcm5974_mtp_x_max;
+		dp->y.min = bcm5974_mtp_y_min;
+		dp->y.max = bcm5974_mtp_y_max;
+	} else {
+		device_printf(sc->sc_dev,
+		    "MTP axis ranges invalid, using defaults\n");
+	}
+}
+
 static void
 bcm5974_identify(driver_t *driver, device_t parent)
 {
+	const struct hid_device_id *id;
 	void *d_ptr;
 	hid_size_t d_len;
 
@@ -690,11 +789,13 @@ bcm5974_identify(driver_t *driver, device_t parent)
 	 * The bcm5974 touchpad has no stable RAW mode TLC in its report
 	 * descriptor.  So replace existing HID mode mouse TLC with dummy one
 	 * to set proper transport layer buffer sizes, make driver probe
-	 * simpler and prevent unwanted hms driver attachment.
+	 * simpler and prevent unwanted hms driver attachment.  The MTP
+	 * trackpad only sends raw reports, so always replace its descriptor.
 	 */
-	if (HIDBUS_LOOKUP_ID(parent, bcm5974_devs) != NULL &&
+	id = HIDBUS_LOOKUP_ID(parent, bcm5974_devs);
+	if (id != NULL &&
 	    hid_get_report_descr(parent, &d_ptr, &d_len) == 0 &&
-	    hid_is_mouse(d_ptr, d_len))
+	    (id->driver_info == BCM5974_FLAG_MTP || hid_is_mouse(d_ptr, d_len)))
 		hid_set_report_descr(parent, bcm5974_rdesc,
 		    sizeof(bcm5974_rdesc));
 }
@@ -729,7 +830,13 @@ bcm5974_attach(device_t dev)
 	drv_info = hidbus_get_driver_info(dev);
 	if (drv_info == BCM5974_FLAG_WELLSPRING9_MODEL_SPI)
 		drv_info = bcm5974_get_wsp9_model(dev);
-	sc->sc_params = bcm5974_dev_params + drv_info;
+	sc->sc_type = bcm5974_dev_params[drv_info].tp - tp;
+	sc->sc_dev_params = bcm5974_dev_params[drv_info];
+	sc->sc_tp_params = *bcm5974_dev_params[drv_info].tp;
+	sc->sc_dev_params.tp = &sc->sc_tp_params;
+	if (sc->sc_type == TYPE_MTP)
+		bcm5974_mtp_params(sc);
+	sc->sc_params = &sc->sc_dev_params;
 
 	sc->sc_evdev = evdev_alloc();
 	evdev_set_name(sc->sc_evdev, device_get_desc(dev));
@@ -831,6 +938,12 @@ bcm5974_intr(void *context, void *data, hid_size_t len)
 
 	if ((params->tp->caps & USES_COMPACT_REPORT) != 0)
 		fsize = sizeof(struct tp_finger_compact) + params->tp->delta;
+
+	if (sc->sc_type == TYPE_MTP && bcm5974_mtp_dump > 0) {
+		bcm5974_mtp_dump--;
+		device_printf(sc->sc_dev, "raw report, %u bytes:\n", len);
+		hexdump(data, len, NULL, 0);
+	}
 
 	if ((len < params->tp->offset + fsize) ||
 	    ((len - params->tp->offset) % fsize) != 0) {
