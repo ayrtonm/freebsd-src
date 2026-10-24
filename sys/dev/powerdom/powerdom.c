@@ -171,6 +171,37 @@ powerdom_get_by_ofw_name(device_t consumer_dev, phandle_t cnode, char *name,
 	return (powerdom_get_by_ofw_idx(consumer_dev, cnode, idx, pd));
 }
 
+/*
+ * Enable every power domain listed in the consumer's "power-domains"
+ * property.  A device without the property is not an error.
+ */
+int
+powerdom_enable_all(device_t consumer_dev)
+{
+	powerdom_t pd;
+	phandle_t cnode;
+	int idx, rv;
+
+	cnode = ofw_bus_get_node(consumer_dev);
+	if (cnode <= 0) {
+		device_printf(consumer_dev,
+		    "%s called on not ofw based device\n", __func__);
+		return (ENXIO);
+	}
+
+	for (idx = 0; ; idx++) {
+		rv = powerdom_get_by_ofw_idx(consumer_dev, cnode, idx, &pd);
+		if (rv == ENOENT)
+			return (0);
+		if (rv != 0)
+			return (rv);
+		rv = powerdom_enable(pd);
+		powerdom_release(pd);
+		if (rv != 0)
+			return (rv);
+	}
+}
+
 void
 powerdom_register_ofw_provider(device_t provider_dev)
 {
