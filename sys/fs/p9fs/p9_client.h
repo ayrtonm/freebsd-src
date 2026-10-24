@@ -72,11 +72,18 @@ enum transport_status {
 #define P9FS_MTU 131072
 
 /*
+ * Room for the header of a read, readdir or write message (as Linux's
+ * P9_IOHDRSZ).  A whole message, header included, must fit in msize, so the
+ * data in one of these can be at most msize - P9FS_IOHDRSZ.
+ */
+#define P9FS_IOHDRSZ 24
+
+/*
  * Even though we have a 8k buffer, Qemu is typically doing 8168
  * because of a HDR of 24. Use that amount for transfers so that we dont
  * drop anything.
  */
-#define P9FS_IOUNIT (P9FS_MTU - 24)
+#define P9FS_IOUNIT (P9FS_MTU - P9FS_IOHDRSZ)
 #define P9FS_DIRENT_LEN 256
 #define P9_NOTAG 0
 

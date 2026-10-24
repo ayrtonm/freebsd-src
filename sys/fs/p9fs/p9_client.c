@@ -873,8 +873,8 @@ p9_client_readdir(struct p9_fid *fid, char *data, uint64_t offset,
 	rsize = fid->mtu;
 	clnt = fid->clnt;
 
-	if (rsize == 0 || rsize > clnt->msize)
-		rsize = clnt->msize;
+	if (rsize == 0 || rsize > clnt->msize - P9FS_IOHDRSZ)
+		rsize = clnt->msize - P9FS_IOHDRSZ;
 
 	if (count < rsize)
 		rsize = count;
@@ -927,8 +927,8 @@ p9_client_read(struct p9_fid *fid, uint64_t offset, uint32_t count, char *data)
 	P9_DEBUG(PROTO, "TREAD fid %d offset %llu %u\n",
 	    fid->fid, (unsigned long long) offset, count);
 
-	if (!rsize || rsize > clnt->msize)
-		rsize = clnt->msize;
+	if (!rsize || rsize > clnt->msize - P9FS_IOHDRSZ)
+		rsize = clnt->msize - P9FS_IOHDRSZ;
 
 	if (count < rsize)
 		rsize = count;
@@ -993,8 +993,8 @@ p9_client_write(struct p9_fid *fid, uint64_t offset, uint32_t count, char *data)
 	P9_DEBUG(PROTO, "TWRITE fid %d offset %llu  %u\n",
 	    fid->fid, (unsigned long long) offset, count);
 
-	if (!rsize || rsize > clnt->msize)
-		rsize = clnt->msize;
+	if (!rsize || rsize > clnt->msize - P9FS_IOHDRSZ)
+		rsize = clnt->msize - P9FS_IOHDRSZ;
 
 	/* Limit set by Qemu ,8168 */
 	if (count > rsize) {

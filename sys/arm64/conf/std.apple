@@ -19,3 +19,7 @@ device		dwc3
 device		powerdom
 #options		BOOTVERBOSE=1
 #options		VERBOSE_SYSINIT=1
+device		virtio
+device		virtio_mmio
+device		virtio_p9fs
+device		p9fs
