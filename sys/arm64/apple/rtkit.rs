@@ -32,6 +32,7 @@ use kpi::bindings::{bus_addr_t, bus_dma_segment_t, bus_size_t};
 use kpi::bus::dma::{BusDmaMap, BusDmaMem, BusDmaTag};
 use kpi::device::{Device, DeviceIf, BusyDevice};
 use kpi::ffi::{ArrayCString, Ptr, Softc, SubClass, Embeds, PinProject};
+use kpi::intr::Channel;
 use kpi::prelude::*;
 use kpi::define_projectable;
 use kpi::sync::mtx::SpinLock;
@@ -308,7 +309,9 @@ define_projectable! {
         pub verbose: bool,
         //pub no_alloc: bool,
         iop: AtomicU16,
+        iop_chan: Channel,
         ap: AtomicU16,
+        ap_chan: Channel,
         ep_map: AtomicU64,
         queue: Taskqueue,
         task: Task,
@@ -332,7 +335,9 @@ impl RTKit {
             mbox,
             verbose: false,
             iop: AtomicU16::new(PwrState::Sleep as u16),
+            iop_chan: Channel::new(),
             ap: AtomicU16::new(PwrState::Sleep as u16),
+            ap_chan: Channel::new(),
             ep_map: AtomicU64::new(0),
             queue: Taskqueue::new(),
             task: Task::new(),
@@ -406,7 +411,7 @@ fn rtkit_set_iop(rtk: &RTKit, pwr_state: PwrState) -> Result<()> {
     rtk.send(msg)?;
 
     if rtk.iop.load(Ordering::Relaxed) != (pwr_state & 0xFF) {
-        if let Err(e) = tsleep(&rtk.iop, Some(PWAIT), c"ioppwr", 5 * hz()) {
+        if let Err(e) = tsleep(&rtk.iop_chan, Some(PWAIT), c"ioppwr", 5 * hz()) {
             let cur = rtk.iop.load(Ordering::Relaxed);
             device_println!(rtk.client, "ioppwr sleep failed with {e} iop is {cur:x?} instead of {pwr_state:x?}");
             if cur != (pwr_state & 0xFF) {
@@ -428,7 +433,7 @@ pub fn rtkit_set_ap(rtk: &RTKit, pwr_state: PwrState) -> Result<()> {
     rtk.send(msg)?;
 
     if rtk.ap.load(Ordering::Relaxed) != (pwr_state & 0xFF) {
-        tsleep(&rtk.ap, Some(PWAIT), c"appwr", 5 * hz())?;
+        tsleep(&rtk.ap_chan, Some(PWAIT), c"appwr", 5 * hz())?;
     }
     Ok(())
 }
@@ -459,11 +464,11 @@ fn rtkit_handle_mgmt(rtk: &RTKit, data0: u64) -> Result<()> {
         }
         MgmtRxMsg::IopPwrAck(pwr_state) => {
             rtk.iop.store(pwr_state, Ordering::Relaxed);
-            wakeup(&rtk.iop);
+            wakeup(&rtk.iop_chan);
         }
         MgmtRxMsg::ApPwrAck(pwr_state) => {
             rtk.ap.store(pwr_state, Ordering::Relaxed);
-            wakeup(&rtk.ap);
+            wakeup(&rtk.ap_chan);
         }
         MgmtRxMsg::EpMap { base, bitmap, last } => {
             let new_bits = u64::from(bitmap) << u64::from(base * 32);

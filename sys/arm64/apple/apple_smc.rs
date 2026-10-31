@@ -37,7 +37,7 @@ use kpi::device::{BusProbe, DeviceIf, Device, BusyDevice};
 use kpi::driver::Driver;
 use kpi::ffi::{SubClass, UninitPtr, Softc, Embeds, PinProject};
 use core::pin::Pin;
-use kpi::intr::ConfigHook;
+use kpi::intr::{Channel, ConfigHook};
 use kpi::ofw::XRef;
 use kpi::prelude::*;
 use kpi::sync::Checked;
@@ -83,6 +83,7 @@ define_projectable! {
         config_hook: ConfigHook,
         msgid: AtomicU8,
         data: AtomicU64,
+        data_chan: Channel,
     }
 }
 
@@ -129,6 +130,7 @@ impl DeviceIf for AppleSmcDriver {
             config_hook: ConfigHook::new(),
             msgid: AtomicU8::new(0),
             data: AtomicU64::new(0),
+            data_chan: Channel::new(),
         };
         let sc = uninit_sc.init(SubClass::new(smc_sc));
         sc.project().config_hook.init(start_config_hook, sc);
@@ -177,7 +179,7 @@ impl AppleSmcDriver {
         AppleSmcDriver::send_cmd(sc, SmcCmd::MsgInit, 0, 0)?;
         device_println!(dev, "waiting 5s for RTKit callback to respond");
         if sc.data.load(Ordering::Relaxed) == 0 {
-            let _ = tsleep(&sc.data, Some(PWAIT), c"apple,smc", 5 * hz());
+            let _ = tsleep(&sc.data_chan, Some(PWAIT), c"apple,smc", 5 * hz());
             if sc.data.load(Ordering::Relaxed) == 0 {
                 return Err(EWOULDBLOCK);
             }
@@ -232,7 +234,7 @@ impl AppleSmcDriver {
             return Ok(());
         }
         sc.data.store(data, Ordering::Relaxed);
-        wakeup(&sc.data);
+        wakeup(&sc.data_chan);
         Ok(())
     }
 

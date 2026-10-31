@@ -46,7 +46,8 @@ use kpi::bus::dma::{BusDmaMap, BusDmaMem, BusDmaTag};
 use kpi::bus::{Filter, Irq, Register, Resource, SysRes};
 use kpi::device::{BusProbe, DeviceIf, Device};
 use kpi::ffi::{ArrayCString, Ptr, UninitPtr, Softc, PinProject};
-use kpi::intr::ConfigHook;
+use kpi::intr::{Channel, ConfigHook};
+gs
 use kpi::ofw::{Node, XRef};
 use kpi::prelude::*;
 use kpi::sync::mtx::Mutex;
@@ -293,6 +294,7 @@ define_projectable! {
         seq: AtomicU8,
         // Last ack received on this iface
         ret: Mutex<Option<DockchannelCmdRet>>,
+        ret_chan: Channel,
         smc: OnceInit<XRef>,
         gpio: OnceInit<u32>,
     }
@@ -329,7 +331,9 @@ define_projectable! {
         rx_irq: Irq,
         tx_irq: Irq,
         rx_avail: AtomicBool,
+        rx_avail_chan: Channel,
         tx_avail: AtomicBool,
+        tx_avail_chan: Channel,
         queue: Taskqueue,
         comm: DockchannelHidIface,
         stm: DockchannelHidIface,
@@ -416,7 +420,9 @@ impl DeviceIf for DockchannelHidDriver {
             rx_irq,
             tx_irq,
             rx_avail: AtomicBool::new(true),
+            rx_avail_chan: Channel::new(),
             tx_avail: AtomicBool::new(true),
+            tx_avail_chan: Channel::new(),
             queue,
             comm: DockchannelHidIface::default(),
             stm: DockchannelHidIface::default(),
@@ -516,7 +522,7 @@ extern "C" fn dockchannel_hid_rx_filter(sc: &Softc<DockchannelHidSoftc>) -> Filt
     DockchannelDriver::mask_rx(sc.device());
     if !sc.rx_avail.load(Ordering::Relaxed) {
         sc.rx_avail.store(true, Ordering::Relaxed);
-        wakeup(&sc.rx_avail);
+        wakeup(&sc.rx_avail_chan);
 
         return FILTER_HANDLED;
     }
@@ -528,7 +534,7 @@ extern "C" fn dockchannel_hid_rx_filter(sc: &Softc<DockchannelHidSoftc>) -> Filt
 extern "C" fn dockchannel_hid_tx_filter(sc: &Softc<DockchannelHidSoftc>) -> Filter {
     DockchannelDriver::mask_tx(sc.device());
     sc.tx_avail.store(true, Ordering::Relaxed);
-    wakeup(&sc.tx_avail);
+    wakeup(&sc.tx_avail_chan);
     FILTER_HANDLED
 }
 
@@ -616,7 +622,7 @@ fn try_dockchannel_hid_task(sc: &Softc<DockchannelHidSoftc>) -> Result<()> {
 		    code: subhdr.retcode,
 		    seq: hdr.seq,
 	    });
-            wakeup(&sc.comm.ret);
+            wakeup(&sc.comm.ret_chan);
         } else if let Some(iface) = sc.stm.iface.try_get()
             && *iface == hdr.iface
         {
@@ -637,7 +643,7 @@ fn try_dockchannel_hid_task(sc: &Softc<DockchannelHidSoftc>) -> Result<()> {
                 &sc.stm.ret,
                 hdr.seq
             );
-            wakeup(&sc.stm.ret);
+            wakeup(&sc.stm.ret_chan);
         } else {
             panic!("got unexpected ack from iface {:x?}", hdr.iface);
         };
@@ -1191,7 +1197,7 @@ fn dockchannel_hid_wait_ack(
     // Sleep until we get the ack for wait_seq
     let mut guard = mtx_lock(&dcif.ret);
     while guard.map(|r| r.seq) != Some(wait_seq) {
-        let (g, res) = mtx_sleep(&dcif.ret, guard, PWAIT.0, c"dcack", hz());
+        let (g, res) = mtx_sleep(&dcif.ret_chan, guard, PWAIT.0, c"dcack", hz());
         guard = g;
         if res.is_err() {
             //device_println!(dev, "still waiting for ack of packet #{wait_seq:?}");
@@ -1296,7 +1302,7 @@ fn dockchannel_hid_read(sc: &Softc<DockchannelHidSoftc>, buf: &mut [u8]) -> Resu
             if !sc.rx_avail.load(Ordering::Relaxed) {
                 // Drop the lock before sleeping
                 mtx_unlock(regs);
-                let _ = tsleep(&sc.rx_avail, Some(PWAIT), c"dcrx", hz());
+                let _ = tsleep(&sc.rx_avail_chan, Some(PWAIT), c"dcrx", hz());
             }
             if sc.rx_avail.load(Ordering::Relaxed) {
                 //device_println!(sc.dev, "waited for read data");
@@ -1350,7 +1356,7 @@ fn dockchannel_hid_write(sc: &Softc<DockchannelHidSoftc>, buf: &[u8]) -> Result<
             if !sc.tx_avail.load(Ordering::Relaxed) {
                 // Drop the lock before sleeping
                 mtx_unlock(regs);
-                let _ = tsleep(&sc.tx_avail, Some(PWAIT), c"dctx", hz());
+                let _ = tsleep(&sc.tx_avail_chan, Some(PWAIT), c"dctx", hz());
             }
             if sc.tx_avail.load(Ordering::Relaxed) {
                 device_println!(sc.device(), "waited for write data");
