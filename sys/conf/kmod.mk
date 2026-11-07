@@ -226,6 +226,11 @@ SRCS+=${SRCS.${_o}}
 
 OBJS+=	${SRCS:N*.h:R:S/$/.o/g}
 
+.if defined(RUST_SRCS) && !empty(RUST_SRCS)
+.include "${SYSDIR}/rust/kmod.rust.mk"
+OBJS+=	${RUST_OBJS}
+.endif
+
 .if !defined(PROG)
 PROG=	${KMOD}.ko
 .endif
